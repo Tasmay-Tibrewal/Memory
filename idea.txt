@@ -1,0 +1,105 @@
+My idea is as follows:
+Base proposal->
+Objective: Transformers struggle with remembering knowledge and may often forget stuff. They do not possess an explicit memory layer, while there have been attempts to add to model memory, by saving information during inference, and adding it to context everytime we use the model, but this is more of an engineering and applied solution and does not involve any architectural level solutions.
+
+What I formulate is an architectural level change to increase the remembering capacity of transformers.
+
+I propose that we store a memory bank, which is learnable during train time, and initialised randomly, this memory bank is nothing just a set of latent tokens, which the model can refer to as context using attention mechanism. The model will have, after the self attention layer, a cross attention layer, with which it can refer to the stored tokens of the memory bank as if it was referring to some previous context. the prompt tokens will give the Q vectors, and the memory tokens will give the K and V vectors, through which we can extract the information stored in these memory tokens and use the information in the model. 
+
+suppose there are 10k memory tokens, initialised randomly, then they are referred to by prompt tokens (say 100), then these 100 prompt tokens will cross attend to the 10k memory to extract information (just like they do with previous context for self attention), and then the mlp layer will be there.
+
+other variation is first we have the self attention layer, then the mlp layer, then the memory cross attention layer, and finally another mlp layer, all of this will form a single transformer block, and it will be repeated N times.
+
+We can also have memory layers as part of some blocks, say first 5, or every 3rd, or last 5, instead of having it part of each layer.
+
+For the memory bank itself, we can have separate memory bank for each layer (say 1k tokens for 10 layers) or have a single memory bank of size 10k tokens, shared across all memory reference layers (this has the problem of each layer working in a slightly different manifold, but that problem will be solved because the Wk, Wv matrix, corresponding to the memory block, will not only learn the Query and Value generalisations, but also the manifold transformations, between memory layer manifold and corresponding reference layer's vector's manifold, since transformation of size dxd is sufficient to map any two manifolds of size d, and normally Wk.size=Wv.size = dxd as well, we can formulate: Wk*.size = Wv*.size = (Wk * Tk).size = (Wv * Tv).size = (dxd) x (dxd) = dxd = Wk.size = Wv.size, this proves that a dxd size matrix can learn both the layer specfic manifold (vector space) transformations, as well as the Key/Value Weight matrices.
+
+Thus it is obvious that having shared memory is an advantage, for each reference layer to have access to more information, just a potential downside for this can be that different layers need different information, for example first layers may need syntactic info, and middle layers may need raw knowledge, and if shared memory is used then both of them maybe forced to attend to the unnecessary tokens.
+
+Another issue is with scaling the memory bank size, for a size of M tokens, the computation for the cross attention layer is directly linked with O(M), which can cause a huge issue. We plan to tackle this by using chapters (just like textbooks), inspired from MoE.
+
+So we divide the memory bank say 100k tokens into 100 chapters, and at each reference layer, we train a router, to get us most important chapters relevant to the layer and the input information in the sequence, the router gives us chapter importance (just like expert importance in MoE), and we select the top-k chapters to attend to (say top 20 chapters, so we only attend to 20k tokens, saving compute costs), we can have this very sparse, since way lesser/way more specific amount of information is used to solve a query, than say the desired sparsity with experts.
+
+Since the memory bank is being learnt in train time, we hypothesize that it will contain much more compressed and efficient representations, than normal textual memory, or even other architectural implementations of storing memory vector wise.
+
+Another possible thing, to have an even larger memory block is to counter the storage size of the block (to manage it in the vram), for which we can use:
+a) quantized memory layers
+b) decompose the memory bank into smaller rank matrices, inspired by LORA, but with the limitation that each token now will be able to store lesser amount of information.
+
+Another addition to the idea is that after pre-training, there is generally some information loss, as we shift to the finetuning domain, but here we can prevent that by either freezing the memory bank (and maybe Wk, Wv) after pre-training, or having lower learning rates for the bank.
+
+For this we can train a small model (~100 M tokens, on say 5-10 Billion tokens for pretraining and about ~10-100M for IFT, and then see the performance difference across memory layer idea, and similar sized non-memory layer model).
+
+We are wanting to submit this idea in the ICLR Workshop: New Frontiers in Associative Memories (https://iclr.cc/virtual/2026/workshop/10000782).
+
+But considering the deadline of 14th February (roughly ~3 weeks) it maybe very tough to pretrain a model and instruction finetune it, and carry out enough experiments in time.
+
+Thus we also present another part to this idea, which is using this memory concept as adapters on to existing models, and comparing finetuning results with experiments against: Full-Finetuning, LORA, Mem-Adapters (Ours), and Mem-Adapters + LORA.
+
+For the Memory adapter thing i am proposing experiments like taking a model, say qwen 2.5 math 1.5b or qwen 2.5 1.5b, and train it on deepseek r1 traces from open-r1 math dataset (not sure if memory will have that much impact on reasoning, but still reasoning patterns and all could be stored) or something for more learning task say medical datasets/legal datasets, and then observe the performance difference under different adapters (like full sft, lora, mem-adapters, mem-adapters + LORA).
+
+for the mem-adapters as an adapter, we can have the adapters to selective layers only, or have quantised memory bank, or have low-rank memory tokens stored, here the Wq, Wk, Wv vectors could map to dxd (where mem bank is stored as (dxr) x (rxd)) or it could also map to dxr instead of dxd (then mem bank is just stored as r sized tokens: dxr). Note: all of this can also be used for normal idea (non-adapter from scratch model one).
+
+One Issue with Chapters routing (identified by us in the current codebase till now):
+Currently the Q size is: B x num_heads x S x D and K size is: B x num_heads x Mem_tokens_routed x D; here Mem_tokens routed is the size of the total number of memory bank tokens selected for referencing (number of chapters * number of memory tokens per chapter); B is batch size, S is sequence length and D is head dimension (embedding dimension / number of heads).
+
+Here the attention is calculated as: QK^T; where K^T, transposes the last two dimensions of the K vectors making it compatible for mat mul.
+
+For matmul, in pytorch a requirement is that other than the last 2 dimensions, the rest of the dimensions should be the same (i.e. B and num_heads), and the second last dimension of the second one should be equal to the last dimension of the first one.
+
+Now with the above Q and K formulation the issue is that we have only one routing for the entire sequence (ideally in MoE the routing happens token wise to the MLP experts), one routing because B x routed token size is the size of K matrix, for token-wise routing the size of K matrix would be B x S x routed token size (routed token size = Mem_tokens_routed x d = Mem_tokens_routed x num_heads x D = num_heads x Mem_tokens_routed x D; here d is the embedding dimension), but here the token routing is being done once for the whole sequence (the average of hidden states is taken and then routing is done, then for generation routing can be done per token). But this is not ideal, we ideally want token wise routing to the chapters, to enable that i formulated:
+
+Q -> B x num_heads x S x D (transpose 1 and 2)
+     => B x S x num_heads x D (view 0 and 1 together)
+     => (B * S) x  num_heads x D (expand 1 dim)
+     => (B * S) x  num_heads x D x 1 (transpose 2 and 3)
+     => (B * S) x  num_heads x 1 x D
+
+K -> (B * S) x num_heads x Mem_tokens_routed x D
+
+now Q and K^T are compatible for matmul. and after that we will get result of size = (B * S) x num_heads x 1 x Mem_tokens_routed which we can view as B x S x num_heads x 1 x Mem_tokens_routed, where dimension 1 and 3 can be transposed to: B x num_heads x S x Mem_tokens_routed, which is same as the earlier matmul result and using which we can compute softmax, mutliply with value vectors after another same transformation process, and then convert those results back in form B x S x num_heads x D, to be added to the embedding vector X.
+
+But now the issue arises:
+size of K in memory for practical terms ->
+B = 250
+S = 10,000
+num_heads = 32
+D = 128
+Mem_tokens_routed = 16,000
+
+so size of K ~= 150 TB, which is too much to store in gpu memory, and doing it iteratively would break batch-wise efficiency.
+
+There is a potential solution to this, where we implement a custom mat mul CUDA kernel and there instead of loading (B * S) x num_heads x Mem_tokens_routed x D in K, we load num_unique_chapters x num_heads x Mem_tokens_per_chapter x D in K. this will prevent most of the issues since for the previous case B*S*num_chapters_routed in itself equalled to 40 Million (assuming 1000 chapters each of size 1000 tokens, total of 1 million tokens in the memory bank), whereas here we can have at most of the whole memory bank loaded in memory, which will have a size of ~4GB at maximum (assuming 1 million tokens of size 4096 each).
+
+This custom matmul CUDA kernel will have K with different prefix dimension size than the Query, and the mat mul will be handled not by directly multiplying the different dimension size with each other, but the matrix K will have references, that each of its row is to be used by which all query vectors, and during the matmul process the key matrix's same row will be used by multiple query inputs; this will improve efficiency because instead of loading 40 million chapters we only load num unique chapters (max 1000) [reducing memory by about ~40k times], and it will use these 1000 chapters to perform the whole multiplication thing by referencing one chapter to multiple query instead of loading one chapter multiple times for all the query.
+
+This thus will have a max storage requirement of ~4gb for the chapters and ~40 million references ~40MB additional storage (negligible impact).
+
+this may slow down the computation a little from normal batching (the number of flops required is almost same, other than referencing, but the parallelisation takes a hit, thus affecting performance), but it is worth saving the memory costs, given there can be (not sure whether but assuming there can be) an efficient enough implementation for such mat-mul kernel.
+
+Note: Implementing this cuda kernel is a challenge in itself, which will require significant CUDA expertise, which we lack and thus we will go for the sequence level routing variant only (if we are doing routing at all), atleast for now, given the limited time as well, and maybe for further extensions to the work we can try implementing this idea.
+
+-------------------------------------------------------------------
+
+Now this was the memory knowledge part of the idea, we also have the "dynamic memory update" during inference inference time (or test time) idea, but this is mostly for later and probably could not be managed in our workshop due to less time left.
+
+Here, in this idea we hypothesize that we will add a context bank in the memory bank, to store memory during inferencing (this is not only long-conversation memory, but memory to be retained across conversations, just like humans do).
+
+The idea is to use a VAE like auto encoder to compress the input prompt tokens (say 10k to 100) and then concat this into the context limit, untill the max limit (say 100k tokens is hit). Now to refer to this context bank we cannot (should not) attend to all tokens (specially if max limit is high say 1M), and since this is inference time, we cannot also train a router. So what we do instead is we divide the context bank into clusters (k-means/hierarchial), and we select top-k clusters, by dot products with our input query vector (this acts as the router) against the cluster centers, and then we do attention only on members of top-k clusters (to save compute).
+
+For VAE compression: we train a VAE to compress and reconstruct concatenated last layer | first layer embeddings. last layer because information is mixed till then, and first layer to retain the raw embeddings' semantic value, so in a way the VAE will learn to compress information effectively. We can also train a time series VAE model to compress information.
+
+Now what if the max token limit is exhausted and we cannot concat more? suppose we want to concat 100 tokens more, then what we do is we take 100 pairs of tokens which lie closest to each other, and add them, now instead of 200, we have a new set of 100 tokens (result of addition), thus we have space to add the new 100 tokens now.
+
+Note: Addition principle is inspired from RAG, where in a chunk multiple embeddings (hundreds/thousands) are added together/averaged together, and despite of our intuition of potential information loss (which does happen), most of the information is preserved for semantic matching, this is further enhanced by us merging closeby vectors only (to ensure lesser information loss).
+
+Now, for this dynamic memory conservation idea, we can also instead of forming closest pairs distance wise only, we can also account for factors like importance of a vector (how many times it has been referenced and avg. importance per reference; importance per reference is how much it contributed in softmax) and also the age of vector, newer information would be stored longer (maybe for recency requirements, and also because it had fewer chances to be referred, thus giving benefit of doubt towards importance. note that age is a measure of how many times the model has been run (has its context bank updated) after training, one run is one prompt into the model, that is when the update happens). So we can create some function to dynamically weigh recency, information loss and importance, while combining vectors (equivalent to how humans forget information).
+
+Also note that we keep memory bank and context bank seperate to ensure the important information during training is not lost when inferencing is performed.
+
+The use of context bank is for long-context tasks (currently models go on for upto ~400k tokens effectively before losing sense, techniques like context compression and imp. memory documenting works, but still would run out if we want to run agents autonomously for hours and days, so such long context bank will come in handy for a much longer time span retention, and much more efficient, precise representation). This will be also useful in creating personal agents (model can retain information about me across many many chats, and since this is an architectural solution the model will remember small things clearly as well, against today's used methods of memory in chatgpt like systems, where they just store text from a tool use, and feed in important pieces of text), or updating models quickly on recent news, or important events, without any new training. 
+
+Also note that all of low-rank, quantisation, other memory bank ideas can also be applied to context bank.
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
