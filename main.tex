@@ -133,6 +133,8 @@ A key challenge in memory-augmented transformers is scaling the memory bank size
 
 We address this challenge by introducing chapter-based routing, inspired by Mixture-of-Experts (MoE) architectures \citep{shazeer2017moe, fedus2022switch}. Rather than attending to all memory tokens, we partition the memory bank into ``chapters'' and use a router to select the most relevant chapters for each input.
 
+Notably, memory chapter routing can achieve much higher sparsity than typical MoE expert routing. While MoE systems distribute computational operations (MLP transformations) across experts and must maintain reasonable coverage for diverse token types, memory queries are inherently more specific: a given query typically requires access to a small, targeted subset of knowledge rather than diverse computational pathways. This allows for sparser routing (e.g., selecting 10-20 out of 1000 chapters) without degrading performance, as queries naturally align with specific memory regions rather than requiring broad computational diversity.
+
 \subsection{Chapter Organization}
 
 Let the memory bank be partitioned into $C$ chapters, each containing $N_c = N_m / C$ tokens:
@@ -155,23 +157,43 @@ We select the top-$k$ chapters with highest scores and perform cross-attention o
 
 Ideally, routing would be performed at the token level, allowing different query tokens to attend to different memory chapters. This mirrors the token-level expert assignment in standard MoE. However, token-level routing presents significant memory challenges.
 
-Consider the tensor dimensions for token-level memory cross-attention:
+Consider the tensor dimensions for standard cross-attention with sequence-level routing:
 \begin{align}
 \mathbf{Q} &\in \mathbb{R}^{B \times H \times L \times D} \\
-\mathbf{K} &\in \mathbb{R}^{B \times L \times H \times N_{\text{routed}} \times D}
+\mathbf{K} &\in \mathbb{R}^{B \times H \times N_{\text{routed}} \times D}
 \end{align}
-where $B$ is batch size, $H$ is number of heads, $L$ is sequence length, $D$ is head dimension ($D=d_k$), and $N_{\text{routed}}$ is the number of routed memory tokens per query.
+where $B$ is batch size, $H$ is number of heads, $L$ is sequence length, $D$ is head dimension ($D=d_k$), and $N_{\text{routed}}$ is the number of routed memory tokens.
 
-For practical values ($B = 250$, $L = 10,000$, $H = 32$, $D = 128$, $N_{\text{routed}} = 16,000$), the key tensor would require approximately 300 TB of memory, which is clearly infeasible.
+For token-level routing, where each token can route to different chapters, the key tensor must expand to accommodate per-token routing:
+\begin{align}
+\mathbf{K}_{\text{token-level}} \in \mathbb{R}^{(B \times L) \times H \times N_{\text{routed}} \times D}
+\end{align}
+
+To enable this with standard matrix multiplication, we would need to reshape the query tensor to match. The reshaping sequence would be:
+\begin{align}
+\mathbf{Q} &\in \mathbb{R}^{B \times H \times L \times D} \nonumber \\
+&\xrightarrow{\text{transpose}(1,2)} \mathbb{R}^{B \times L \times H \times D} \nonumber \\
+&\xrightarrow{\text{view}(0,1)} \mathbb{R}^{(B \times L) \times H \times D} \nonumber \\
+&\xrightarrow{\text{unsqueeze}(3)} \mathbb{R}^{(B \times L) \times H \times D \times 1} \nonumber \\
+&\xrightarrow{\text{transpose}(2,3)} \mathbb{R}^{(B \times L) \times H \times 1 \times D}
+\end{align}
+
+Now $\mathbf{Q}$ and $\mathbf{K}^\top$ would be compatible for matrix multiplication, producing attention scores of shape $(B \times L) \times H \times 1 \times N_{\text{routed}}$, which can be reshaped back to $B \times L \times H \times N_{\text{routed}}$ for the attention computation.
+
+However, this approach is infeasible due to memory requirements. For practical values ($B = 250$, $L = 10,000$, $H = 32$, $D = 128$, $N_{\text{routed}} = 16,000$), the key tensor would require approximately 300 TB of memory, which is clearly prohibitive.
 
 We identify a potential solution through custom CUDA kernels. Rather than materializing the full key tensor, a custom matrix multiplication kernel could:
 \begin{enumerate}[noitemsep]
-    \item Store only the unique chapters in memory: $\mathbf{K}_{\text{unique}} \in \mathbb{R}^{C_{\text{unique}} \times H \times N_c \times D}$
-    \item Maintain a routing index that maps each query token to its assigned chapters
-    \item Perform the attention computation by referencing the same chapter data for multiple queries
+    \item Store only the unique chapters in memory: $\mathbf{K}_{\text{unique}} \in \mathbb{R}^{C_{\text{unique}} \times H \times N_c \times D}$ where $C_{\text{unique}}$ is the number of unique chapters and $N_c$ is tokens per chapter
+    \item Maintain a routing index mapping each query token to its assigned chapters (approximately 160 MB for 40 million references, approximately negligible)
+    \item Perform attention by referencing the same chapter data for multiple queries, avoiding redundant storage
 \end{enumerate}
 
-This would reduce memory from $O(B \cdot L \cdot N_{\text{routed}})$ to $O(C_{\text{unique}} \cdot N_c)$, a reduction of approximately $40,000\times$ for typical hyperparameters. However, implementing this custom kernel requires significant CUDA expertise and is beyond the scope of our initial experiments. We leave token-level routing as future work and proceed with sequence-level routing for our workshop submission.
+This would reduce memory from $O(B \cdot L \cdot N_{\text{routed}})$ to $O(C_{\text{unique}} \cdot N_c)$ plus routing indices. For a memory bank of 1 million tokens divided into 1000 chapters of 1000 tokens each, this yields approximately 8 GB for the chapters, a reduction of approximately 40,000$\times$ compared to the na\"ive approach. However, implementing this custom kernel requires significant CUDA expertise and careful optimization to maintain parallelization efficiency.
+
+\textbf{Token-Level Routing During Generation:} While token-level routing is infeasible during prefill (processing the entire input sequence) and training due to memory constraints, it becomes viable during autoregressive generation. During generation, we process one token at a time (sequence length $L = 1$), which naturally eliminates the multiplicative $L$ factor in memory requirements. In this regime, token-level routing can be performed efficiently, though it requires storing the routed memory tokens in VRAM alongside the KV cache. For example, routing to 50,000 memory tokens per generation step would add approximately 200 MB per sample to VRAM (at full precision for a 4096-dimensional model). This overhead could be further reduced by the custom CUDA kernel approach described above, limiting total memory to the size of the memory bank itself rather than per-token copies.
+
+Given these challenges, we leave token-level routing during prefill as future work and proceed with sequence-level routing for our workshop submission, while noting that token-level routing during generation remains a practical option.
 
 \section{Memory Adapters for Efficient Fine-Tuning}
 
@@ -208,13 +230,30 @@ To reduce the parameter count and memory footprint of memory adapters, we propos
 \end{align}
 where $\mathbf{A} \in \mathbb{R}^{N_m \times r}$ and $\mathbf{B} \in \mathbb{R}^{d \times r}$ with $r \ll \min(N_m, d)$.
 
-This reduces the parameter count from $N_m \cdot d$ to $(N_m + d) \cdot r$. However, this comes at the cost of reduced expressiveness, as each memory token can now store less information.
+This reduces the parameter count from $N_m \cdot d$ to $(N_m + d) \cdot r$. However, this comes at the cost of reduced expressiveness, as each memory token can now store less information. This technique is particularly valuable for the memory adapter approach, as it dramatically reduces the number of trainable parameters that need to be added to a frozen pretrained model, making memory adapters more parameter-efficient and competitive with methods like LoRA.
 
 \textbf{Low-Rank Projections:} The projection matrices $\mathbf{W}_Q, \mathbf{W}_K, \mathbf{W}_V$ can also be factorized:
 \begin{align}
 \mathbf{W}_Q = \mathbf{W}_Q^{\text{down}} \mathbf{W}_Q^{\text{up}}
 \end{align}
-where $\mathbf{W}_Q^{\text{down}} \in \mathbb{R}^{d \times r}$ and $\mathbf{W}_Q^{\text{up}} \in \mathbb{R}^{r \times d_k}$.
+where $\mathbf{W}_Q^{\text{down}} \in \mathbb{R}^{d \times r}$ and $\mathbf{W}_Q^{\text{up}} \in \mathbb{R}^{r \times d_k}$. This projection factorization further reduces the adapter parameter count and can be combined with memory bank factorization for maximum parameter efficiency.
+
+\textbf{Low-Rank Dimension Reduction:} An alternative approach is to store the memory bank directly in reduced dimensions $\mathbf{M} \in \mathbb{R}^{N_m \times r}$ where $r \ll d$ (e.g., $r = 512$ instead of $d = 4096$). The projection matrices then map between the full model dimension and the reduced memory dimension:
+\begin{align}
+\mathbf{W}_Q &\in \mathbb{R}^{d \times r} \quad \text{(maps queries from } d \text{ to } r \text{)} \\
+\mathbf{W}_K, \mathbf{W}_V &\in \mathbb{R}^{r \times r} \quad \text{(operate in reduced space)} \\
+\mathbf{W}_O &\in \mathbb{R}^{r \times d} \quad \text{(maps outputs back to } d \text{)}
+\end{align}
+
+The cross-attention computation becomes:
+\begin{align}
+\mathbf{Q}_r &= \mathbf{H} \mathbf{W}_Q \in \mathbb{R}^{L \times r} \\
+\mathbf{K}_r &= \mathbf{M} \mathbf{W}_K \in \mathbb{R}^{N_m \times r} \\
+\mathbf{V}_r &= \mathbf{M} \mathbf{W}_V \in \mathbb{R}^{N_m \times r} \\
+\text{MemAttn}_r(\mathbf{H}, \mathbf{M}) &= \text{softmax}\left(\frac{\mathbf{Q}_r\mathbf{K}_r^\top}{\sqrt{r}}\right) \mathbf{V}_r \mathbf{W}_O
+\end{align}
+
+This approach reduces memory bank storage by a factor of $d/r$ (e.g., 8$\times$ reduction for $r=512$, $d=4096$) while performing all attention computations in the lower-dimensional space. The output projection $\mathbf{W}_O$ maps the result back to the full model dimension for integration with subsequent layers. This trades expressiveness for efficiency: each memory token stores less information, but the dramatic reduction in storage enables much larger memory banks within the same memory budget. For memory adapters specifically, this dimension reduction approach is especially advantageous: it allows deploying memory adapters with substantially larger memory banks (potentially 100k+ tokens) on resource-constrained hardware, making the adapter approach practical for real-world fine-tuning scenarios where VRAM is limited.
 
 \subsection{Proposed Experiments}
 
@@ -280,10 +319,14 @@ The memory mechanisms described thus far are static: the memory bank is fixed af
 
 We propose extending the architecture with a dynamic ``context bank'' that is updated during inference, enabling:
 \begin{itemize}[noitemsep]
-    \item Long-context retention beyond the attention window
+    \item Long-context retention beyond the attention window (current models effectively handle up to approximately 400,000 tokens before losing coherence; existing techniques like context compression and selective memory documentation mitigate this but still face limitations for autonomous agents running for hours or days)
     \item Cross-conversation memory (remembering information across sessions)
     \item Personal agents that accumulate knowledge about users over time
+    \item Autonomous agents operating continuously over extended periods (hours to days) with efficient, precise long-term memory representation
+    \item Rapid knowledge updates on recent news or important events without retraining
 \end{itemize}
+
+This architectural approach offers several advantages over existing memory systems. Unlike current ChatGPT-like memory implementations that rely on tool-based text storage and selective text retrieval, our context bank operates at the architectural level with learned latent representations. This enables the model to remember fine-grained details more clearly and precisely, as the memory is embedded in the model's representational space rather than stored as unstructured text that must be re-encoded at each use.
 
 \subsection{Context Bank Architecture}
 
@@ -297,6 +340,8 @@ where $\mathbf{z} \in \mathbb{R}^{L_c \times d}$ with $L_c \ll L$ (e.g., compres
 
 The encoder is trained to reconstruct the concatenated embeddings, ensuring that both raw semantic information (from early layers) and processed information (from late layers) are preserved.
 
+\textbf{Alternative: Time Series VAE:} Instead of treating the token sequence as independent embeddings, we can train a time series VAE that explicitly models temporal dependencies in the sequence. This approach captures the sequential structure and dependencies between tokens, potentially enabling better compression of coherent spans of text (e.g., complete sentences or paragraphs) by leveraging their temporal structure. The time series VAE would use recurrent or convolutional encoders to process the sequence temporally before compressing it to the latent representation.
+
 \textbf{Storage:} Compressed representations $\mathbf{z}$ are appended to the context bank until a maximum capacity $N_{ct}^{\text{max}}$ is reached.
 
 \textbf{Retrieval:} Since attending to a large context bank (e.g., 1M tokens) is computationally prohibitive, we use clustering-based retrieval (clusters are analogous to chapters here, but since we are adding tokens in test-time, we cannot have a trained router for retrieval and thus we cluster similar tokens together for retrieval), similar to approaches in efficient attention literature \citep{retrieval2024}:
@@ -307,6 +352,15 @@ The encoder is trained to reconstruct the concatenated embeddings, ensuring that
 \end{enumerate}
 
 This approach requires no training at inference time, as cluster selection is based on embedding similarity rather than learned routing.
+
+\textbf{Scalable Clustering Methods:} For very large context banks, standard k-means may become computationally expensive. We can employ more scalable techniques:
+\begin{itemize}[noitemsep]
+    \item \textbf{Hierarchical clustering:} Build a tree structure enabling logarithmic-time search for relevant clusters
+    \item \textbf{Online k-means:} Update cluster centroids incrementally as new tokens are added, avoiding full re-clustering
+    \item \textbf{IVF-PQ (Inverted File with Product Quantization):} Use inverted index structures with quantized representations for memory-efficient storage and fast approximate nearest neighbor search
+\end{itemize}
+
+These methods enable efficient addition of new tokens to the context bank and fast retrieval even as the bank scales to millions of tokens.
 
 \subsection{Memory Consolidation}
 
@@ -323,7 +377,7 @@ This is inspired by RAG systems where chunk embeddings are averaged without cata
 \begin{itemize}[noitemsep]
     \item \textbf{Reference frequency:} How often a vector has been attended to
     \item \textbf{Attention importance:} Average softmax weight when attended
-    \item \textbf{Recency:} Newer information is retained longer (benefit of doubt for importance)
+    \item \textbf{Recency (Age):} Newer information is retained longer (benefit of doubt for importance). Age is measured as the number of inference runs (context bank updates) since the vector was added, where one run corresponds to processing one prompt through the model. This provides a discrete timestep measure of how long information has been stored.
 \end{itemize}
 
 A scoring function could weight these factors:
@@ -331,7 +385,7 @@ A scoring function could weight these factors:
 \text{importance}(\mathbf{c}) = \alpha \cdot \text{freq}(\mathbf{c}) + \beta \cdot \text{avg\_attn}(\mathbf{c}) + \gamma \cdot \text{recency}(\mathbf{c})
 \end{align}
 
-Vectors with low importance scores are prioritized for merging.
+where recency is inversely related to age (recent tokens have low age values). Vectors with low importance scores are prioritized for merging.
 
 \textbf{Note:} All compression techniques (low-rank, quantization) described for the memory bank can also be applied to the context bank.
 
@@ -341,11 +395,11 @@ Our proposal builds upon and differs from several lines of prior research. We pr
 
 \textbf{Associative Memory and Hopfield Networks:} Classical Hopfield networks \citep{hopfield1982} provided the foundational framework for associative memory in neural networks. Ramsauer et al. \citep{ramsauer2020hopfield} established that the attention mechanism in transformers is mathematically equivalent to the update rule of Modern Hopfield Networks, providing a theoretical grounding for viewing transformers as associative memory systems. Our work extends this view by adding an explicit, learnable memory bank that expands the set of patterns available for retrieval.
 
-\textbf{Cross-Attention Memory with Dynamic Updates:} Several works have explored cross-attention to memory banks. Memformer \citep{wu2020memformer} introduced cross-attention between layer activations and external memory banks---using the same Q/K/V formulation as our approach (input provides Q, memory provides K,V)---but with gated updates that modify memory during the forward pass. Most recently, LM2 (Large Memory Models) \citep{kang2025lm2} proposed an auxiliary memory module with cross-attention and LSTM-style gating (input, output, forget gates) for dynamic memory updates. Our key distinction is that our memory bank is \textbf{static after training}: it stores persistent learned knowledge rather than working memory that evolves during inference. This design choice targets knowledge retention rather than context tracking.
+\textbf{Cross-Attention Memory with Dynamic Updates:} Several works have explored cross-attention to memory banks. Memformer \citep{wu2020memformer} introduced cross-attention between layer activations and external memory banks using the same Q/K/V formulation as our approach (input provides Q, memory provides K,V) but with gated updates that modify memory during the forward pass. Most recently, LM2 (Large Memory Models) \citep{kang2025lm2} proposed an auxiliary memory module with cross-attention and LSTM-style gating (input, output, forget gates) for dynamic memory updates. Stateful Memory-Augmented Transformers \citep{wu2022stateful} apply similar ideas to dialogue modeling with recurrent memory states. Our key distinction is that our memory bank is \textbf{static after training}: it stores persistent learned knowledge rather than working memory that evolves during inference. This design choice targets knowledge retention rather than context tracking.
 
 \textbf{Conditional Memory and Hash-Based Lookup:} DeepSeek's Engram \citep{deepseek2026engram} introduces conditional memory as a complementary sparsity axis to MoE, using hash-based O(1) lookup for static token patterns (common phrases, entities). While Engram and our approach share the goal of separating memory from computation, the mechanisms differ fundamentally: Engram uses deterministic hash addressing for specific n-grams, while our attention-based approach enables soft retrieval with learned content-based addressing. Our chapter routing provides semantic organization, whereas Engram's hashing is pattern-based.
 
-\textbf{Product Key Memory and Memory Layers:} Lample et al. \citep{lample2019pkm} introduced Product Key Memory layers that enable efficient access to very large memory banks using product key addressing. More recently, Memory Layers at Scale \citep{berges2025memorylayers} demonstrated that trainable key-value memory layers can be scaled effectively and show strong factual gains. These techniques use sparse top-k retrieval rather than attention and could be integrated with our chapter-based routing for further scalability.
+\textbf{Product Key Memory and Memory Layers:} Lample et al. \citep{lample2019pkm} introduced Product Key Memory layers that enable efficient access to very large memory banks using product key addressing. More recently, Memory Layers at Scale \citep{berges2025memorylayers} demonstrated that trainable key-value memory layers can be scaled effectively and show strong factual gains. EMAT \citep{wu2022emat} achieves efficient memory-augmented transformers using Maximum Inner Product Search (MIPS) for fast memory querying. MATTER \citep{lee2024matter} extends this to heterogeneous knowledge sources (paragraphs and QA pairs) with fixed-length neural memories. These techniques use sparse top-k retrieval rather than attention and could be integrated with our chapter-based routing for further scalability.
 
 \textbf{Memory Tokens and Global Memory:} Memory Transformer \citep{burtsev2020memorytransformer} and GMAT \citep{gupta2020gmat} add special memory tokens that participate in self-attention (not cross-attention). ETC \citep{ainslie2020etc} uses global tokens for encoding long and structured inputs. These systems demonstrate that memory-like token mechanisms help with long-context reasoning, but memory tokens are typically dynamic per sequence and use self-attention rather than cross-attention to a separate persistent store.
 
@@ -353,11 +407,11 @@ Our proposal builds upon and differs from several lines of prior research. We pr
 
 \textbf{Non-Parametric Memory:} Memorizing Transformer \citep{wu2022memorizing} stores actual KV pairs from past forward passes and retrieves via kNN lookup. kNN-LM \citep{khandelwal2019knnlm} retrieves from a datastore of context-target pairs. These non-parametric approaches cache actual activations rather than learning compressed representations. Our memory is learned end-to-end, potentially storing more efficient representations.
 
-\textbf{Entity and Knowledge-Specific Memory:} Entities as Experts \citep{fevry2020entities} stores entity embeddings in dedicated memory slots with sparse access. Mention Memory \citep{dearmas2021mention} stores 150M entity mention embeddings accessed via attention. QAMAT \citep{chen2023qamat} uses dedicated memory for question-answering. These demonstrate the value of explicit memory structures but are task/entity-specific, whereas our approach targets general learned knowledge.
+\textbf{Entity and Knowledge-Specific Memory:} Entities as Experts \citep{fevry2020entities} stores entity embeddings in dedicated memory slots with sparse access. Facts as Experts \citep{verga2020facts} similarly uses sparse memory over symbolic knowledge with interpretable fact representations. Mention Memory \citep{dearmas2021mention} stores 150M entity mention embeddings accessed via attention. QAMAT \citep{chen2023qamat} uses dedicated memory for question-answering. Knowledge-Infused Self Attention Transformers \citep{roy2023knowledge} systematically infuse external knowledge graphs into transformer components. Relational Memory-Augmented Language Models \citep{liu2022relational} store relation triples rather than token pairs, enabling causal interventions. These demonstrate the value of explicit memory structures but are often task/entity-specific, whereas our approach targets general learned knowledge.
 
-\textbf{Long-Context Transformers:} Transformer-XL \citep{dai2019txl} introduced segment-level recurrence. Compressive Transformers \citep{rae2020compressive} compress past activations. Infini-attention \citep{munkhdalai2024infini} proposed compressive memory within attention. Augmenting Language Models with Long-Term Memory \citep{wang2023longtermemory} adds persistent memory for extended conversations. These focus on extending effective context length, while we focus on persistent learned knowledge.
+\textbf{Long-Context Transformers:} Transformer-XL \citep{dai2019txl} introduced segment-level recurrence. Compressive Transformers \citep{rae2020compressive} compress past activations. Infini-attention \citep{munkhdalai2024infini} proposed compressive memory within attention. Cached Transformers \citep{zhang2023cached} use gated recurrent cached attention with differentiable memory. HMT \citep{he2024hmt} employs hierarchical memory transformers for efficient long-context processing with memory recall mechanisms. Augmenting Language Models with Long-Term Memory \citep{wang2023longtermemory} adds persistent memory for extended conversations. These focus on extending effective context length, while we focus on persistent learned knowledge.
 
-\textbf{Test-Time Memory and Adaptation:} Titans \citep{behrouz2025titans} learns what to memorize at test time with dynamic updates. Larimar \citep{liu2024larimar} provides episodic memory control for LLMs. NAMMs \citep{namm2025} use evolutionary optimization for memory decisions. These approaches update memory during inference; our memory is fixed after training, providing stable knowledge without runtime overhead.
+\textbf{Test-Time Memory and Adaptation:} Titans \citep{behrouz2025titans} learns what to memorize at test time with dynamic updates. Larimar \citep{liu2024larimar} provides episodic memory control for LLMs. NAMMs \citep{namm2025} use evolutionary optimization for memory decisions. MAC \citep{tack2024mac} enables online adaptation with a memory of amortized contexts using meta-learning. Extended Mind Transformers \citep{klett2024extended} use kNN-based retrieval to attend to external pre-computed memories. These approaches update memory during inference; our memory is fixed after training, providing stable knowledge without runtime overhead.
 
 \textbf{Cross-Attention Architectures:} Perceiver \citep{jaegle2021perceiver} and Perceiver IO \citep{jaegle2021perceiverio} use cross-attention to a latent array as a computational bottleneck. Flamingo \citep{alayrac2022flamingo} uses cross-attention to inject visual information into frozen language models. Our memory cross-attention is conceptually similar but targets persistent knowledge storage rather than multimodal fusion or computational bottlenecks.
 
@@ -365,13 +419,13 @@ Our proposal builds upon and differs from several lines of prior research. We pr
 
 \textbf{Explicit Memory Systems:} Memory3 \citep{yang2024memory3} models explicit memory as retrievable model parameters. Token Turing Machines \citep{hawthorne2024tokenturing} use memory tapes with read/write operations. These represent alternative memory paradigms; our approach uses standard attention mechanics for compatibility with existing transformer infrastructure.
 
-\textbf{Context Compression:} Activation Beacon \citep{activationbeacon2024} and IC-Former \citep{icformer2024} compress long contexts into shorter representations. Our context bank proposal incorporates similar compression ideas but maintains a persistent store across inference sessions with importance-weighted consolidation.
+\textbf{Context Compression:} Activation Beacon \citep{activationbeacon2024}, IC-Former \citep{icformer2024}, and In-Context Autoencoder (ICAE) \citep{icae2023} compress long contexts into shorter representations. Our context bank proposal incorporates similar compression ideas but maintains a persistent store across inference sessions with importance-weighted consolidation, combining VAE-based compression with clustering-based retrieval and memory consolidation mechanisms.
 
 \textbf{Retrieval-Augmented Methods:} RAG \citep{lewis2020rag} and RETRO \citep{borgeaud2021retro} augment models with retrieved text from external corpora. These store memory as text requiring re-encoding; our approach stores learned latent representations that may be more compact and task-appropriate.
 
-\textbf{Routing and Sparse Attention:} Routing Transformer \citep{roy2021routing} uses clustering for content-based sparse attention. MoE architectures \citep{shazeer2017moe, fedus2022switch} use token-wise routing to experts. Our chapter routing applies MoE-style routing to memory chapters---a novel application that enables scaling memory banks while maintaining attention-based access.
+\textbf{Routing and Sparse Attention:} Routing Transformer \citep{roy2021routing} uses clustering for content-based sparse attention. MoE architectures \citep{shazeer2017moe, fedus2022switch, zhou2022moe} use token-wise routing to experts, with variants like expert choice routing providing alternative routing mechanisms. Our chapter routing applies MoE-style routing to memory chapters, a novel application that enables scaling memory banks while maintaining attention-based access.
 
-\textbf{Parameter-Efficient Fine-Tuning:} LoRA \citep{hu2021lora} and QLoRA \citep{dettmers2023qlora} enable efficient adaptation through low-rank updates. Prefix-tuning \citep{li2021prefix} and P-Tuning v2 \citep{liu2021ptuningv2} add learned continuous prompts attended via self-attention, which is conceptually close to learnable tokens. Our memory adapters differ in using cross-attention to a separate memory store with explicit capacity scaling via chapters.
+\textbf{Parameter-Efficient Fine-Tuning:} LoRA \citep{hu2021lora} and QLoRA \citep{dettmers2023qlora} enable efficient adaptation through low-rank updates. Prefix-tuning \citep{li2021prefix} and P-Tuning v2 \citep{liu2021ptuningv2} add learned continuous prompts attended via self-attention, which is conceptually close to learnable tokens. SPARTAN \citep{deshpande2022spartan} uses sparse hierarchical memory for parameter-efficient adaptation. TRIME \citep{zhong2022trime} trains language models with memory augmentation using in-batch examples as accessible memory. Our memory adapters differ in using cross-attention to a separate memory store with explicit capacity scaling via chapters.
 
 \subsection{Summary of Distinctions}
 
@@ -533,29 +587,23 @@ Liu, D., et al. (2024).
 \newblock \emph{arXiv preprint arXiv:2409.10516}.
 \newblock \url{https://arxiv.org/abs/2409.10516}
 
-\bibitem[Zhou et al., 2022]{zhou2022moe}
-Zhou, Y., Lei, T., Liu, H., Du, N., Huang, Y., Zhao, V., Dai, A., Chen, Z., Le, Q., and Laudon, J. (2022).
-\newblock Mixture-of-experts with expert choice routing.
-\newblock In \emph{Advances in Neural Information Processing Systems}, volume 35.
-\newblock \url{https://arxiv.org/abs/2202.09368}
-
-\bibitem[ICAE, 2023]{icae2023}
-Ge, T., et al. (2023).
-\newblock In-context autoencoder for context compression in a large language model.
-\newblock \emph{arXiv preprint arXiv:2307.06945}.
-\newblock \url{https://arxiv.org/abs/2307.06945}
-
-\bibitem[He et al., 2024]{hmt2024}
-He, Z., Cao, Y., Qin, Z., Prakriya, N., Sun, Y., and Cong, J. (2024).
-\newblock HMT: Hierarchical memory transformer for efficient long context language processing.
-\newblock \emph{arXiv preprint arXiv:2405.06067}.
-\newblock \url{https://arxiv.org/abs/2405.06067}
-
 \bibitem[Dai et al., 2019]{dai2019txl}
 Dai, Z., Yang, Z., Yang, Y., Carbonell, J., Le, Q., and Salakhutdinov, R. (2019).
 \newblock Transformer-XL: Attentive language models beyond a fixed-length context.
 \newblock In \emph{Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics}.
 \newblock \url{https://arxiv.org/abs/1901.02860}
+
+\bibitem[Ge et al., 2023]{icae2023}
+Ge, T., Hu, J., Li, L., Qiu, X., Huang, X., and Si, L. (2023).
+\newblock In-context autoencoder for context compression in a large language model.
+\newblock \emph{arXiv preprint arXiv:2307.06945}.
+\newblock \url{https://arxiv.org/abs/2307.06945}
+
+\bibitem[Zhou et al., 2022]{zhou2022moe}
+Zhou, Y., Lei, T., Liu, H., Du, N., Huang, Y., Zhao, V., Dai, A., Chen, Z., Le, Q., and Laudon, J. (2022).
+\newblock Mixture-of-experts with expert choice routing.
+\newblock In \emph{Advances in Neural Information Processing Systems}, volume 35.
+\newblock \url{https://arxiv.org/abs/2202.09368}
 
 \bibitem[Rae et al., 2020]{rae2020compressive}
 Rae, J.W., Potapenko, A., Jayakumar, S.M., Hillier, C., and Lillicrap, T.P. (2020).
@@ -581,8 +629,8 @@ Khandelwal, U., Levy, O., Jurafsky, D., Zettlemoyer, L., and Lewis, M. (2019).
 \newblock In \emph{International Conference on Learning Representations}.
 \newblock \url{https://arxiv.org/abs/1911.00172}
 
-\bibitem[Borgeaud et al., 2022]{borgeaud2022retro}
-Borgeaud, S., Mensch, A., Hoffmann, J., Cai, T., Rutherford, E., Millican, K., van den Driessche, G., Lespiau, J.-B., Damoc, B., Clark, A., de Las Casas, D., Guy, A., Menick, J., Ring, R., Hennigan, T., Huang, S., Maggiore, L., Jones, C., Cassirer, A., Brock, A., Paez, P., Sheridan, G., Landon, J., and Sifre, L. (2022).
+\bibitem[Borgeaud et al., 2021]{borgeaud2021retro}
+Borgeaud, S., Mensch, A., Hoffmann, J., Cai, T., Rutherford, E., Millican, K., van den Driessche, G., Lespiau, J.-B., Damoc, B., Clark, A., de Las Casas, D., Guy, A., Menick, J., Ring, R., Hennigan, T., Huang, S., Maggiore, L., Jones, C., Cassirer, A., Brock, A., Paez, P., Sheridan, G., Landon, J., and Sifre, L. (2021).
 \newblock Improving language models by retrieving from trillions of tokens.
 \newblock In \emph{International Conference on Machine Learning}.
 \newblock \url{https://arxiv.org/abs/2112.04426}
@@ -718,6 +766,78 @@ Hawthorne, C., et al. (2024).
 \newblock Token turing machines are efficient vision models.
 \newblock \emph{arXiv preprint arXiv:2409.07613}.
 \newblock \url{https://arxiv.org/abs/2409.07613}
+
+\bibitem[He et al., 2024]{he2024hmt}
+He, Z., Cao, Y., Qin, Z., Prakriya, N., Sun, Y., and Cong, J. (2024).
+\newblock HMT: Hierarchical memory transformer for efficient long context language processing.
+\newblock In \emph{Proceedings of the 2025 Conference of the North American Chapter of the Association for Computational Linguistics}.
+\newblock \url{https://arxiv.org/abs/2405.06067}
+
+\bibitem[Klett and Ahle, 2024]{klett2024extended}
+Klett, P. and Ahle, T. (2024).
+\newblock Extended mind transformers.
+\newblock \emph{arXiv preprint arXiv:2406.02332}.
+\newblock \url{https://arxiv.org/abs/2406.02332}
+
+\bibitem[Lee et al., 2024]{lee2024matter}
+Lee, D., Prakash, C.S., FitzGerald, J., and Lehmann, J. (2024).
+\newblock MATTER: Memory-augmented transformer using heterogeneous knowledge sources.
+\newblock In \emph{Findings of the Association for Computational Linguistics: ACL 2024}, pages 16110--16121.
+\newblock \url{https://arxiv.org/abs/2406.04670}
+
+\bibitem[Liu et al., 2022]{liu2022relational}
+Liu, Q., Yogatama, D., and Blunsom, P. (2022).
+\newblock Relational memory-augmented language models.
+\newblock \emph{Transactions of the Association for Computational Linguistics}, 10:555--572.
+\newblock \url{https://arxiv.org/abs/2201.09680}
+
+\bibitem[Roy, 2023]{roy2023knowledge}
+Roy, K. (2023).
+\newblock Knowledge-infused self attention transformers.
+\newblock \emph{arXiv preprint arXiv:2306.13501}.
+\newblock \url{https://arxiv.org/abs/2306.13501}
+
+\bibitem[Deshpande et al., 2022]{deshpande2022spartan}
+Deshpande, A., Sultan, M.A., Ferritto, A., Kalyan, A., Narasimhan, K., and Sil, A. (2022).
+\newblock SPARTAN: Sparse hierarchical memory for parameter-efficient transformers.
+\newblock \emph{arXiv preprint arXiv:2211.16634}.
+\newblock \url{https://arxiv.org/abs/2211.16634}
+
+\bibitem[Tack et al., 2024]{tack2024mac}
+Tack, J., et al. (2024).
+\newblock Online adaptation of language models with a memory of amortized contexts.
+\newblock In \emph{Advances in Neural Information Processing Systems}, volume 37.
+\newblock \url{https://arxiv.org/abs/2403.04317}
+
+\bibitem[Verga et al., 2020]{verga2020facts}
+Verga, P., Sun, H., Soares, L.B., and Cohen, W. (2020).
+\newblock Facts as experts: Adaptable and interpretable neural memory over symbolic knowledge.
+\newblock In \emph{Proceedings of the 2021 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies}.
+\newblock \url{https://arxiv.org/abs/2007.00849}
+
+\bibitem[Wu et al., 2022]{wu2022stateful}
+Wu, Q. and Yu, Z. (2022).
+\newblock Stateful memory-augmented transformers for efficient dialogue modeling.
+\newblock In \emph{Findings of the Association for Computational Linguistics: EACL 2024}, pages 853--867.
+\newblock \url{https://arxiv.org/abs/2209.07634}
+
+\bibitem[Wu et al., 2022]{wu2022emat}
+Wu, Y., Zhao, Y., Hu, B., Minervini, P., Stenetorp, P., and Riedel, S. (2022).
+\newblock An efficient memory-augmented transformer for knowledge-intensive NLP tasks.
+\newblock In \emph{Proceedings of the 2022 Conference on Empirical Methods in Natural Language Processing}, pages 5184--5196.
+\newblock \url{https://arxiv.org/abs/2210.16773}
+
+\bibitem[Zhang et al., 2023]{zhang2023cached}
+Zhang, Z., Shao, W., Ge, Y., Wang, X., Gu, J., and Luo, P. (2023).
+\newblock Cached transformers: Improving transformers with differentiable memory cache.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 38(15):16935--16943.
+\newblock \url{https://arxiv.org/abs/2312.12742}
+
+\bibitem[Zhong et al., 2022]{zhong2022trime}
+Zhong, Z., Lei, T., and Chen, D. (2022).
+\newblock Training language models with memory augmentation.
+\newblock In \emph{Proceedings of the 2022 Conference on Empirical Methods in Natural Language Processing}, pages 5657--5673.
+\newblock \url{https://arxiv.org/abs/2205.12674}
 
 \end{thebibliography}
 

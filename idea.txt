@@ -103,3 +103,36 @@ Also note that all of low-rank, quantisation, other memory bank ideas can also b
 
 
 ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Additions and Clarifications (Edits by Claude):
+
+1. Token-Level Routing During Auto-Regressive Generation:
+While token-level routing is not feasible during prefill (processing entire input sequence) or training due to memory constraints (as explained in the chapter routing issue section above), it becomes viable during autoregressive generation. During generation, we process one token at a time (sequence length = 1), which naturally eliminates the multiplicative sequence length factor in memory requirements. In this regime, token-level routing can be performed efficiently. However, this requires storing the routed memory tokens in VRAM alongside the KV cache. For example, routing to 50,000 memory tokens per generation step would add approximately 200 MB per sample to VRAM (at full precision for a 4096-dimensional model). This overhead could be further reduced by the custom CUDA kernel approach described earlier, limiting total memory to the size of the memory bank itself rather than per-token copies.
+
+2. Scalable Clustering Methods for Large Context Banks:
+For very large context banks in the dynamic memory system, standard k-means clustering may become computationally expensive when adding new tokens or performing retrieval. We can employ more scalable techniques:
+a) Hierarchical clustering: Build a tree structure enabling logarithmic-time search for relevant clusters
+b) Online k-means: Update cluster centroids incrementally as new tokens are added, avoiding full re-clustering
+c) IVF-PQ (Inverted File with Product Quantization): Use inverted index structures with quantized representations for memory-efficient storage and fast approximate nearest neighbor search
+
+These methods enable efficient addition of new tokens to the context bank and fast retrieval even as the bank scales to millions of tokens.
+
+3. Low-Rank Dimension Reduction (Alternative to Low-Rank Factorization):
+In addition to the low-rank factorization approach described earlier (where memory bank M = A * B^T with A: N_m x r and B: d x r), we can also store the memory bank directly in reduced dimensions: M in N_m x r (where r << d, for example r = 512 instead of d = 4096).
+
+In this approach:
+- Memory bank M is stored as N_m x r (reduced dimension)
+- W_q maps from d to r (projecting queries into reduced space)
+- W_k and W_v map from r to r (operating in reduced space)
+- W_o maps from r to d (projecting outputs back to full dimension)
+
+The cross-attention computation becomes:
+Q_r = H * W_q  (shape: L x r)
+K_r = M * W_k  (shape: N_m x r)
+V_r = M * W_v  (shape: N_m x r)
+attention = softmax(Q_r * K_r^T / sqrt(r)) * V_r
+output = attention * W_o  (shape: L x d)
+
+This approach reduces memory bank storage by a factor of d/r (e.g., 8x reduction for r=512, d=4096) while performing all attention computations in the lower-dimensional space. The output projection W_o maps the result back to the full model dimension for integration with subsequent layers. This trades expressiveness for efficiency: each memory token stores less information, but the dramatic reduction in storage enables much larger memory banks within the same memory budget.
+
+This is different from the earlier factorization approach where the full d-dimensional representation is reconstructed from factors before attention; here the entire attention mechanism operates in the reduced r-dimensional space.
