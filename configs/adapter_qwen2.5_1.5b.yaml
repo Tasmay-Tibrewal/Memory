@@ -1,0 +1,122 @@
+# =============================================================================
+# Memory Adapter for Qwen2.5-1.5B
+# =============================================================================
+# This config adds memory adapters to a frozen Qwen2.5-1.5B model.
+# Good for instruction finetuning and domain adaptation.
+#
+# Usage: python scripts/train.py --config configs/adapter_qwen2.5_1.5b.yaml
+# Multi-GPU: accelerate launch scripts/train.py --config configs/adapter_qwen2.5_1.5b.yaml
+# =============================================================================
+
+model:
+  # Pretrained base model
+  base_model_name: Qwen/Qwen2.5-1.5B
+  freeze_base_model: true
+
+  # These are overridden by base model config, but listed for reference
+  hidden_dim: 1536
+  num_heads: 12
+  num_layers: 28
+  max_seq_len: 8192
+  use_flash_attention: true
+
+memory:
+  # Disable for vanilla baseline
+  vanilla_mode: false
+
+  # Memory bank (reasonable size for adapter)
+  num_memory_tokens: 2048
+
+  # Memory in first and last 5 layers (where most useful)
+  memory_layer_placement: custom
+  memory_layer_indices: [0, 1, 2, 3, 4, 23, 24, 25, 26, 27]
+
+  # Shared memory bank across all memory layers
+  memory_sharing: shared
+  memory_block_variant: A
+
+  # Chapter routing
+  use_chapters: true
+  num_chapters: 8
+  top_k_chapters: 2
+  routing_strategy_train: sequence
+
+  # Router losses
+  use_load_balance_loss: true
+  load_balance_coefficient: 0.01
+
+  # Low-rank memory for efficiency
+  use_low_rank_memory: true
+  memory_rank: 256
+  low_rank_mode: factorized # M = A @ B^T
+
+  use_low_rank_projections: true
+  projection_rank: 128
+
+  # Initialization
+  wo_init_zero: true
+
+  # LoRA disabled (pure memory adapter)
+  use_lora: false
+  use_memory_adapter: true
+
+training:
+  # Different learning rates
+  memory_lr: 2e-4
+  lora_lr: 1e-4
+  base_model_lr: 0 # Frozen
+
+  # Mode
+  training_mode: instruction_finetuning
+
+  # === DATASET SUGGESTIONS ===
+
+  # Option 1: General instruction tuning
+  dataset_name: HuggingFaceH4/ultrachat_200k
+  dataset_split: train_sft
+  text_field: messages
+
+  # Option 2: Math reasoning (DeepSeek R1)
+  # dataset_name: open-r1/r1-distill-math
+  # dataset_split: train
+  # text_field: messages
+
+  # Option 3: Code instruction
+  # dataset_name: sahil2801/CodeAlpaca-20k
+  # dataset_split: train
+  # text_field: ["instruction", "input", "output"]
+
+  # Option 4: Medical QA
+  # dataset_name: medalpaca/medical_meadow_medical_flashcards
+  # dataset_split: train
+  # text_field: ["input", "output"]
+
+  # Option 5: Legal
+  # dataset_name: pile-of-law/pile-of-law
+  # dataset_subset: r_legaladvice
+  # dataset_split: train
+  # text_field: text
+
+  max_length: 4096
+
+  # Training params
+  batch_size: 2
+  gradient_accumulation_steps: 16
+  max_steps: 5000
+  warmup_steps: 100
+
+  optimizer: adamw
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  scheduler: cosine
+  min_lr_ratio: 0.1
+
+  mixed_precision: bf16
+  gradient_checkpointing: true
+
+  save_steps: 500
+  logging_steps: 10
+  log_to_wandb: false
+
+  output_dir: ./outputs/adapter_qwen2.5_1.5b

@@ -1,0 +1,70 @@
+# =============================================================================
+# Vanilla Control Experiment (No Memory)
+# =============================================================================
+# This config trains a standard transformer WITHOUT memory for comparison.
+# Use this as a baseline to measure the impact of memory augmentation.
+#
+# Usage: python scripts/train.py --config configs/vanilla_control.yaml
+# =============================================================================
+
+model:
+  # Same architecture as memory model
+  hidden_dim: 768
+  num_heads: 12
+  num_layers: 12
+  intermediate_dim: 3072
+  vocab_size: 32000
+  max_seq_len: 8192
+
+  use_rope: true
+  use_rms_norm: true
+  use_flash_attention: true
+
+  base_model_name: null
+  freeze_base_model: false
+
+memory:
+  # ======================================
+  # KEY: VANILLA MODE ENABLED
+  # This disables ALL memory components
+  # ======================================
+  vanilla_mode: true
+
+  # These are ignored when vanilla_mode=true
+  # but listed for documentation
+  num_memory_tokens: 4096
+  use_chapters: false
+  use_lora: false
+  use_memory_adapter: false
+
+training:
+  memory_lr: 1e-4
+  base_model_lr: 1e-4
+
+  training_mode: pretraining
+
+  # Use same dataset as memory model for fair comparison
+  dataset_name: allenai/c4
+  dataset_subset: en
+  dataset_split: train
+  text_field: text
+
+  max_length: 2048
+
+  batch_size: 8
+  gradient_accumulation_steps: 8
+  max_steps: 50000
+  warmup_steps: 1000
+
+  optimizer: adamw
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  scheduler: cosine
+
+  mixed_precision: bf16
+  gradient_checkpointing: true
+
+  save_steps: 2000
+  logging_steps: 10
+
+  output_dir: ./outputs/vanilla_control

@@ -1,0 +1,5 @@
+{
+  "artifactType": "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
+  "summary": "Implementation plan for memory-augmented transformer covering project structure, core components (config, memory bank, cross-attention, router, adapter), training infrastructure, and verification. Includes key architectural decisions requiring user input on training library, router losses, block variants, and base models.",
+  "updatedAt": "2026-02-04T19:48:01.996113300Z"
+}

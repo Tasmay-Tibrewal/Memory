@@ -1,0 +1,149 @@
+# =============================================================================
+# Memory-Augmented Transformer Dependencies
+# =============================================================================
+# This file lists all required and optional dependencies for the project.
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# =============================================================================
+# CORE DEPENDENCIES (Required)
+# =============================================================================
+
+# PyTorch - Core tensor operations and neural networks
+# Tested with: 2.0.0, 2.1.0, 2.2.0
+torch>=2.0.0
+
+# HuggingFace Transformers - For pretrained models (adapter mode)
+# Provides: AutoModelForCausalLM, AutoTokenizer, get_scheduler
+# Tested with: 4.36.0, 4.38.0, 4.40.0
+transformers>=4.36.0
+
+# HuggingFace Accelerate - Distributed training (DDP/FSDP)
+# Provides: Accelerator, set_seed, distributed utilities
+# Tested with: 0.25.0, 0.27.0
+accelerate>=0.25.0
+
+# HuggingFace PEFT - Parameter-efficient fine-tuning reference
+# Used for: LoRA implementation reference, adapter patterns
+peft>=0.7.0
+
+# HuggingFace Datasets - Dataset loading
+# Provides: load_dataset for any HF dataset
+datasets>=2.16.0
+
+# Tokenizers - Fast tokenization
+tokenizers>=0.15.0
+
+# =============================================================================
+# CONFIGURATION & LOGGING
+# =============================================================================
+
+# PyYAML - YAML config file parsing
+pyyaml>=6.0
+
+# OmegaConf - Advanced config management
+# Provides: interpolation, type checking, merge
+omegaconf>=2.3.0
+
+# Weights & Biases - Experiment tracking (optional but recommended)
+wandb>=0.16.0
+
+# TensorBoard - Alternative experiment tracking
+tensorboard>=2.15.0
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+# tqdm - Progress bars
+tqdm>=4.66.0
+
+# einops - Tensor operations (rearrange, repeat, etc.)
+einops>=0.7.0
+
+# NumPy - Numerical operations
+numpy>=1.24.0
+
+# =============================================================================
+# OPTIONAL: QUANTIZATION
+# =============================================================================
+
+# bitsandbytes - 4/8-bit quantization
+# Required for: quantized memory banks, 4-bit inference
+# Note: May require CUDA toolkit
+bitsandbytes>=0.41.0
+
+# =============================================================================
+# OPTIONAL: FLASH ATTENTION (Linux/CUDA only)
+# =============================================================================
+
+# Flash Attention - Faster and memory-efficient attention
+# Provides: 2-4x speedup on attention operations
+# Requirements: 
+#   - Linux only (no Windows support)
+#   - CUDA 11.8 or higher
+#   - PyTorch 2.0+
+# Installation: pip install flash-attn --no-build-isolation
+# flash-attn>=2.4.0
+
+# =============================================================================
+# OPTIONAL: DEVELOPMENT/TESTING
+# =============================================================================
+
+# pytest - Unit testing (if needed in future)
+# pytest>=7.4.0
+
+# black - Code formatting
+# black>=23.0.0
+
+# isort - Import sorting  
+# isort>=5.12.0
+
+# =============================================================================
+# OPTIONAL: ADDITIONAL MODELS
+# =============================================================================
+
+# sentencepiece - For some tokenizers (Llama, etc.)
+sentencepiece>=0.1.99
+
+# protobuf - Required by some models
+protobuf>=4.25.0
+
+# =============================================================================
+# KNOWN COMPATIBILITY NOTES
+# =============================================================================
+
+# 1. Flash Attention:
+#    - Only works on Linux with NVIDIA GPUs (Ampere or newer preferred)
+#    - Falls back to standard attention on Windows/CPU
+#    - Install separately: pip install flash-attn --no-build-isolation
+
+# 2. bitsandbytes:
+#    - Windows support is experimental
+#    - Requires CUDA toolkit installation
+#    - If installation fails, quantization features won't work
+
+# 3. transformers:
+#    - trust_remote_code=True is used for Qwen models
+#    - Some models may require additional dependencies
+
+# 4. Minimum Python version: 3.9+
+#    - Tested on: 3.9, 3.10, 3.11
+
+# =============================================================================
+# INSTALLATION COMMANDS
+# =============================================================================
+
+# Basic installation:
+# pip install -r requirements.txt
+
+# With Flash Attention (Linux only):
+# pip install -r requirements.txt
+# pip install flash-attn --no-build-isolation
+
+# Minimal installation (core only):
+# pip install torch transformers accelerate datasets pyyaml omegaconf tqdm
+
+# Development installation:
+# pip install -r requirements.txt
+# pip install pytest black isort

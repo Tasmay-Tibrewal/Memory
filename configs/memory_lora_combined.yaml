@@ -1,0 +1,92 @@
+# =============================================================================
+# Memory + LoRA Combined Adapter
+# =============================================================================
+# This config combines memory adapters WITH LoRA adapters for maximum
+# parameter-efficient adaptation. Useful for comparing against pure LoRA.
+#
+# Compare against:
+# - Full finetuning (baseline)
+# - LoRA only
+# - Memory adapter only
+# - Memory + LoRA (this config)
+#
+# Usage: python scripts/train.py --config configs/memory_lora_combined.yaml
+# =============================================================================
+
+model:
+  base_model_name: Qwen/Qwen2.5-1.5B
+  freeze_base_model: true
+  use_flash_attention: true
+
+memory:
+  vanilla_mode: false
+
+  # Memory bank settings
+  num_memory_tokens: 1024 # Smaller since combined with LoRA
+  memory_layer_placement: every_n
+  memory_layer_n: 4 # Every 4th layer: [0, 4, 8, 12, 16, 20, 24]
+  memory_sharing: shared
+  memory_block_variant: A
+
+  # Chapters for efficiency
+  use_chapters: true
+  num_chapters: 4
+  top_k_chapters: 1
+
+  # Router losses
+  use_load_balance_loss: true
+  load_balance_coefficient: 0.01
+
+  # Low-rank for smaller footprint
+  use_low_rank_memory: true
+  memory_rank: 128
+  low_rank_mode: factorized
+
+  wo_init_zero: true
+
+  # ======================================
+  # LoRA ENABLED alongside memory
+  # ======================================
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_targets:
+    - q_proj
+    - v_proj
+
+  use_memory_adapter: true
+  use_both_memory_and_lora: true
+
+training:
+  # Separate learning rates for each component
+  memory_lr: 2e-4
+  lora_lr: 1e-4
+  base_model_lr: 0 # Frozen
+
+  training_mode: instruction_finetuning
+
+  # Dataset
+  dataset_name: HuggingFaceH4/ultrachat_200k
+  dataset_split: train_sft
+  text_field: messages
+
+  max_length: 4096
+
+  batch_size: 2
+  gradient_accumulation_steps: 16
+  max_steps: 5000
+  warmup_steps: 100
+
+  optimizer: adamw
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  scheduler: cosine
+
+  mixed_precision: bf16
+  gradient_checkpointing: true
+
+  save_steps: 500
+  logging_steps: 10
+
+  output_dir: ./outputs/memory_lora_combined
