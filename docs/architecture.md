@@ -71,7 +71,7 @@ Output = Attention @ W_o
 - Output projection starts at zero
 - Model starts as if no memory exists
 - Gradual learning of when/how to use memory
-- Critical for stable adapter training
+- Critical for stable training (adapter and from-scratch)
 
 ### 3. Block Variants
 
@@ -207,7 +207,7 @@ W_up: r → d
 - **Token embeddings**: Normal(0, 0.02)
 - **Memory bank**: Normal(0, 0.02)  
 - **All projections**: Normal(0, 0.02)
-- **W_o (output)**: **Zero** (critical for stable adapter training)
+- **W_o (output)**: **Zero** (critical for stable training — adapter and from-scratch)
 - **LoRA B**: Zero (standard)
 
 ## Token-Level vs Sequence-Level Routing
@@ -239,7 +239,7 @@ The Memory-Augmented Transformer provides:
 | Component | File | Key Classes/Functions |
 |-----------|------|----------------------|
 | Memory Bank | `memory_bank.py` | `StandardMemoryBank`, `FactorizedMemoryBank`, `ReducedDimMemoryBank`, `ChapteredMemoryBank` |
-| Cross-Attention | `memory_attention.py` | `MemoryCrossAttention`, `MemoryCrossAttentionWithRouting` |
+| Cross-Attention | `memory_attention.py` | `MemoryCrossAttention`, `MemoryCrossAttentionWithRouting` (dead code - routing handled externally) |
 | Transformer Block | `memory_block.py` | `MemoryTransformerBlock`, `VanillaTransformerBlock`, `RMSNorm`, `RotaryPositionalEmbedding`, `SelfAttention`, `MLP` |
 | Chapter Router | `router.py` | `ChapterRouter`, `TokenLevelRouter`, `RollingRouter` |
 | Full Model | `model.py` | `MemoryTransformer` |

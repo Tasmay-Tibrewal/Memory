@@ -74,8 +74,36 @@ pip install wandb
 
 ### Verify Installation
 ```python
-from memory_transformer import MemoryConfig, load_config
+from memory_transformer import load_config
+load_config("configs/base_small.yaml")
 print("Installation successful!")
+```
+
+### Quick CPU Smoke Test (No HF Downloads)
+```python
+from memory_transformer.config import load_config
+from memory_transformer.model import MemoryTransformer
+import torch
+
+cfg = load_config("configs/base_small.yaml")
+
+# Shrink for a fast CPU run
+cfg.model.num_layers = 2
+cfg.model.hidden_dim = 64
+cfg.model.num_heads = 4
+cfg.model.intermediate_dim = 256
+cfg.model.max_seq_len = 64
+
+cfg.memory.num_memory_tokens = 128
+cfg.memory.use_chapters = True
+cfg.memory.num_chapters = 8
+cfg.memory.top_k_chapters = 2
+cfg.memory.routing_strategy_inference = "hybrid"
+
+model = MemoryTransformer(cfg).eval()
+x = torch.randint(0, cfg.model.vocab_size, (1, 8))
+out = model(input_ids=x, use_cache=True)
+print("Smoke OK:", out["logits"].shape)
 ```
 
 ---
@@ -195,6 +223,18 @@ training:   # Training hyperparameters
 
 ### Key Configuration Options
 
+#### Model Settings
+```yaml
+model:
+  # Tokenizer to use (must match vocab_size for from-scratch)
+  tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  vocab_size: 32000
+
+  # Positional encoding + attention regularization
+  use_rope: true
+  attention_dropout: 0.0
+```
+ 
 #### Memory Settings
 ```yaml
 memory:
@@ -212,6 +252,8 @@ memory:
   use_chapters: true           # Enable MoE-style routing
   num_chapters: 16             # Number of chapters
   top_k_chapters: 4            # Chapters to select
+  routing_strategy_inference: hybrid  # sequence/rolling/token/hybrid
+  routing_window_size: 128            # Rolling/hybrid window size (tokens)
   
   # Low-rank options
   use_low_rank_memory: true    # Factorized memory bank
@@ -220,6 +262,10 @@ memory:
   # LoRA
   use_lora: false              # Enable LoRA
   use_both_memory_and_lora: false  # Combine both
+
+  # Optional: quantize memory bank for inference/eval scripts
+  quantize_memory: false
+  memory_quant_bits: 8
 ```
 
 #### Training Settings
@@ -236,6 +282,7 @@ training:
   
   # Distributed
   distributed_strategy: ddp    # ddp or fsdp
+  fsdp_sharding_strategy: FULL_SHARD
   mixed_precision: bf16
 ```
 

@@ -19,6 +19,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
+    from torch.utils.checkpoint import checkpoint as torch_checkpoint
+    CHECKPOINT_AVAILABLE = True
+except Exception:
+    torch_checkpoint = None
+    CHECKPOINT_AVAILABLE = False
+
+try:
     from flash_attn import flash_attn_func
     FLASH_ATTN_AVAILABLE = True
 except ImportError:
@@ -303,13 +310,23 @@ class MemoryCrossAttention(nn.Module):
         )
         
         if use_checkpoint:
-            # Checkpoint the attention computation
-            attn_output = torch.utils.checkpoint.checkpoint(
-                self._forward_attention,
-                hidden_states,
-                memory,
-                use_reentrant=False,
-            )
+            if not CHECKPOINT_AVAILABLE or torch_checkpoint is None:
+                import warnings
+
+                warnings.warn(
+                    "memory_gradient_checkpointing is enabled but torch.utils.checkpoint is unavailable. "
+                    "Running without checkpointing.",
+                    UserWarning,
+                )
+                attn_output = self._forward_attention(hidden_states, memory)
+            else:
+                # Checkpoint the attention computation
+                attn_output = torch_checkpoint(
+                    self._forward_attention,
+                    hidden_states,
+                    memory,
+                    use_reentrant=False,
+                )
         else:
             attn_output = self._forward_attention(hidden_states, memory)
         
@@ -349,9 +366,9 @@ class MemoryCrossAttention(nn.Module):
         
         # Reshape: (batch, seq_len, hidden_dim) or (batch, seq_len, reduced_dim)
         if self.reduced_dim_mode:
-            attn_output = attn_output.view(batch_size, seq_len, self.reduced_dim)
+            attn_output = attn_output.reshape(batch_size, seq_len, self.reduced_dim)
         else:
-            attn_output = attn_output.view(batch_size, seq_len, self.hidden_dim)
+            attn_output = attn_output.reshape(batch_size, seq_len, self.hidden_dim)
         
         return attn_output
 

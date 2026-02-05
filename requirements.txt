@@ -83,8 +83,11 @@ bitsandbytes>=0.41.0
 #   - Linux only (no Windows support)
 #   - CUDA 11.8 or higher
 #   - PyTorch 2.0+
+#   - IMPORTANT: Version 2.6.3+ is verified working with KV-cache
+#   - Version 2.1+ uses bottom-right aligned causal mask (required for KV-cache)
+#   - WARNING: Lower versions may produce incorrect generation outputs
 # Installation: pip install flash-attn --no-build-isolation
-# flash-attn>=2.4.0
+# flash-attn>=2.6.3
 
 # =============================================================================
 # OPTIONAL: DEVELOPMENT/TESTING
@@ -117,6 +120,9 @@ protobuf>=4.25.0
 #    - Only works on Linux with NVIDIA GPUs (Ampere or newer preferred)
 #    - Falls back to standard attention on Windows/CPU
 #    - Install separately: pip install flash-attn --no-build-isolation
+#    - Version 2.6.3+ verified working with KV-cache
+#    - Version 2.1+ required for correct causal mask alignment with KV-cache
+#    - WARNING: flash-attn < 2.1 may produce incorrect generation outputs
 
 # 2. bitsandbytes:
 #    - Windows support is experimental

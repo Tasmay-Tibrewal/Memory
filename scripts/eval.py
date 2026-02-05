@@ -57,6 +57,23 @@ def load_model(config, checkpoint_path: str = None):
     return model
 
 
+def load_tokenizer(config):
+    """Load tokenizer based on config."""
+    tokenizer_name = config.model.tokenizer_name or config.model.base_model_name
+    if tokenizer_name is None:
+        tokenizer_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        trust_remote_code=True,
+    )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    return tokenizer
+
+
 def compute_perplexity_single(model, dataloader, device):
     """Compute perplexity on a dataset (single GPU)."""
     model.eval()
@@ -78,7 +95,9 @@ def compute_perplexity_single(model, dataloader, device):
             )
             
             loss = outputs["loss"]
-            num_tokens = (labels != -100).sum().item()
+            # Bug 12 fix: Account for label shifting (model uses labels[..., 1:])
+            shifted_labels = labels[..., 1:]
+            num_tokens = (shifted_labels != -100).sum().item()
             
             total_loss += loss.item() * num_tokens
             total_tokens += num_tokens
@@ -110,7 +129,9 @@ def compute_perplexity_distributed(model, dataloader, accelerator):
             )
             
             loss = outputs["loss"]
-            num_tokens = (batch["labels"] != -100).sum()
+            # Bug 12 fix: Account for label shifting (model uses labels[..., 1:])
+            shifted_labels = batch["labels"][..., 1:]
+            num_tokens = (shifted_labels != -100).sum()
             
             # Gather across processes
             gathered_loss = accelerator.gather(loss * num_tokens)
@@ -157,18 +178,17 @@ def main():
         
         # Load model
         model = load_model(config, args.checkpoint)
+
+        # Optional: quantize memory bank for evaluation
+        if getattr(config.memory, "quantize_memory", False):
+            from inference.merge import quantize_memory_for_deployment
+            model = quantize_memory_for_deployment(
+                model,
+                bits=config.memory.memory_quant_bits,
+            )
         
         # Load tokenizer
-        if config.model.base_model_name:
-            tokenizer = AutoTokenizer.from_pretrained(
-                config.model.base_model_name,
-                trust_remote_code=True,
-            )
-        else:
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-        
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = load_tokenizer(config)
         
         # Create dataloader
         dataloader = create_dataloader(
@@ -182,6 +202,7 @@ def main():
             training_mode=config.training.training_mode,
             shuffle=False,
             num_samples=args.max_samples,
+            drop_last=False,  # Bug 26 fix: Include all samples in eval
         )
         
         # Prepare with accelerator
@@ -199,20 +220,20 @@ def main():
         # Single GPU evaluation
         print(f"Loading model from {args.checkpoint or 'config'}...")
         model = load_model(config, args.checkpoint)
+
+        # Optional: quantize memory bank for evaluation
+        if getattr(config.memory, "quantize_memory", False):
+            from inference.merge import quantize_memory_for_deployment
+            model = quantize_memory_for_deployment(
+                model,
+                bits=config.memory.memory_quant_bits,
+            )
+
         model = model.to(args.device)
         model.eval()
         
         # Load tokenizer
-        if config.model.base_model_name:
-            tokenizer = AutoTokenizer.from_pretrained(
-                config.model.base_model_name,
-                trust_remote_code=True,
-            )
-        else:
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-        
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = load_tokenizer(config)
         
         # Create eval dataloader
         print(f"Loading dataset {config.training.dataset_name} split={args.split}...")
@@ -227,6 +248,7 @@ def main():
             training_mode=config.training.training_mode,
             shuffle=False,
             num_samples=args.max_samples,
+            drop_last=False,  # Bug 26 fix: Include all samples in eval
         )
         
         # Evaluate

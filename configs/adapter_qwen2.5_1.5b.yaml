@@ -74,6 +74,7 @@ training:
   # Option 1: General instruction tuning
   dataset_name: HuggingFaceH4/ultrachat_200k
   dataset_split: train_sft
+  eval_split: test_sft # ultrachat_200k has train_sft/test_sft splits
   text_field: messages
 
   # Option 2: Math reasoning (DeepSeek R1)

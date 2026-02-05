@@ -13,6 +13,12 @@ scripts/
 
 ---
 
+## Quick CPU Smoke Test (No HF Downloads)
+
+If you want to validate the core `MemoryTransformer` forward pass without downloading tokenizers/models, run the "Quick CPU Smoke Test" snippet in the root `README.md`.
+
+---
+
 ## `train.py` - Training Script
 
 **Purpose**: Main entry point for training memory-augmented transformers.
@@ -70,6 +76,10 @@ outputs/
 ## `eval.py` - Evaluation Script
 
 **Purpose**: Evaluate trained models on test datasets (computes perplexity).
+
+Notes:
+- Uses tokenizer from `model.tokenizer_name` (fallback: `model.base_model_name`, then TinyLlama).
+- If `memory.quantize_memory: true`, quantizes the memory bank before evaluation.
 
 ### Usage
 
@@ -140,6 +150,10 @@ Avg Loss:    2.5123
 ## `inference.py` - Generation Script
 
 **Purpose**: Generate text using trained models.
+
+Notes:
+- Uses tokenizer from `model.tokenizer_name` (fallback: `model.base_model_name`, then TinyLlama).
+- If `memory.quantize_memory: true`, quantizes the memory bank before generation.
 
 ### Usage
 

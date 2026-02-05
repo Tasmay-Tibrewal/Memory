@@ -113,8 +113,10 @@ class SelfAttention(nn.Module):
         hidden_dim: int,
         num_heads: int,
         max_seq_len: int = 8192,
+        use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        attention_dropout: float = 0.0,
         use_flash_attention: bool = True,
     ):
         super().__init__()
@@ -123,19 +125,24 @@ class SelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
+        self.use_rope = use_rope
         
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.v_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
-        self.rotary = RotaryPositionalEmbedding(
-            self.head_dim, 
-            max_seq_len, 
-            rope_theta
-        )
+        self.rotary = None
+        if use_rope:
+            self.rotary = RotaryPositionalEmbedding(
+                self.head_dim, 
+                max_seq_len, 
+                rope_theta
+            )
         
         self.dropout = dropout
+        self.attention_dropout = attention_dropout
+        self.attn_dropout = nn.Dropout(attention_dropout) if attention_dropout > 0 else nn.Identity()
         self.use_flash_attention = use_flash_attention
         
         try:
@@ -177,13 +184,15 @@ class SelfAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
         
-        # Apply rotary embeddings
-        cos, sin = self.rotary(q, seq_len, position_offset)
-        q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
-        k = k.transpose(1, 2)
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(1, 2)  # Back to (batch, seq, heads, head_dim)
-        k = k.transpose(1, 2)
+        # Apply rotary embeddings (optional)
+        if self.use_rope:
+            assert self.rotary is not None
+            cos, sin = self.rotary(q, seq_len, position_offset)
+            q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
+            k = k.transpose(1, 2)
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
+            q = q.transpose(1, 2)  # Back to (batch, seq, heads, head_dim)
+            k = k.transpose(1, 2)
         
         # Handle KV cache
         if past_kv is not None:
@@ -196,12 +205,30 @@ class SelfAttention(nn.Module):
         # Attention
         if self._has_flash and self.use_flash_attention:
             # Flash attention expects (batch, seq, heads, head_dim)
-            attn_output = self._flash_attn(
-                q, k, v,
-                dropout_p=self.dropout if self.training else 0.0,
-                causal=True,
-            )
+            # Bug 3 fix: Flash attention v2.x does not natively support key_padding_mask
+            # for variable-length causal attention. For right-padded causal training this
+            # is generally benign (padding comes after valid tokens). For left-padding or
+            # correctness we fall back to standard attention when padding is detected.
+            has_padding = attention_mask is not None and (attention_mask == 0).any()
+            if has_padding:
+                # Fall back to standard attention path for proper mask handling
+                use_flash_here = False
+            else:
+                use_flash_here = True
+            
+            if use_flash_here:
+                attn_output = self._flash_attn(
+                    q, k, v,
+                    dropout_p=self.attention_dropout if self.training else 0.0,
+                    causal=True,
+                )
+            else:
+                # Redirect to standard attention below
+                pass
         else:
+            use_flash_here = False
+        
+        if not (self._has_flash and self.use_flash_attention) or not use_flash_here:
             # Standard attention
             q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
             k = k.transpose(1, 2)
@@ -217,16 +244,24 @@ class SelfAttention(nn.Module):
             )
             attn_weights = attn_weights.masked_fill(causal_mask, float("-inf"))
             
-            # Bug 12 fix: Reshape mask to (B, 1, 1, S) and convert to additive format
+            # Bug 1 fix: Use masked_fill to avoid NaN from 0.0 * -inf
             if attention_mask is not None:
                 # attention_mask is (B, S) with 1=valid, 0=masked
-                # Convert to additive mask: 0=valid, -inf=masked
-                additive_mask = (1 - attention_mask.float()) * float("-inf")
-                # Reshape for broadcasting: (B, 1, 1, S)
-                additive_mask = additive_mask.unsqueeze(1).unsqueeze(2)
-                attn_weights = attn_weights + additive_mask
+                # Reshape for broadcasting: (B, 1, 1, kv_len)
+                # Need to handle KV cache case where mask may be for full sequence
+                mask_len = attention_mask.shape[1]
+                if mask_len < kv_len:
+                    # Extend mask for cached tokens (assume all cached are valid)
+                    pad_len = kv_len - mask_len
+                    attention_mask = torch.cat([
+                        torch.ones(batch_size, pad_len, device=attention_mask.device, dtype=attention_mask.dtype),
+                        attention_mask
+                    ], dim=1)
+                padding_mask = (attention_mask == 0).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, kv_len)
+                attn_weights = attn_weights.masked_fill(padding_mask, float("-inf"))
             
             attn_weights = F.softmax(attn_weights, dim=-1)
+            attn_weights = self.attn_dropout(attn_weights)
             attn_output = torch.matmul(attn_weights, v)
             attn_output = attn_output.transpose(1, 2)  # (batch, seq, heads, head_dim)
         
@@ -273,8 +308,10 @@ class MemoryTransformerBlock(nn.Module):
         num_heads: int,
         intermediate_dim: int,
         max_seq_len: int = 8192,
+        use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        attention_dropout: float = 0.0,
         use_rms_norm: bool = True,
         norm_eps: float = 1e-6,
         use_flash_attention: bool = True,
@@ -287,6 +324,7 @@ class MemoryTransformerBlock(nn.Module):
         reduced_dim: Optional[int] = None,
         wo_init_zero: bool = True,
         memory_block_variant: str = "A",
+        gradient_checkpointing: bool = True,  # Memory gradient checkpointing
     ):
         super().__init__()
         
@@ -303,8 +341,10 @@ class MemoryTransformerBlock(nn.Module):
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             max_seq_len=max_seq_len,
+            use_rope=use_rope,
             rope_theta=rope_theta,
             dropout=dropout,
+            attention_dropout=attention_dropout,
             use_flash_attention=use_flash_attention,
         )
         
@@ -325,6 +365,7 @@ class MemoryTransformerBlock(nn.Module):
                 wo_init_zero=wo_init_zero,
                 dropout=dropout,
                 use_flash_attention=use_flash_attention,
+                gradient_checkpointing=gradient_checkpointing,
             )
             
             # Variant B has extra MLP after memory
@@ -404,6 +445,12 @@ class MemoryTransformerBlock(nn.Module):
                 hidden_states = self.post_memory_layernorm(hidden_states)
                 hidden_states = self.post_memory_mlp(hidden_states)
                 hidden_states = residual + hidden_states
+        else:
+            # Bug 8 fix: Unknown variant should raise error, not silently skip MLP
+            raise ValueError(
+                f"Unknown memory_block_variant: '{self.memory_block_variant}'. "
+                "Supported variants are 'A' and 'B'."
+            )
         
         return hidden_states, new_kv
 
@@ -421,8 +468,10 @@ class VanillaTransformerBlock(nn.Module):
         num_heads: int,
         intermediate_dim: int,
         max_seq_len: int = 8192,
+        use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        attention_dropout: float = 0.0,
         use_rms_norm: bool = True,
         norm_eps: float = 1e-6,
         use_flash_attention: bool = True,
@@ -437,8 +486,10 @@ class VanillaTransformerBlock(nn.Module):
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             max_seq_len=max_seq_len,
+            use_rope=use_rope,
             rope_theta=rope_theta,
             dropout=dropout,
+            attention_dropout=attention_dropout,
             use_flash_attention=use_flash_attention,
         )
         

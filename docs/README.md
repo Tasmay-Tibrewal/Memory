@@ -9,11 +9,11 @@ This directory contains comprehensive documentation for the memory-augmented tra
 ```
 docs/
 ├── README.md              # This file - documentation overview
-├── architecture.md        # Detailed architecture explanation (~370 lines)
-├── design.md              # Design decisions and rationale (~188 lines)
-├── context.md             # Summary for handoffs (~390 lines)
-├── philosophy.md          # Development philosophy and style guide (~400 lines)
-├── prompt.md              # Agent onboarding prompt (~270 lines)
+├── architecture.md        # Detailed architecture explanation (~286 lines)
+├── design.md              # Design decisions and rationale (~120 lines)
+├── context.md             # Summary for handoffs (~321 lines)
+├── philosophy.md          # Development philosophy and style guide (~316 lines)
+├── prompt.md              # Agent onboarding prompt (~202 lines)
 └── meta_artifacts/        # Session artifacts for context management
     ├── README.md          # Meta artifacts overview
     ├── session_summary.md # Consolidated session summaries
@@ -120,7 +120,7 @@ meta_artifacts/
 └── session1/              # Session 1 artifacts
     ├── implementation_plan.md   # Approved implementation plan
     ├── task.md                  # Task tracking checklist
-    ├── session.md               # Detailed session log (~580 lines)
+    ├── session.md               # Detailed session log (Sessions 1–7, ~1,300+ lines)
     └── walkthrough.md           # Verification results
 ```
 
@@ -152,11 +152,11 @@ Each folder has its own README with detailed documentation:
 
 | README | Lines | Contents |
 |--------|-------|----------|
-| [`memory_transformer/README.md`](../memory_transformer/README.md) | ~256 | All 11 core modules documented |
-| [`training/README.md`](../training/README.md) | ~225 | Trainer, data loading, losses |
-| [`inference/README.md`](../inference/README.md) | ~259 | Generation, merge, routing strategies |
-| [`scripts/README.md`](../scripts/README.md) | ~216 | CLI scripts with all arguments |
-| [`configs/README.md`](../configs/README.md) | ~294 | Complete config reference |
+| [`memory_transformer/README.md`](../memory_transformer/README.md) | ~259 | All 11 core modules documented |
+| [`training/README.md`](../training/README.md) | ~228 | Trainer, data loading, losses |
+| [`inference/README.md`](../inference/README.md) | ~257 | Generation, merge, routing strategies |
+| [`scripts/README.md`](../scripts/README.md) | ~225 | CLI scripts with all arguments |
+| [`configs/README.md`](../configs/README.md) | ~299 | Complete config reference |
 
 ---
 
@@ -218,9 +218,9 @@ When adding new features, update documentation in this order:
 
 | Category | Files | Lines |
 |----------|-------|-------|
-| Deep Dive Docs | 5 | ~1,500 |
-| Meta Artifacts | 3+ | ~800+ |
-| Package READMEs | 5 | ~1,250 |
-| Root README | 1 | ~300 |
-| Config README | 1 | ~294 |
-| **Total** | **15+** | **~4,144+** |
+| Deep Dive Docs (`docs/*.md`) | 6 | ~1,420 |
+| Meta Artifacts (`docs/meta_artifacts/**/*.md`) | 6 | ~2,400+ |
+| Package READMEs | 5 | ~1,250+ |
+| Root README | 1 | ~342 |
+| Configs (`configs/*.yaml`) | 4 | ~370 |
+| **Total** | **22** | **~5,800+** |

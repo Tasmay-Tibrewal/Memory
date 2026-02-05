@@ -210,9 +210,12 @@ accelerate launch --num_processes 4 scripts/train.py --config configs/base_small
 # FSDP (Fully Sharded Data Parallel)
 accelerate launch --num_processes 4 \
     --use_fsdp \
-    --fsdp_sharding_strategy FULL_SHARD \
     scripts/train.py --config configs/base_small.yaml
 ```
+
+Tip: You can also set `training.distributed_strategy: fsdp` and
+`training.fsdp_sharding_strategy: FULL_SHARD` in your config; you still need to
+launch with `accelerate` for multi-process training.
 
 ---
 
@@ -240,6 +243,7 @@ training:
   # Distributed
   distributed_strategy: ddp  # or "fsdp"
   num_gpus: 1
+  fsdp_sharding_strategy: FULL_SHARD
 
   # Hyperparameters
   batch_size: 4

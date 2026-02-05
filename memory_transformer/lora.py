@@ -28,6 +28,7 @@ class LoRALinear(nn.Module):
         alpha: int = 32,
         dropout: float = 0.0,
         merge_weights: bool = False,
+        bias: bool = False,  # Bug 19 fix: Add missing parameter
     ):
         """
         Args:
@@ -50,6 +51,13 @@ class LoRALinear(nn.Module):
         
         # Original weight (will be set from pretrained)
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
+        
+        # Bug 10 fix: Support bias from original Linear layer
+        self.has_bias = bias
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features))
+        else:
+            self.register_parameter('bias', None)
         
         # LoRA components
         self.lora_A = nn.Parameter(torch.empty(rank, in_features))
@@ -90,10 +98,10 @@ class LoRALinear(nn.Module):
             Output tensor (..., out_features)
         """
         if self.merged:
-            return F.linear(x, self.weight)
+            return F.linear(x, self.weight, self.bias)
         
-        # Base output
-        result = F.linear(x, self.weight)
+        # Base output (Bug 10 fix: include bias)
+        result = F.linear(x, self.weight, self.bias)
         
         # LoRA adaptation
         lora_out = self.lora_dropout(x)
@@ -129,10 +137,16 @@ class LoRALinear(nn.Module):
             rank=rank,
             alpha=alpha,
             dropout=dropout,
+            bias=linear.bias is not None,  # Bug 10 fix: preserve bias
         )
         
         # Copy original weights
         lora_linear.weight.data.copy_(linear.weight.data)
+        
+        # Bug 10 fix: Copy bias if present
+        if linear.bias is not None:
+            lora_linear.bias.data.copy_(linear.bias.data)
+            lora_linear.bias.requires_grad = False  # Freeze bias too
         
         # Freeze original weights
         lora_linear.weight.requires_grad = False

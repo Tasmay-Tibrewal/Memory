@@ -172,7 +172,10 @@ def save_checkpoint(
     config: Optional[Any] = None,
 ):
     """Save training checkpoint."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Bug 23 fix: Guard makedirs for paths without directory component
+    dir_name = os.path.dirname(path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
     
     checkpoint = {
         "step": step,

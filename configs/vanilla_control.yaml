@@ -16,6 +16,9 @@ model:
   vocab_size: 32000
   max_seq_len: 8192
 
+  # Tokenizer (must match vocab_size for from-scratch)
+  tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
   use_rope: true
   use_rms_norm: true
   use_flash_attention: true
@@ -47,6 +50,7 @@ training:
   dataset_name: allenai/c4
   dataset_subset: en
   dataset_split: train
+  eval_split: validation # c4 has train/validation splits
   text_field: text
 
   max_length: 2048

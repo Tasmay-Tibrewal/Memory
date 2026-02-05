@@ -1,9 +1,9 @@
 # =============================================================================
 # Memory-Augmented Transformer: Small From-Scratch Model
 # =============================================================================
-# This config trains a small (~100M param) memory-augmented transformer 
+# This config trains a small (~100M param) memory-augmented transformer
 # from scratch for research experiments.
-# 
+#
 # Usage: python scripts/train.py --config configs/base_small.yaml
 # =============================================================================
 
@@ -15,7 +15,10 @@ model:
   intermediate_dim: 3072
   vocab_size: 32000
   max_seq_len: 8192
-  
+
+  # Tokenizer (must match vocab_size for from-scratch)
+  tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
   # Standard settings
   use_rope: true
   rope_theta: 10000.0
@@ -24,7 +27,7 @@ model:
   use_rms_norm: true
   norm_eps: 1e-6
   use_flash_attention: true
-  
+
   # Not using pretrained base (from-scratch)
   base_model_name: null
   freeze_base_model: false
@@ -32,38 +35,38 @@ model:
 memory:
   # === MAIN TOGGLE: Set to true for vanilla (no memory) control ===
   vanilla_mode: false
-  
+
   # Memory bank settings
   num_memory_tokens: 4096
-  memory_dim: null  # Uses hidden_dim
-  
+  memory_dim: null # Uses hidden_dim
+
   # Memory placement: all layers get memory
   memory_layer_placement: all
-  memory_sharing: shared  # Single shared bank
-  memory_block_variant: A  # SA -> Mem -> MLP
-  
+  memory_sharing: shared # Single shared bank
+  memory_block_variant: A # SA -> Mem -> MLP
+
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
   num_chapters: 16
   top_k_chapters: 4
   routing_strategy_train: sequence
   routing_strategy_inference: sequence
-  
+
   # Router losses
   use_load_balance_loss: true
   load_balance_coefficient: 0.01
   use_auxiliary_loss: false
   use_z_loss: false
-  
+
   # Low-rank options (disabled for full expressiveness)
   use_low_rank_memory: false
   # memory_rank: 256
   # low_rank_mode: factorized
-  
+
   # Initialization
   wo_init_zero: true
   memory_init_std: 0.02
-  
+
   # LoRA (disabled for from-scratch)
   use_lora: false
   use_memory_adapter: true
@@ -73,71 +76,72 @@ training:
   # Learning rates
   memory_lr: 1e-4
   lora_lr: 1e-4
-  base_model_lr: 1e-4  # Same for from-scratch
-  
+  base_model_lr: 1e-4 # Same for from-scratch
+
   # Training mode
   training_mode: pretraining
-  
+
   # === DATASET SUGGESTIONS ===
   # Uncomment ONE of these dataset configurations:
-  
+
   # Option 1: General pretraining (recommended for from-scratch)
   dataset_name: allenai/c4
   dataset_subset: en
   dataset_split: train
+  eval_split: validation # c4 has train/validation splits
   text_field: text
-  
+
   # Option 2: SlimPajama (high quality)
   # dataset_name: cerebras/SlimPajama-627B
   # dataset_split: train
   # text_field: text
-  
+
   # Option 3: RedPajama
   # dataset_name: togethercomputer/RedPajama-Data-1T-Sample
   # dataset_split: train
   # text_field: text
-  
+
   # Option 4: Wikipedia for testing
   # dataset_name: wikipedia
   # dataset_subset: 20220301.en
   # dataset_split: train
   # text_field: text
-  
-  max_length: 2048  # Shorter for pretraining efficiency
-  
+
+  max_length: 2048 # Shorter for pretraining efficiency
+
   # Distributed
   distributed_strategy: ddp
-  
+
   # Training hyperparameters
   batch_size: 8
   gradient_accumulation_steps: 8
   max_steps: 50000
   warmup_steps: 1000
-  
+
   # Optimizer
   optimizer: adamw
   weight_decay: 0.1
   adam_beta1: 0.9
   adam_beta2: 0.95
   max_grad_norm: 1.0
-  
+
   # Scheduler
   scheduler: cosine
   min_lr_ratio: 0.1
-  
+
   # Mixed precision
   mixed_precision: bf16
-  
+
   # Checkpointing
   gradient_checkpointing: true
   save_steps: 2000
   eval_steps: 1000
   save_total_limit: 3
-  
+
   # Logging
   logging_steps: 10
   log_to_wandb: false
   wandb_project: memory-transformer
-  
+
   # Output
   output_dir: ./outputs/base_small

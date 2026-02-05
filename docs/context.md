@@ -11,7 +11,7 @@ This document provides a comprehensive summary for future work, session handoffs
 | **Goal** | Implement memory-augmented transformers with learnable cross-attention memory banks |
 | **Repository** | `Memory/` |
 | **Status** | ✅ **COMPLETE** - All requirements implemented, ready for experiments |
-| **Session** | Session 1 - Full implementation |
+| **Session** | Sessions 1â€“7 (implementation + fixes + verification + doc refresh) |
 | **Date** | February 5, 2026 |
 
 ---
@@ -35,28 +35,28 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 ### File Count Summary
 | Directory | Files | Lines of Code (approx) |
 |-----------|-------|------------------------|
-| `memory_transformer/` | 11 | ~3,400 |
-| `training/` | 4 | ~910 |
+| `memory_transformer/` | 11 | ~3,550 |
+| `training/` | 4 | ~975 |
 | `inference/` | 4 | ~840 |
-| `scripts/` | 3 | ~430 |
-| `configs/` | 5 | ~550 |
-| `docs/` | 5 | ~1,500 |
-| `docs/meta_artifacts/` | 3+ folders | ~1,000+ |
-| **Total** | **35+** | **~8,630+** |
+| `scripts/` | 3 | ~450 |
+| `configs/` | 5 | ~670 |
+| `docs/` | 5 | ~1,420 |
+| `docs/meta_artifacts/` | 3+ folders | ~2,400+ |
+| **Total** | **35+** | **~10,700+** |
 
 ### Core Architecture (`memory_transformer/`)
 
 | File | Lines | Purpose |
 |------|-------|---------|
 | `__init__.py` | 40 | Package exports with lazy loading |
-| `config.py` | 324 | Configuration system (50+ options) |
+| `config.py` | 330 | Configuration system (50+ options) |
 | `memory_bank.py` | 306 | Memory bank variants (Standard, Factorized, ReducedDim, Chaptered) |
-| `memory_attention.py` | 487 | Cross-attention for memory access |
-| `memory_block.py` | 455 | Transformer blocks (Variant A/B, Vanilla) |
+| `memory_attention.py` | 502 | Cross-attention for memory access |
+| `memory_block.py` | 475 | Transformer blocks (Variant A/B, Vanilla) |
 | `router.py` | 309 | Chapter routing with MoE losses |
 | `lora.py` | 248 | Standard LoRA implementation |
-| `model.py` | 387 | Full MemoryTransformer |
-| `adapter.py` | 482 | MemoryAdapter for pretrained models |
+| `model.py` | 438 | Full MemoryTransformer |
+| `adapter.py` | 540 | MemoryAdapter for pretrained models |
 | `quantization.py` | 167 | Memory bank quantization |
 | `utils.py` | 198 | Utilities and helpers |
 
@@ -65,7 +65,7 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | File | Lines | Purpose |
 |------|-------|---------|
 | `__init__.py` | 6 | Package init |
-| `trainer.py` | 633 | Training loop with Accelerate |
+| `trainer.py` | 698 | Training loop with Accelerate |
 | `data.py` | 215 | Dataset loading (any HF dataset) |
 | `losses.py` | 54 | Router auxiliary losses |
 
@@ -83,8 +83,8 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | File | Lines | Purpose |
 |------|-------|---------|
 | `train.py` | 45 | Training entry point |
-| `eval.py` | 253 | Evaluation (perplexity) |
-| `inference.py` | 135 | Generation script |
+| `eval.py` | 261 | Evaluation (perplexity) |
+| `inference.py` | 142 | Generation script |
 
 ### Configurations (`configs/`)
 
@@ -129,7 +129,7 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 ### Decision 4: W_o Initialization
 - **Choice**: Zero initialization
 - **Rationale**: Model starts as if no memory, gradual learning
-- **Critical for**: Adapter stability
+- **Critical for**: Adapter and from-scratch stability
 
 ### Decision 5: Adapter Injection
 - **Choice**: PyTorch hooks
@@ -186,7 +186,8 @@ num_chapters: int = 100
 # tokens_per_chapter is auto-calculated as num_memory_tokens // num_chapters
 top_k_chapters: int = 20
 routing_strategy_train: str = "sequence"
-routing_strategy_inference: str = "sequence"
+routing_strategy_inference: str = "sequence"  # sequence/rolling/token/hybrid
+routing_window_size: int = 128                # For rolling/hybrid inference
 
 # Router losses
 use_load_balance_loss: bool = true
@@ -224,6 +225,7 @@ num_layers: int = 12
 intermediate_dim: int = 3072
 vocab_size: int = 32000
 max_seq_len: int = 8192
+tokenizer_name: str = null          # Optional override; used for from-scratch too
 use_rope: bool = true
 rope_theta: float = 10000.0
 dropout: float = 0.0

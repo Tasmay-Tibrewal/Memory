@@ -62,17 +62,27 @@ def main():
     # Load model
     print("Loading model...")
     model, config = load_model(args.config, args.checkpoint)
+
+    # Optional: quantize memory bank for deployment/inference
+    if getattr(config.memory, "quantize_memory", False):
+        from inference.merge import quantize_memory_for_deployment
+        model = quantize_memory_for_deployment(
+            model,
+            bits=config.memory.memory_quant_bits,
+        )
+
     model = model.to(args.device)
     model.eval()
     
     # Load tokenizer
-    if config.model.base_model_name:
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model.base_model_name,
-            trust_remote_code=True,
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    tokenizer_name = config.model.tokenizer_name or config.model.base_model_name
+    if tokenizer_name is None:
+        tokenizer_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_name,
+        trust_remote_code=True,
+    )
     
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

@@ -149,6 +149,7 @@ def generate_batch(
     
     # Bug 8 fix: Add KV cache support
     past_key_values = None
+    is_first_step = True  # Bug 21 fix: Track first step separately
     
     for _ in range(max_new_tokens):
         if all(finished):
@@ -172,7 +173,17 @@ def generate_batch(
         logits = outputs["logits"]
         past_key_values = outputs.get("past_key_values")
         
-        next_token_logits = logits[:, -1, :]
+        # Bug 21 fix: Find last real token position per sequence (not always -1)
+        # With right-padded batches, shorter sequences have pad at position -1
+        if is_first_step:
+            # First step (prefill): find last non-pad position per sequence
+            seq_lengths = attention_mask.sum(dim=1) - 1  # (batch_size,)
+            batch_indices = torch.arange(batch_size, device=logits.device)
+            next_token_logits = logits[batch_indices, seq_lengths, :]
+            is_first_step = False
+        else:
+            # After first step, we're generating one token at a time
+            next_token_logits = logits[:, -1, :]
         
         if do_sample:
             # Apply temperature
@@ -202,16 +213,27 @@ def generate_batch(
             # Greedy
             next_tokens = next_token_logits.argmax(dim=-1, keepdim=True)
         
-        # Append
+        # Bug 6 fix: Mask finished sequences - replace their next token with pad
+        # to avoid appending garbage after EOS
+        if tokenizer.pad_token_id is not None:
+            pad_id = tokenizer.pad_token_id
+        else:
+            pad_id = tokenizer.eos_token_id  # Fallback to EOS if no pad
+        
+        for i, is_finished in enumerate(finished):
+            if is_finished:
+                next_tokens[i] = pad_id
+        
+        # Append (pad tokens for finished sequences won't affect decode with skip_special_tokens)
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
         attention_mask = torch.cat([
             attention_mask,
             torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
         ], dim=-1)
         
-        # Check for EOS
+        # Check for EOS (only for non-finished sequences)
         for i, token in enumerate(next_tokens.squeeze(-1)):
-            if token.item() == tokenizer.eos_token_id:
+            if not finished[i] and token.item() == tokenizer.eos_token_id:
                 finished[i] = True
     
     # Decode all

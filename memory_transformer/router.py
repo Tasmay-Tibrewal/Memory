@@ -144,9 +144,12 @@ class ChapterRouter(nn.Module):
         losses["load_balance"] = load_balance_loss
         
         # Auxiliary Load Loss (penalize variance in chapter usage)
-        # Encourage f to be uniform (1/num_chapters)
-        target_f = torch.ones_like(f) / self.num_chapters
-        auxiliary_loss = F.mse_loss(f, target_f)
+        # Bug 22 fix: Use soft probabilities for differentiable loss
+        # The old code used one_hot(selected_indices) which has no gradient
+        # Instead, use router_probs directly for a differentiable auxiliary loss
+        P_squared = router_probs.pow(2).mean(dim=0)  # (num_chapters,)
+        target_uniform = torch.ones_like(P_squared) / self.num_chapters
+        auxiliary_loss = F.mse_loss(P_squared, target_uniform)
         losses["auxiliary"] = auxiliary_loss
         
         # Z-Loss (regularize router logits, prevent divergence)

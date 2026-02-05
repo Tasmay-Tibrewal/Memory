@@ -222,10 +222,8 @@ memory:
   routing_strategy_train: sequence
   
   # Inference routing
-  routing_strategy_inference: sequence  # "sequence", "rolling", "token"
-  
-  # Affects rolling router
-  # (window_size not in config yet, can be added)
+  routing_strategy_inference: sequence  # "sequence", "rolling", "token", "hybrid"
+  routing_window_size: 128             # Affects rolling/hybrid router
 ```
 
 ---

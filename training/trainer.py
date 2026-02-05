@@ -61,16 +61,68 @@ class Trainer:
         self.config = config
         self.train_config = config.training
         
-        # Initialize accelerator
-        self.accelerator = Accelerator(
-            mixed_precision=config.training.mixed_precision,
-            gradient_accumulation_steps=config.training.gradient_accumulation_steps,
-            log_with="wandb" if config.training.log_to_wandb else None,
-        )
+        # Initialize accelerator (optionally with FSDP plugin)
+        fsdp_plugin = None
+        if config.training.distributed_strategy == "fsdp":
+            try:
+                from accelerate.utils import FullyShardedDataParallelPlugin
+                from torch.distributed.fsdp import ShardingStrategy
+            except Exception as e:
+                raise ImportError(
+                    "FSDP requested (training.distributed_strategy='fsdp') but required "
+                    "dependencies are unavailable. Install/upgrade accelerate and use a "
+                    "PyTorch build with FSDP support."
+                ) from e
+
+            sharding_map = {
+                "FULL_SHARD": ShardingStrategy.FULL_SHARD,
+                "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
+                "NO_SHARD": ShardingStrategy.NO_SHARD,
+            }
+            sharding_name = config.training.fsdp_sharding_strategy
+            if sharding_name not in sharding_map:
+                raise ValueError(
+                    f"Unknown fsdp_sharding_strategy: {sharding_name}. "
+                    f"Options: {sorted(sharding_map.keys())}"
+                )
+
+            fsdp_plugin = FullyShardedDataParallelPlugin(
+                sharding_strategy=sharding_map[sharding_name],
+            )
+
+        accelerator_kwargs = {
+            "mixed_precision": config.training.mixed_precision,
+            "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
+            "log_with": "wandb" if config.training.log_to_wandb else None,
+        }
+        if fsdp_plugin is not None:
+            accelerator_kwargs["fsdp_plugin"] = fsdp_plugin
+
+        try:
+            self.accelerator = Accelerator(**accelerator_kwargs)
+        except TypeError as e:
+            raise TypeError(
+                "Failed to construct Accelerator with current accelerate version. "
+                "If you requested FSDP, upgrade accelerate (>=0.25.0) or set "
+                "training.distributed_strategy='ddp'."
+            ) from e
+
+        # Validate (advisory) num_gpus against actual launched processes
+        if config.training.num_gpus and self.accelerator.num_processes != config.training.num_gpus:
+            import warnings
+            warnings.warn(
+                f"Config expects training.num_gpus={config.training.num_gpus} but "
+                f"Accelerate launched {self.accelerator.num_processes} processes. "
+                "Set --num_processes in `accelerate launch` to match, or update config.",
+                UserWarning,
+            )
         
         # Set seed
         set_seed(42)
-        
+
+        # Load tokenizer early (from-scratch vocab_size depends on tokenizer)
+        self.tokenizer = self._load_tokenizer()
+
         # Create or use provided model
         if model is not None:
             self.model = model
@@ -82,9 +134,6 @@ class Trainer:
             if hasattr(self.model, 'gradient_checkpointing_enable'):
                 self.model.gradient_checkpointing_enable()
         
-        # Load tokenizer
-        self.tokenizer = self._load_tokenizer()
-        
         # Create optimizer with parameter groups
         self.optimizer = self._create_optimizer()
         
@@ -92,26 +141,29 @@ class Trainer:
         self.train_dataloader = self._create_dataloader(split=config.training.dataset_split)
         self.eval_dataloader = self._create_dataloader(split=config.training.eval_split, shuffle=False)
         
-        # Calculate training steps
-        self._calculate_training_steps()
-        
-        # Create scheduler
-        self.scheduler = self._create_scheduler()
-        
-        # Prepare with accelerator
+        # Prepare with accelerator BEFORE calculating steps
+        # Bug 5 fix: accelerator.prepare() divides dataloader length by num_processes
+        # so we must calculate training steps AFTER prepare for correct epoch-based counts
         (
             self.model,
             self.optimizer,
             self.train_dataloader,
             self.eval_dataloader,
-            self.scheduler,
         ) = self.accelerator.prepare(
             self.model,
             self.optimizer,
             self.train_dataloader,
             self.eval_dataloader,
-            self.scheduler,
         )
+        
+        # Calculate training steps AFTER prepare (so len(dataloader) is correct)
+        self._calculate_training_steps()
+        
+        # Create scheduler (depends on total_steps from above)
+        self.scheduler = self._create_scheduler()
+        
+        # Prepare scheduler separately (already have prepared optimizer)
+        self.scheduler = self.accelerator.prepare(self.scheduler)
         
         # Training state
         self.global_step = 0
@@ -146,15 +198,45 @@ class Trainer:
     
     def _load_tokenizer(self):
         """Load tokenizer."""
-        if self.config.model.base_model_name:
-            return AutoTokenizer.from_pretrained(
-                self.config.model.base_model_name,
-                trust_remote_code=True,
-            )
-        else:
-            # For from-scratch, need a tokenizer
-            # Default to a common one
-            return AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+        tokenizer_name = self.config.model.tokenizer_name
+        if tokenizer_name is None:
+            if self.config.model.base_model_name:
+                # Adapter mode defaults to base model tokenizer.
+                tokenizer_name = self.config.model.base_model_name
+            else:
+                # From-scratch defaults to an open Llama-style tokenizer (32k vocab).
+                tokenizer_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name,
+            trust_remote_code=True,
+        )
+
+        # Persist resolved tokenizer name for checkpoint reproducibility.
+        if self.config.model.tokenizer_name is None:
+            self.config.model.tokenizer_name = tokenizer_name
+
+        # Ensure tokenizer has pad token
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        # From-scratch: validate vocab size matches tokenizer
+        if self.config.model.base_model_name is None:
+            config_vocab = self.config.model.vocab_size
+            tokenizer_vocab = len(tokenizer)
+
+            if tokenizer_vocab != config_vocab:
+                import warnings
+
+                warnings.warn(
+                    f"Vocab size mismatch: config.model.vocab_size={config_vocab} but "
+                    f"tokenizer '{tokenizer_name}' has {tokenizer_vocab} tokens. "
+                    f"Overriding config.model.vocab_size -> {tokenizer_vocab}.",
+                    UserWarning,
+                )
+                self.config.model.vocab_size = tokenizer_vocab
+
+        return tokenizer
     
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer with parameter groups."""
@@ -164,9 +246,10 @@ class Trainer:
         if isinstance(self.model, MemoryAdapter):
             param_groups = self.model.get_parameter_groups()
         else:
-            # From-scratch: all parameters with memory LR
+            # From-scratch training: use base_model_lr for all parameters
+            # Bug 25 fix: Use base_model_lr (not memory_lr) since entire model is being trained
             param_groups = [
-                {"params": self.model.parameters(), "lr": train_cfg.memory_lr}
+                {"params": self.model.parameters(), "lr": train_cfg.base_model_lr}
             ]
         
         # Filter to only trainable params
@@ -206,6 +289,9 @@ class Trainer:
         """Create dataloader for given split."""
         train_cfg = self.train_config
         
+        # Bug 26 fix: Use drop_last=False for eval to include all samples
+        is_eval = not shuffle  # Eval loaders use shuffle=False
+        
         return create_dataloader(
             dataset_name=train_cfg.dataset_name,
             tokenizer=self.tokenizer,
@@ -216,6 +302,7 @@ class Trainer:
             text_field=train_cfg.text_field,
             training_mode=train_cfg.training_mode,
             shuffle=shuffle,
+            drop_last=not is_eval,  # Bug 26 fix: False for eval
         )
     
     def _calculate_training_steps(self):
@@ -379,6 +466,7 @@ class Trainer:
         
         data_iter = iter(self.train_dataloader)
         running_loss = 0.0
+        loss = None  # Bug 4 fix: Initialize loss for empty loop case (resume from completed)
         
         for step in progress_bar:
             if self.should_stop:
@@ -474,8 +562,12 @@ class Trainer:
             if step >= self.total_steps - 1:
                 break
         
-        # Final save
-        self._save_checkpoint(self.global_step, loss.item(), final=True)
+        # Bug 4 fix: Guard final save - loss may be None if resuming from completed run
+        if loss is not None:
+            self._save_checkpoint(self.global_step, loss.item(), final=True)
+        else:
+            # Save without loss value for edge case of empty training loop
+            self._save_checkpoint(self.global_step, self.best_loss, final=True)
         
         if self.accelerator.is_main_process:
             print(f"\nTraining complete! Final step: {self.global_step}")

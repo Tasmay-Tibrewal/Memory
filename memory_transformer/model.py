@@ -68,6 +68,9 @@ class MemoryTransformer(nn.Module):
         # Create routers (if using chapters)
         self.routers = nn.ModuleDict()
         self._create_routers()
+
+        # Routing cache for rolling/hybrid inference strategies (per layer)
+        self._routing_cache: Dict[str, torch.Tensor] = {}
         
         # Build transformer layers
         self.layers = nn.ModuleList()
@@ -81,8 +84,10 @@ class MemoryTransformer(nn.Module):
                     num_heads=num_heads,
                     intermediate_dim=intermediate_dim,
                     max_seq_len=max_seq_len,
+                    use_rope=config.model.use_rope,
                     rope_theta=config.model.rope_theta,
                     dropout=config.model.dropout,
+                    attention_dropout=config.model.attention_dropout,
                     use_rms_norm=config.model.use_rms_norm,
                     norm_eps=config.model.norm_eps,
                     use_flash_attention=config.model.use_flash_attention,
@@ -95,8 +100,10 @@ class MemoryTransformer(nn.Module):
                     num_heads=num_heads,
                     intermediate_dim=intermediate_dim,
                     max_seq_len=max_seq_len,
+                    use_rope=config.model.use_rope,
                     rope_theta=config.model.rope_theta,
                     dropout=config.model.dropout,
+                    attention_dropout=config.model.attention_dropout,
                     use_rms_norm=config.model.use_rms_norm,
                     norm_eps=config.model.norm_eps,
                     use_flash_attention=config.model.use_flash_attention,
@@ -111,6 +118,7 @@ class MemoryTransformer(nn.Module):
                     reduced_dim=mem_cfg.memory_rank if mem_cfg.low_rank_mode == "reduced_dim" else None,
                     wo_init_zero=mem_cfg.wo_init_zero,
                     memory_block_variant=mem_cfg.memory_block_variant,
+                    gradient_checkpointing=mem_cfg.memory_gradient_checkpointing,
                 )
             
             self.layers.append(layer)
@@ -208,15 +216,14 @@ class MemoryTransformer(nn.Module):
             return None
         
         bank_idx = self.memory_bank_assignments[layer_idx]
-        bank = self.memory_banks.get(str(bank_idx))
-        
-        if bank is None:
+        bank_key = str(bank_idx)
+        if bank_key not in self.memory_banks:
             return None
+        bank = self.memory_banks[bank_key]
         
-        if isinstance(bank, ChapteredMemoryBank):
-            return bank.get_memory()
-        else:
-            return bank.get_memory()
+        # Bug 14 fix: Simplified - isinstance check was a no-op since
+        # both regular and ChapteredMemoryBank implement get_memory()
+        return bank.get_memory()
     
     def forward(
         self,
@@ -244,6 +251,7 @@ class MemoryTransformer(nn.Module):
             Dict with 'logits', 'loss' (if labels provided), 'past_key_values', 'router_losses'
         """
         batch_size, seq_len = input_ids.shape
+        provided_past_key_values = past_key_values
         
         # Embed tokens
         hidden_states = self.embed_tokens(input_ids)
@@ -254,6 +262,16 @@ class MemoryTransformer(nn.Module):
         # Initialize past_key_values if needed
         if past_key_values is None:
             past_key_values = [None] * len(self.layers)
+
+        # Reset rolling/hybrid routing cache at the start of a new cached sequence (prefill)
+        if (
+            not self.training
+            and use_cache
+            and provided_past_key_values is None
+            and self.memory_config.use_chapters
+            and self.memory_config.routing_strategy_inference in {"rolling", "hybrid"}
+        ):
+            self._routing_cache = {}
         
         new_key_values = []
         
@@ -267,11 +285,50 @@ class MemoryTransformer(nn.Module):
                 
                 # Route if using chapters
                 if self.memory_config.use_chapters and memory is not None:
-                    router = self.routers.get(str(layer_idx))
+                    router_key = str(layer_idx)
+                    router = self.routers[router_key] if router_key in self.routers else None
                     if router is not None:
-                        chapter_indices, chapter_weights, router_losses = router(
-                            hidden_states, return_losses=self.training
-                        )
+                        mem_cfg = self.memory_config
+                        strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+
+                        # Use training routing during training; at inference we can optionally use rolling/hybrid
+                        if self.training or (not use_cache) or strategy in {"sequence", "token"}:
+                            router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                            chapter_indices, chapter_weights, router_losses = router(
+                                hidden_states, return_losses=self.training
+                            )
+                        elif strategy in {"rolling", "hybrid"}:
+                            cache_key = str(layer_idx)
+                            window_size = mem_cfg.routing_window_size
+
+                            if strategy == "hybrid" and provided_past_key_values is None:
+                                # Prefill: full-sequence routing decision, initialize rolling cache.
+                                pooled = hidden_states.mean(dim=1)
+                                cache_states = hidden_states
+                                if cache_states.shape[1] > window_size:
+                                    cache_states = cache_states[:, -window_size:]
+                                self._routing_cache[cache_key] = cache_states.detach()
+                            else:
+                                # Generation: rolling window over recent hidden states.
+                                cached = self._routing_cache.get(cache_key)
+                                combined = (
+                                    torch.cat([cached, hidden_states], dim=1)
+                                    if cached is not None
+                                    else hidden_states
+                                )
+                                if combined.shape[1] > window_size:
+                                    combined = combined[:, -window_size:]
+                                self._routing_cache[cache_key] = combined.detach()
+                                pooled = combined.mean(dim=1)
+
+                            logits = router.router(pooled)
+                            probs = F.softmax(logits, dim=-1)
+                            chapter_weights, chapter_indices = torch.topk(probs, router.top_k, dim=-1)
+                            chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True)
+                            router_losses = {}
+                        else:
+                            raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
+
                         all_router_losses.append(router_losses)
                         
                         # Get chaptered memory bank and select chapters
@@ -281,7 +338,6 @@ class MemoryTransformer(nn.Module):
                         
                         # Bug 14 fix: Weight memory tokens by routing probabilities
                         # chapter_weights: (batch, top_k), each chapter contributes tokens_per_chapter tokens
-                        mem_cfg = self.memory_config
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
                         w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
                         w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)

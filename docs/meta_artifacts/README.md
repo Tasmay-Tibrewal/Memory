@@ -56,20 +56,21 @@ Each session folder contains detailed artifacts:
 | Session | Date | Status | Summary |
 |---------|------|--------|---------|
 | [Session 1](session1/) | Feb 5, 2026 | ✅ Complete | Full codebase implementation |
+| Sessions 2–7 | Feb 5, 2026 | ✅ Complete | Fixes + wiring + verification + doc refresh (logged in `session1/session.md`, summarized in `session_summary.md`) |
 
 ---
 
 ## Usage
 
 ### For New Sessions
-1. Create a new folder: `session{N}/`
-2. Copy the template from previous session
+1. Either append to the existing log (`session1/session.md`) or create a new folder: `session{N}/`
+2. If creating a new folder, copy the template from a previous session
 3. Log work in `session.md`
 4. Update `session_summary.md` with summary
 
 ### For Context Recovery
 1. Read `session_summary.md` for quick overview
-2. If more detail needed, read specific `session{N}/session.md`
+2. If more detail needed, read `session1/session.md` (currently contains Sessions 1–7)
 3. Check `implementation_plan.md` for original requirements
 
 ### For Agent Handoffs

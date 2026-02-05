@@ -35,6 +35,10 @@ memory_transformer/
 | `TrainingConfig` | Training hyperparameters, dataset, distributed settings |
 | `Config` | Main config combining all sub-configs |
 
+**Notable Fields**:
+- `model.tokenizer_name`: Ensures tokenizer/vocab alignment for from-scratch training.
+- `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
+
 **Key Functions**:
 ```python
 load_config(path) -> Config           # Load from YAML
@@ -96,7 +100,7 @@ ReducedDim:  N_m × r = 4096 × 512 = 2.1M params (32× less)
 | Class | Description |
 |-------|-------------|
 | `MemoryCrossAttention` | Standard memory cross-attention |
-| `MemoryCrossAttentionWithRouting` | Includes chapter router |
+| `MemoryCrossAttentionWithRouting` | *(dead code)* - routing handled externally |
 
 **Key Features**:
 - Multi-head attention with configurable heads
@@ -104,7 +108,7 @@ ReducedDim:  N_m × r = 4096 × 512 = 2.1M params (32× less)
 - Reduced-dimension mode (`reduced_dim_mode`)
 - Flash Attention support
 - **Gradient Checkpointing** support (for non-FlashAttention)
-- **Zero-initialized W_o** for stable adapter training
+- **Zero-initialized W_o** for stable training (adapter and from-scratch)
 
 **Equation**:
 ```
@@ -241,8 +245,9 @@ model = MemoryTransformer(config)
 outputs = model(input_ids, attention_mask, labels)
 # Returns: {"logits": ..., "loss": ..., "router_losses": [...]}
 
-# Parameter counting
-model.count_parameters()  # Returns breakdown dict
+# Parameter counting (use utility function)
+from memory_transformer.utils import count_parameters  # Bug 20 fix: correct import path
+count_parameters(model)  # Returns param count
 ```
 
 ---
@@ -305,7 +310,7 @@ dequantize_memory_bank(quantized, scales)  # Returns float tensor
 | `set_seed(seed)` | Set random seeds |
 | `count_parameters(model)` | Count trainable params |
 | `format_params(count)` | Format as "1.2B", "350M" |
-| `compute_model_size_bytes(model)` | Memory footprint |
+| `get_model_size_mb(model)` | Memory footprint in MB |
 | `print_model_info(model, config)` | Print summary |
 | `save_checkpoint(model, path, ...)` | Save training state |
 | `load_checkpoint(path)` | Load training state |

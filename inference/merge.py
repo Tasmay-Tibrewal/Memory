@@ -209,13 +209,37 @@ def quantize_full_model(
 
     elif method.startswith("bnb"):
         # bitsandbytes quantization (GPU only)
+        # Bug 11 fix: Split imports to avoid LinearFP8Mixed blocking 4bit/8bit
         try:
             import bitsandbytes as bnb
-            from bitsandbytes.nn import Linear8bitLt, Linear4bit, LinearFP8Mixed
         except ImportError:
             raise ImportError(
                 "bitsandbytes not installed. Install with: pip install bitsandbytes"
             )
+        
+        # Import available classes individually
+        try:
+            from bitsandbytes.nn import Linear8bitLt
+        except ImportError:
+            Linear8bitLt = None
+        
+        try:
+            from bitsandbytes.nn import Linear4bit
+        except ImportError:
+            Linear4bit = None
+        
+        try:
+            from bitsandbytes.nn import LinearFP8Mixed
+        except ImportError:
+            LinearFP8Mixed = None  # Not available in older bitsandbytes
+        
+        # Validate requested method is available
+        if method == "bnb_8bit" and Linear8bitLt is None:
+            raise ImportError("Linear8bitLt not available in this bitsandbytes version")
+        if method == "bnb_4bit" and Linear4bit is None:
+            raise ImportError("Linear4bit not available in this bitsandbytes version")
+        if method == "bnb_fp8" and LinearFP8Mixed is None:
+            raise ImportError("LinearFP8Mixed not available in this bitsandbytes version")
         
         print(f"Applying bitsandbytes {method} quantization...")
         
@@ -308,7 +332,7 @@ def export_to_gguf(
     print("Model saved. To convert to GGUF, you typically need llama.cpp.")
     print("Run the following commands if you have llama.cpp installed:")
     print("")
-    print(f"python {{llama_cpp_path}}/convert.py {intermediate_path} --outfile {output_path} --outtype {quantization_type}")
+    print(f"python {llama_cpp_path}/convert.py {intermediate_path} --outfile {output_path} --outtype {quantization_type}")
     print("")
     print("Note: Memory-Augmented transformers usually need custom C++ implementation")
     print("in llama.cpp to be fully supported. Standard conversion might fail")

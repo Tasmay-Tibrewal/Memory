@@ -43,6 +43,7 @@ class MemoryAdapterLayer(nn.Module):
         wo_init_zero: bool = True,
         dropout: float = 0.0,
         use_flash_attention: bool = True,  # Bug 6 fix: Add parameter
+        gradient_checkpointing: bool = True,  # Memory gradient checkpointing
     ):
         super().__init__()
         
@@ -63,6 +64,7 @@ class MemoryAdapterLayer(nn.Module):
             wo_init_zero=wo_init_zero,
             dropout=dropout,
             use_flash_attention=use_flash_attention,  # Bug 6 fix: Use parameter
+            gradient_checkpointing=gradient_checkpointing,
         )
     
     def forward(
@@ -110,9 +112,18 @@ class MemoryAdapter(nn.Module):
         if config.model.base_model_name is None:
             raise ValueError("base_model_name must be set for adapter mode")
         
+        # Bug 9 fix: Map mixed_precision config to correct torch dtype
+        precision = config.training.mixed_precision
+        if precision == "bf16":
+            torch_dtype = torch.bfloat16
+        elif precision == "fp16":
+            torch_dtype = torch.float16
+        else:
+            torch_dtype = torch.float32
+        
         self.base_model = AutoModelForCausalLM.from_pretrained(
             config.model.base_model_name,
-            torch_dtype=torch.bfloat16 if config.training.mixed_precision == "bf16" else torch.float32,
+            torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
         
@@ -136,6 +147,10 @@ class MemoryAdapter(nn.Module):
             )
         
         # Set up memory components
+        # Bug 24 fix: Sync config.model.num_layers with actual model before computing placement
+        # This ensures every_n, last_k, etc. use the real layer count, not the default (12)
+        config.model.num_layers = self.num_layers
+        
         self.memory_layer_indices = set(get_memory_layer_indices(config))
         self.memory_bank_assignments = get_memory_bank_assignments(config)
         
@@ -154,6 +169,9 @@ class MemoryAdapter(nn.Module):
         # Hook to capture intermediate states
         self._hooks = []
         self._hidden_states_cache = {}
+
+        # Routing cache for rolling/hybrid inference strategies (per layer)
+        self._routing_cache: Dict[str, torch.Tensor] = {}
     
     def _detect_architecture(self):
         """Detect pretrained model architecture."""
@@ -273,6 +291,8 @@ class MemoryAdapter(nn.Module):
                 ),
                 reduced_dim=mem_cfg.memory_rank if mem_cfg.low_rank_mode == "reduced_dim" else None,
                 wo_init_zero=mem_cfg.wo_init_zero,
+                use_flash_attention=self.model_config.use_flash_attention,
+                gradient_checkpointing=mem_cfg.memory_gradient_checkpointing,
             )
             self.memory_adapters[str(layer_idx)] = adapter
     
@@ -282,13 +302,13 @@ class MemoryAdapter(nn.Module):
             return None
         
         bank_idx = self.memory_bank_assignments[layer_idx]
-        bank = self.memory_banks.get(str(bank_idx))
-        
-        if bank is None:
+        bank_key = str(bank_idx)
+        if bank_key not in self.memory_banks:
             return None
+        bank = self.memory_banks[bank_key]
         
-        if isinstance(bank, ChapteredMemoryBank):
-            return bank.get_memory()
+        # Bug 14 fix: Simplified - isinstance check was a no-op since
+        # both regular and ChapteredMemoryBank implement get_memory()
         return bank.get_memory()
     
     def forward(
@@ -296,13 +316,32 @@ class MemoryAdapter(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+        past_key_values: Optional[tuple] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass with memory adaptation.
         
         This implementation uses hooks to inject memory after each layer.
+        
+        Note: position_offset is ignored for adapter mode since HF models
+        handle positional encoding internally with past_key_values.
         """
+        # Filter out position_offset - HF models don't support it and handle
+        # positions internally via past_key_values
+        kwargs.pop('position_offset', None)
+
+        # Reset rolling/hybrid routing cache at the start of a new cached sequence (prefill)
+        if (
+            not self.training
+            and use_cache
+            and past_key_values is None
+            and self.memory_config.use_chapters
+            and self.memory_config.routing_strategy_inference in {"rolling", "hybrid"}
+        ):
+            self._routing_cache = {}
+        
         batch_size, seq_len = input_ids.shape
         all_router_losses = []
         
@@ -325,11 +364,47 @@ class MemoryAdapter(nn.Module):
                     
                     # Route if using chapters
                     if self.memory_config.use_chapters and memory is not None:
-                        router = self.routers.get(str(layer_idx))
+                        router_key = str(layer_idx)
+                        router = self.routers[router_key] if router_key in self.routers else None
                         if router is not None:
-                            chapter_indices, chapter_weights, router_losses = router(
-                                hidden_states, return_losses=self.training
-                            )
+                            mem_cfg = self.memory_config
+                            strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+
+                            if self.training or (not use_cache) or strategy in {"sequence", "token"}:
+                                router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                                chapter_indices, chapter_weights, router_losses = router(
+                                    hidden_states, return_losses=self.training
+                                )
+                            elif strategy in {"rolling", "hybrid"}:
+                                cache_key = str(layer_idx)
+                                window_size = mem_cfg.routing_window_size
+
+                                if strategy == "hybrid" and past_key_values is None:
+                                    pooled = hidden_states.mean(dim=1)
+                                    cache_states = hidden_states
+                                    if cache_states.shape[1] > window_size:
+                                        cache_states = cache_states[:, -window_size:]
+                                    self._routing_cache[cache_key] = cache_states.detach()
+                                else:
+                                    cached = self._routing_cache.get(cache_key)
+                                    combined = (
+                                        torch.cat([cached, hidden_states], dim=1)
+                                        if cached is not None
+                                        else hidden_states
+                                    )
+                                    if combined.shape[1] > window_size:
+                                        combined = combined[:, -window_size:]
+                                    self._routing_cache[cache_key] = combined.detach()
+                                    pooled = combined.mean(dim=1)
+
+                                logits = router.router(pooled)
+                                probs = F.softmax(logits, dim=-1)
+                                chapter_weights, chapter_indices = torch.topk(probs, router.top_k, dim=-1)
+                                chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True)
+                                router_losses = {}
+                            else:
+                                raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
+
                             all_router_losses.append(router_losses)
                             
                             bank_idx = self.memory_bank_assignments[layer_idx]
@@ -337,7 +412,6 @@ class MemoryAdapter(nn.Module):
                             memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
                             
                             # Bug 14 fix: Weight memory tokens by routing probabilities
-                            mem_cfg = self.memory_config
                             tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
                             w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
                             w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
@@ -363,11 +437,13 @@ class MemoryAdapter(nn.Module):
             handles.append(handle)
         
         try:
-            # Forward through base model
+            # Forward through base model with use_cache and past_key_values
             outputs = self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
+                use_cache=use_cache,
+                past_key_values=past_key_values,
                 **kwargs,
             )
         finally:
@@ -384,6 +460,7 @@ class MemoryAdapter(nn.Module):
         return {
             "logits": outputs.logits,
             "loss": loss,
+            "past_key_values": getattr(outputs, 'past_key_values', None),
             "router_losses": all_router_losses,
         }
     

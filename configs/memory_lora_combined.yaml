@@ -15,6 +15,7 @@
 
 model:
   base_model_name: Qwen/Qwen2.5-1.5B
+  num_layers: 28 # Bug 24 fix: Qwen2.5-1.5B has 28 layers
   freeze_base_model: true
   use_flash_attention: true
 
@@ -69,6 +70,7 @@ training:
   # Dataset
   dataset_name: HuggingFaceH4/ultrachat_200k
   dataset_split: train_sft
+  eval_split: test_sft # ultrachat_200k has train_sft/test_sft splits
   text_field: messages
 
   max_length: 4096

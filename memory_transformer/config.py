@@ -58,7 +58,8 @@ class MemoryConfig:
     
     # Routing strategy: "sequence" (mean-pool), "token" (per-token, generation only)
     routing_strategy_train: str = "sequence"
-    routing_strategy_inference: str = "sequence"  # "sequence", "rolling", "token"
+    routing_strategy_inference: str = "sequence"  # "sequence", "rolling", "token", "hybrid"
+    routing_window_size: int = 128  # For rolling/hybrid routing during generation (inference)
     
     # === Router losses ===
     use_load_balance_loss: bool = True
@@ -105,6 +106,12 @@ class ModelConfig:
     intermediate_dim: int = 3072
     vocab_size: int = 32000
     max_seq_len: int = 8192
+
+    # === Tokenizer (for from-scratch and optional override in adapter mode) ===
+    # If None:
+    # - Adapter mode defaults to base_model_name
+    # - From-scratch defaults to a Llama-style 32k tokenizer (see Trainer._load_tokenizer)
+    tokenizer_name: Optional[str] = None
     
     # === Positional encoding ===
     use_rope: bool = True
@@ -295,6 +302,9 @@ def get_memory_layer_indices(config: Config) -> List[int]:
         return list(range(num_layers - k, num_layers))
     elif placement == "every_n":
         n = mem_cfg.memory_layer_n
+        # Bug 15 fix: Validate n > 0 to prevent ValueError from range(0, num_layers, 0)
+        if n <= 0:
+            raise ValueError(f"memory_layer_n must be > 0 for 'every_n' placement, got {n}")
         return list(range(0, num_layers, n))
     elif placement == "custom":
         if mem_cfg.memory_layer_indices is None:
@@ -333,6 +343,9 @@ def get_memory_bank_assignments(config: Config) -> dict:
     elif sharing == "every_k_layers":
         # Group layers, each group shares a bank
         k = mem_cfg.memory_sharing_k
+        # Bug 15 fix: Validate k > 0 to prevent ZeroDivisionError in i // k
+        if k <= 0:
+            raise ValueError(f"memory_sharing_k must be > 0 for 'every_k_layers' sharing, got {k}")
         bank_assignments = {}
         for i, idx in enumerate(layer_indices):
             bank_idx = i // k

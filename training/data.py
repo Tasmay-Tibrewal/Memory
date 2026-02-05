@@ -115,11 +115,21 @@ class TextDataset(Dataset):
                 {"role": "user", "content": item["prompt"]},
                 {"role": "assistant", "content": item["response"]},
             ]
-        elif self.text_field in item:
-            # Fallback to text field
-            return self._process_pretraining(item)
         else:
-            raise ValueError(f"Cannot find chat data in item: {list(item.keys())}")
+            # Bug 7 fix: Handle text_field being either a string or list
+            # When text_field is a list, we can't use `in item` directly
+            text_field_present = False
+            if isinstance(self.text_field, str):
+                text_field_present = self.text_field in item
+            elif isinstance(self.text_field, list):
+                # Check if at least one field from the list exists
+                text_field_present = any(f in item for f in self.text_field)
+            
+            if text_field_present:
+                # Fallback to text field processing (handles both str and list)
+                return self._process_pretraining(item)
+            else:
+                raise ValueError(f"Cannot find chat data in item: {list(item.keys())}")
         
         # Use chat template if available
         if hasattr(self.tokenizer, 'apply_chat_template'):
@@ -180,6 +190,7 @@ def create_dataloader(
     num_workers: int = 4,
     shuffle: bool = True,
     num_samples: Optional[int] = None,
+    drop_last: bool = True,  # Bug 26 fix: Make configurable (False for eval)
 ) -> DataLoader:
     """
     Create a DataLoader for training.
@@ -196,6 +207,7 @@ def create_dataloader(
         num_workers: DataLoader workers
         shuffle: Whether to shuffle
         num_samples: Limit samples (for testing)
+        drop_last: Whether to drop last incomplete batch (False for eval)
         
     Returns:
         DataLoader
@@ -217,5 +229,5 @@ def create_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True,
+        drop_last=drop_last,  # Bug 26 fix: Use parameter
     )

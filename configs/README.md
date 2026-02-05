@@ -38,6 +38,12 @@ model:
   intermediate_dim: 3072       # MLP intermediate dimension
   vocab_size: 32000            # Vocabulary size
   max_seq_len: 8192            # Maximum sequence length
+
+  # Tokenizer to use (must match vocab_size for from-scratch).
+  # If null:
+  # - adapter mode defaults to base_model_name
+  # - from-scratch defaults to a Llama-style 32k tokenizer
+  tokenizer_name: null         # e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
   
   # === Positional Encoding ===
   use_rope: true               # Use Rotary Position Embedding
@@ -100,11 +106,11 @@ memory:
   # === Chapter Routing (MoE-style) ===
   use_chapters: false          # Enable chapter-based routing
   num_chapters: 100            # Number of chapters
-  tokens_per_chapter: null     # Auto-calculated if null
   top_k_chapters: 20           # Chapters to select per forward pass
   
   routing_strategy_train: sequence      # Training: always sequence-level
-  routing_strategy_inference: sequence  # Inference: "sequence", "rolling", "token"
+  routing_strategy_inference: sequence  # Inference: "sequence", "rolling", "token", "hybrid"
+  routing_window_size: 128              # Rolling/hybrid window size (tokens)
   
   # === Router Losses ===
   use_load_balance_loss: true        # Load balancing loss
@@ -117,7 +123,7 @@ memory:
   z_loss_coefficient: 0.001
   
   # === Quantization ===
-  quantize_memory: false       # Quantize memory bank
+  quantize_memory: false       # Quantize memory bank (inference/eval scripts only)
   memory_quant_bits: 8         # Quantization bits (4 or 8)
   
   # === Initialization ===
