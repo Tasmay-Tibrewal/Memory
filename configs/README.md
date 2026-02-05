@@ -121,7 +121,7 @@ memory:
   memory_quant_bits: 8         # Quantization bits (4 or 8)
   
   # === Initialization ===
-  wo_init_zero: true           # Zero-init output projection (critical for adapters)
+  wo_init_zero: true           # Zero-init output projection (critical for stable training; adapter and from-scratch)
   memory_init_std: 0.02        # Memory token initialization std
   
   # === LoRA Settings ===

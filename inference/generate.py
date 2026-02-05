@@ -43,11 +43,28 @@ def generate(
     inputs = tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(device)
     
+    # Bug 8 fix: Add KV cache support
+    past_key_values = None
+    
     # Generate tokens one by one
     for _ in range(max_new_tokens):
-        # Forward pass
-        outputs = model(input_ids=input_ids)
+        # Forward pass with KV cache
+        if past_key_values is not None:
+            # Only pass the last token, use cached KV
+            model_input = input_ids[:, -1:]
+            position_offset = input_ids.shape[1] - 1
+        else:
+            model_input = input_ids
+            position_offset = 0
+        
+        outputs = model(
+            input_ids=model_input,
+            use_cache=True,
+            past_key_values=past_key_values,
+            position_offset=position_offset,
+        )
         logits = outputs["logits"]
+        past_key_values = outputs.get("past_key_values")
         
         # Get next token logits
         next_token_logits = logits[:, -1, :]
@@ -81,7 +98,7 @@ def generate(
             # Greedy
             next_token = next_token_logits.argmax(dim=-1, keepdim=True)
         
-        # Append
+        # Append (still needed for final decode)
         input_ids = torch.cat([input_ids, next_token], dim=-1)
         
         # Check for EOS
@@ -101,10 +118,16 @@ def generate_batch(
     prompts: List[str],
     max_new_tokens: int = 256,
     temperature: float = 0.7,
+    top_p: float = 0.9,
+    top_k: int = 50,
+    do_sample: bool = True,
     device: str = "cuda",
 ) -> List[str]:
     """
     Generate text for a batch of prompts.
+    
+    Bug 15 fix: Added top_k, top_p, do_sample parameters with proper sampling logic.
+    Bug 8 fix: Added KV cache support.
     
     Note: For simplicity, this pads all prompts to same length.
     For production, consider using dynamic batching.
@@ -124,19 +147,60 @@ def generate_batch(
     batch_size = input_ids.shape[0]
     finished = [False] * batch_size
     
+    # Bug 8 fix: Add KV cache support
+    past_key_values = None
+    
     for _ in range(max_new_tokens):
         if all(finished):
             break
         
+        # Forward pass with KV cache
+        if past_key_values is not None:
+            model_input = input_ids[:, -1:]
+            position_offset = input_ids.shape[1] - 1
+        else:
+            model_input = input_ids
+            position_offset = 0
+        
         outputs = model(
-            input_ids=input_ids,
+            input_ids=model_input,
             attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+            position_offset=position_offset,
         )
         logits = outputs["logits"]
+        past_key_values = outputs.get("past_key_values")
         
-        next_token_logits = logits[:, -1, :] / temperature
-        probs = torch.softmax(next_token_logits, dim=-1)
-        next_tokens = torch.multinomial(probs, num_samples=1)
+        next_token_logits = logits[:, -1, :]
+        
+        if do_sample:
+            # Apply temperature
+            next_token_logits = next_token_logits / temperature
+            
+            # Apply top-k filtering
+            if top_k > 0:
+                indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                next_token_logits[indices_to_remove] = float("-inf")
+            
+            # Apply top-p (nucleus) filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                next_token_logits[indices_to_remove] = float("-inf")
+            
+            # Sample
+            probs = torch.softmax(next_token_logits, dim=-1)
+            next_tokens = torch.multinomial(probs, num_samples=1)
+        else:
+            # Greedy
+            next_tokens = next_token_logits.argmax(dim=-1, keepdim=True)
         
         # Append
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)

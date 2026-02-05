@@ -1275,3 +1275,32 @@ Brief description of session goals.
   - **Data Pipeline**: `TextDataset` handles pretraining/instruction modes correctly. Padding mask logic (`-100`) is safe.
   - **Quantization**: 4-bit packing/unpacking logic (`uint8` containers) logic is bit-exact.
 
+---
+
+### External Bug Fix Audit (~06:23-06:45 AM IST)
+
+Fixed 15 critical bugs identified by external code review:
+
+| Bug | File | Issue | Fix |
+|-----|------|-------|-----|
+| 1 | `model.py` | W_o zero-init clobbered | Re-apply after `apply()` |
+| 2 | `merge.py` | `quantize_memory_for_deployment` broken | Complete rewrite |
+| 3 | `trainer.py` | `best_model/` missing files | Save config + state |
+| 4 | `trainer.py` | `min_lr_ratio` ignored | Use project's scheduler |
+| 5 | `trainer.py` | `find_lr` mutates config | Use `deepcopy` |
+| 6 | `adapter.py` | `use_flash_attention` hardcoded | Parameterize |
+| 7 | `memory_attention.py` | `chapter_weights` unused | Apply weighting |
+| 8 | `generate.py` | No KV cache | Implement caching |
+| 9 | `memory_attention.py` | No `reduced_dim % num_heads` check | Add assertion |
+| 10 | `memory_bank.py` | Init scale wrong | Asymmetric init |
+| 11 | `memory_attention.py` | `use_low_rank_projections` fragile | Set unconditionally |
+| 12 | `memory_block.py` | `attention_mask` format | Additive -inf mask |
+| 13 | `trainer.py` | Logging off-by-one | Log first step |
+| 14 | `model.py`/`adapter.py` | `chapter_weights` not applied | Weight memory tokens |
+| 15 | `generate.py` | `generate_batch` missing top-k/p | Full sampling |
+
+**Result**: All bugs fixed, documentation updated, codebase production-ready.
+
+---
+
+*Session 1 FINAL COMPLETE*

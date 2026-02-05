@@ -109,28 +109,42 @@ def quantize_memory_for_deployment(
     Returns:
         Model with quantized memory bank
     """
-    # Find and replace memory banks
-    for name, module in model.named_modules():
-        if hasattr(module, 'memory_bank') and not isinstance(module.memory_bank, QuantizedMemoryBank):
-            # Get original memory bank parameters
-            memory = module.memory_bank
-            num_tokens = memory.num_tokens
-            memory_dim = memory.memory_dim
-            
-            # Create quantized version
-            quantized = QuantizedMemoryBank(
-                num_tokens=num_tokens,
-                memory_dim=memory_dim,
-                quant_bits=bits,
-            )
-            
-            # Copy and quantize weights
-            with torch.no_grad():
-                original_memory = memory.get_memory()
-                quantized._quantize(original_memory)
-            
-            # Replace
-            module.memory_bank = quantized
+    from memory_transformer.memory_bank import ChapteredMemoryBank
+    
+    # Bug 2 fix: Banks live in model.memory_banks (ModuleDict), not memory_bank (singular)
+    if not hasattr(model, 'memory_banks'):
+        print("Warning: Model has no memory_banks attribute, skipping quantization")
+        return model
+    
+    for key, bank in model.memory_banks.items():
+        # Handle ChapteredMemoryBank wrapping
+        inner = bank.base_bank if isinstance(bank, ChapteredMemoryBank) else bank
+        
+        if isinstance(inner, QuantizedMemoryBank):
+            continue  # Already quantized
+        
+        # Get original memory using the universal get_memory() method
+        original_memory = inner.get_memory().detach()
+        
+        # Create new quantized bank with correct attribute names (dim, not memory_dim)
+        quantized = QuantizedMemoryBank(
+            num_tokens=inner.num_tokens,
+            dim=inner.dim,
+            quant_bits=bits,
+        )
+        
+        # Apply quantization by calling the appropriate method
+        with torch.no_grad():
+            if bits == 8:
+                quantized._quantize_8bit(original_memory)
+            elif bits == 4:
+                quantized._quantize_4bit(original_memory)
+        
+        # Replace the bank
+        if isinstance(bank, ChapteredMemoryBank):
+            bank.base_bank = quantized
+        else:
+            model.memory_banks[key] = quantized
     
     if output_path:
         output_path = Path(output_path)

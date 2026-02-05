@@ -341,7 +341,7 @@ For L=2048, N_m=16K, C=16, k=4:
 | `memory_layer_placement` | Which layers | `all`, `custom` |
 | `memory_block_variant` | Block structure | `A` (default) |
 | `use_chapters` | Enable routing | `true` if N_m > 4K |
-| `wo_init_zero` | Zero init | `true` (critical) |
+| `wo_init_zero` | Zero init W_o | `true` (adapter and from-scratch) |
 
 ### Memory Compression Flags
 | Flag | Purpose | When to Use |

@@ -42,6 +42,7 @@ class MemoryAdapterLayer(nn.Module):
         reduced_dim: Optional[int] = None,
         wo_init_zero: bool = True,
         dropout: float = 0.0,
+        use_flash_attention: bool = True,  # Bug 6 fix: Add parameter
     ):
         super().__init__()
         
@@ -61,7 +62,7 @@ class MemoryAdapterLayer(nn.Module):
             reduced_dim=reduced_dim,
             wo_init_zero=wo_init_zero,
             dropout=dropout,
-            use_flash_attention=True,
+            use_flash_attention=use_flash_attention,  # Bug 6 fix: Use parameter
         )
     
     def forward(
@@ -334,6 +335,14 @@ class MemoryAdapter(nn.Module):
                             bank_idx = self.memory_bank_assignments[layer_idx]
                             chaptered_bank = self.memory_banks[str(bank_idx)]
                             memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
+                            
+                            # Bug 14 fix: Weight memory tokens by routing probabilities
+                            mem_cfg = self.memory_config
+                            tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
+                            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+                            w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
+                            w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
+                            memory = memory * w
                     
                     # Apply memory adapter
                     if memory is not None:

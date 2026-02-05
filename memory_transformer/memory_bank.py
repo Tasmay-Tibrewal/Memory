@@ -107,13 +107,13 @@ class FactorizedMemoryBank(MemoryBank):
         self._init_memory()
     
     def _init_memory(self):
-        """Initialize factors so M = A @ B^T has appropriate scale."""
-        # Initialize such that the product has std ~= init_std
-        # Var(AB^T) ~= rank * Var(A) * Var(B)
-        # So set each to have std = init_std / sqrt(rank)
-        factor_std = self.init_std / math.sqrt(self.rank)
-        nn.init.normal_(self.A, mean=0.0, std=factor_std)
-        nn.init.normal_(self.B, mean=0.0, std=factor_std)
+        """Initialize factors so M = A @ B^T has appropriate scale.
+        
+        Bug 10 fix: Make init asymmetric. A carries target scale, B is 
+        unit-normalized so that product M has std ~= init_std.
+        """
+        nn.init.normal_(self.A, mean=0.0, std=self.init_std)
+        nn.init.normal_(self.B, mean=0.0, std=1.0 / math.sqrt(self.rank))
     
     def get_memory(self) -> torch.Tensor:
         """

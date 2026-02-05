@@ -397,7 +397,49 @@ docs/meta_artifacts/session1/
 397: - **Status**: Codebase verified as mathematically correct and production-ready.
 396: 
 397: ---
-398: 
+
+## Session 1 Continuation 13: External Bug Fix Audit
+
+**Time**: ~06:23-06:45 AM IST
+
+### Work Completed
+- Fixed **15 critical bugs** identified by external bug-checking agent:
+  1. **Bug 1**: W_o zero-init clobbered by `apply(_init_weights)` in `model.py` — re-applied after init
+  2. **Bug 2**: `quantize_memory_for_deployment` broken — complete rewrite in `merge.py`
+  3. **Bug 3**: `best_model/` missing config/training_state — now saved
+  4. **Bug 4**: `min_lr_ratio` silently ignored — now uses project's cosine scheduler
+  5. **Bug 5**: `find_lr` mutates caller config — now uses `deepcopy`
+  6. **Bug 6**: `use_flash_attention` hardcoded in `adapter.py` — now parameterized
+  7. **Bug 7**: `chapter_weights` not applied in `MemoryCrossAttentionWithRouting` — now weighted
+  8. **Bug 8**: No KV cache in `generate.py` — O(n) generation implemented
+  9. **Bug 9**: No `reduced_dim % num_heads` validation — assertion added
+  10. **Bug 10**: `FactorizedMemoryBank` init scale wrong — asymmetric init
+  11. **Bug 11**: `use_low_rank_projections` not always set — unconditional assignment
+  12. **Bug 12**: `attention_mask` shape/format wrong — proper additive mask
+  13. **Bug 13**: Logging step off-by-one — logs first step now
+  14. **Bug 14**: `chapter_weights` not applied in `model.py`/`adapter.py` — now weighted
+  15. **Bug 15**: `generate_batch` missing top-k/p — full sampling logic added
+
+### Files Modified
+| File | Changes |
+|------|---------|
+| `model.py` | W_o re-init, chapter_weights weighting |
+| `adapter.py` | use_flash_attention param, chapter_weights |
+| `memory_attention.py` | use_low_rank_projections flag, reduced_dim validation, chapter_weights |
+| `memory_bank.py` | FactorizedMemoryBank init scale |
+| `memory_block.py` | attention_mask format fix |
+| `trainer.py` | min_lr_ratio, logging step, best_model files, find_lr deepcopy |
+| `merge.py` | quantize_memory_for_deployment rewrite |
+| `generate.py` | KV cache, generate_batch top-k/p/do_sample |
+| `scripts/inference.py` | KV cache, top_p implementation |
+| `config.py` | wo_init_zero comment update |
+
+### Documentation Updated
+- `README.md`, `configs/README.md`, `docs/architecture.md`: wo_init_zero comments
+- `inference/__init__.py`: Export `generate_batch`
+
+---
+
 399: *Session 1 FINAL COMPLETE*
 
 ---

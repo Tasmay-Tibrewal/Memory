@@ -85,18 +85,45 @@ def main():
     print("-" * 50)
     
     with torch.no_grad():
-        # Simple autoregressive generation
+        # Bug 15 + Bug 8 fix: Proper sampling with top_p and KV cache
         input_ids = inputs["input_ids"]
+        past_key_values = None
         
         for _ in range(args.max_new_tokens):
-            outputs = model(input_ids=input_ids)
+            # Forward pass with KV cache
+            if past_key_values is not None:
+                model_input = input_ids[:, -1:]
+                position_offset = input_ids.shape[1] - 1
+            else:
+                model_input = input_ids
+                position_offset = 0
+            
+            outputs = model(
+                input_ids=model_input,
+                use_cache=True,
+                past_key_values=past_key_values,
+                position_offset=position_offset,
+            )
             logits = outputs["logits"]
+            past_key_values = outputs.get("past_key_values")
             
             # Get next token logits
             next_token_logits = logits[:, -1, :]
             
             # Apply temperature
             next_token_logits = next_token_logits / args.temperature
+            
+            # Apply top-p (nucleus) filtering - Bug 15 fix: actually use args.top_p
+            if args.top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                sorted_indices_to_remove = cumulative_probs > args.top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                next_token_logits[indices_to_remove] = float("-inf")
             
             # Sample
             probs = torch.softmax(next_token_logits, dim=-1)

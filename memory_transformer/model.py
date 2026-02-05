@@ -125,6 +125,17 @@ class MemoryTransformer(nn.Module):
         
         # Initialize
         self.apply(self._init_weights)
+        
+        # Re-apply W_o zero init — apply() above clobbers it
+        if self.memory_config.wo_init_zero:
+            from memory_transformer.memory_attention import MemoryCrossAttention
+            for module in self.modules():
+                if isinstance(module, MemoryCrossAttention):
+                    # Zero the output projection in whichever form it took:
+                    if hasattr(module, 'o_proj'):          # full + reduced_dim paths
+                        nn.init.zeros_(module.o_proj.weight)
+                    if hasattr(module, 'o_up'):            # low_rank path
+                        nn.init.zeros_(module.o_up.weight)
     
     def _init_weights(self, module):
         """Initialize weights."""
@@ -267,6 +278,15 @@ class MemoryTransformer(nn.Module):
                         bank_idx = self.memory_bank_assignments[layer_idx]
                         chaptered_bank = self.memory_banks[str(bank_idx)]
                         memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
+                        
+                        # Bug 14 fix: Weight memory tokens by routing probabilities
+                        # chapter_weights: (batch, top_k), each chapter contributes tokens_per_chapter tokens
+                        mem_cfg = self.memory_config
+                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
+                        w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+                        w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
+                        w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
+                        memory = memory * w
                 
                 hidden_states, new_kv = layer(
                     hidden_states,

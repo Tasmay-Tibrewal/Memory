@@ -317,7 +317,7 @@ training:
 ```
 
 ### Model Not Learning
-- Check `wo_init_zero: true` (critical for adapters)
+- Check `wo_init_zero: true` (critical for stable training — adapter and from-scratch)
 - Enable `use_load_balance_loss: true` if router collapses
 - Increase `memory_lr` relative to `base_model_lr`
 

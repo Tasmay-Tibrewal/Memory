@@ -240,13 +240,23 @@ class Trainer:
         if train_cfg.warmup_ratio is not None:
             warmup_steps = int(self.total_steps * train_cfg.warmup_ratio)
         
-        # Create base scheduler
-        scheduler = get_scheduler(
-            train_cfg.scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=self.total_steps,
-        )
+        # Bug 4 fix: Use project's cosine schedule for min_lr_ratio support
+        if train_cfg.scheduler == "cosine":
+            from memory_transformer.utils import get_cosine_schedule_with_warmup
+            scheduler = get_cosine_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=self.total_steps,
+                min_lr_ratio=train_cfg.min_lr_ratio,
+            )
+        else:
+            # Use HF scheduler for linear/constant
+            scheduler = get_scheduler(
+                train_cfg.scheduler,
+                optimizer=self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=self.total_steps,
+            )
         
         return scheduler
     
@@ -411,9 +421,9 @@ class Trainer:
             running_loss += loss.item()
             self.global_step = step + 1
             
-            # Logging
-            if step > 0 and step % train_cfg.logging_steps == 0:
-                avg_loss = running_loss / train_cfg.logging_steps
+            # Logging - Bug 13 fix: Log first step and then every logging_steps
+            if (step + 1) % train_cfg.logging_steps == 0 or step == 0:
+                avg_loss = running_loss / (train_cfg.logging_steps if step > 0 else 1)
                 lr = self.scheduler.get_last_lr()[0]
                 
                 progress_bar.set_postfix({
@@ -484,12 +494,14 @@ class Trainer:
         
         if final:
             save_path = output_dir / "final_model"
-        if best:
-            save_path = output_dir / "best_model"
         else:
             save_path = output_dir / f"checkpoint-{step}"
         
         save_path.mkdir(parents=True, exist_ok=True)
+
+        if best:
+            save_path_best = output_dir / "best_model"
+            save_path_best.mkdir(parents=True, exist_ok=True)
         
         # Get state dict (unwrapped)
         state_dict = unwrapped.state_dict()
@@ -513,6 +525,12 @@ class Trainer:
             state_dict,
             save_path / "model.pt",
         )
+
+        if best:
+            torch.save(
+                state_dict,
+                save_path_best / "model.pt",
+            )
         
         # Save config
         from memory_transformer.config import save_config
@@ -528,7 +546,22 @@ class Trainer:
             "epoch": self.epoch,
         }, save_path / "training_state.pt")
         
-        print(f"Saved {'best ' if best else ''}checkpoint to {save_path}")
+        # Bug 3 fix: Save config and training_state to best_model too
+        if best:
+            save_config(self.config, save_path_best / "config.yaml")
+            torch.save({
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "step": step,
+                "loss": loss,
+                "best_loss": self.best_loss,
+                "epoch": self.epoch,
+            }, save_path_best / "training_state.pt")
+        
+        if not best:
+            print(f"Saved checkpoint to {save_path}")
+        else:
+            print(f"Saved best checkpoint to {save_path_best}, and also to {save_path}.")
     
     @staticmethod
     def find_lr(
@@ -549,8 +582,10 @@ class Trainer:
         Returns:
             List of {lr, loss} dicts for plotting
         """
-        # Create a temporary trainer with modified settings
-        temp_config = config
+        import copy
+        
+        # Bug 5 fix: Use deepcopy to avoid mutating caller's config
+        temp_config = copy.deepcopy(config)
         temp_config.training.max_steps = num_steps
         temp_config.training.log_to_wandb = False
         

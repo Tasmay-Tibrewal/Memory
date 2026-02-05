@@ -82,8 +82,16 @@ class MemoryCrossAttention(nn.Module):
         self.reduced_dim_mode = reduced_dim_mode
         self.reduced_dim = reduced_dim
         
+        # Set flag unconditionally (Bug 11 fix)
+        self.use_low_rank_projections = use_low_rank_projections
+        
+        # Initialize projections based on mode
         if reduced_dim_mode:
             assert reduced_dim is not None, "reduced_dim required for reduced_dim_mode"
+            # Bug 9 fix: validate reduced_dim is divisible by num_heads
+            assert reduced_dim % num_heads == 0, (
+                f"reduced_dim ({reduced_dim}) must be divisible by num_heads ({num_heads})"
+            )
             self._init_reduced_dim_projections(wo_init_zero)
         elif use_low_rank_projections:
             assert projection_rank is not None, "projection_rank required for low-rank"
@@ -414,7 +422,6 @@ class MemoryCrossAttentionWithRouting(nn.Module):
         """
         batch_size = hidden_states.shape[0]
         
-        # If memory is 2D, need to select chapters per batch item
         if memory.dim() == 2:
             # Select memory tokens based on chapter_indices
             # This is the sequence-level routing case
@@ -422,6 +429,14 @@ class MemoryCrossAttentionWithRouting(nn.Module):
         else:
             # Memory already batched (e.g., from chaptered bank)
             selected_memory = memory
+        
+        # Bug 7 fix: Apply chapter_weights to scale memory tokens
+        if chapter_weights is not None:
+            # chapter_weights: (batch, top_k) -> expand to (batch, top_k*tpc, 1)
+            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+            w = w.repeat(1, 1, self.tokens_per_chapter)                # (B, top_k, tpc)
+            w = w.reshape(batch_size, -1, 1)                           # (B, top_k*tpc, 1)
+            selected_memory = selected_memory * w
         
         # Standard cross-attention on selected memory
         output, attn_weights = self.attention(

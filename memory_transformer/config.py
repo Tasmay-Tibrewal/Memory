@@ -79,7 +79,7 @@ class MemoryConfig:
     memory_quant_bits: int = 8  # 4 or 8
     
     # === Initialization ===
-    wo_init_zero: bool = True  # Initialize output projection to zero (for stable adapter training)
+    wo_init_zero: bool = True  # Initialize output projection to zero for stable training (adapter and from-scratch)
     memory_init_std: float = 0.02  # Std for memory token initialization
     
     # === LoRA settings (for comparison/combination) ===

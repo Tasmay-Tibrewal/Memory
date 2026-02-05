@@ -217,8 +217,14 @@ class SelfAttention(nn.Module):
             )
             attn_weights = attn_weights.masked_fill(causal_mask, float("-inf"))
             
+            # Bug 12 fix: Reshape mask to (B, 1, 1, S) and convert to additive format
             if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
+                # attention_mask is (B, S) with 1=valid, 0=masked
+                # Convert to additive mask: 0=valid, -inf=masked
+                additive_mask = (1 - attention_mask.float()) * float("-inf")
+                # Reshape for broadcasting: (B, 1, 1, S)
+                additive_mask = additive_mask.unsqueeze(1).unsqueeze(2)
+                attn_weights = attn_weights + additive_mask
             
             attn_weights = F.softmax(attn_weights, dim=-1)
             attn_output = torch.matmul(attn_weights, v)
