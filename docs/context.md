@@ -35,55 +35,56 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 ### File Count Summary
 | Directory | Files | Lines of Code (approx) |
 |-----------|-------|------------------------|
-| `memory_transformer/` | 11 | ~2,800 |
-| `training/` | 4 | ~550 |
-| `inference/` | 3 | ~350 |
-| `scripts/` | 3 | ~300 |
+| `memory_transformer/` | 11 | ~3,400 |
+| `training/` | 4 | ~910 |
+| `inference/` | 4 | ~840 |
+| `scripts/` | 3 | ~430 |
 | `configs/` | 5 | ~550 |
 | `docs/` | 5 | ~1,500 |
 | `docs/meta_artifacts/` | 3+ folders | ~1,000+ |
-| **Total** | **34+** | **~7,050+** |
+| **Total** | **35+** | **~8,630+** |
 
 ### Core Architecture (`memory_transformer/`)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `__init__.py` | 50 | Package exports with lazy loading |
-| `config.py` | 332 | Configuration system (50+ options) |
-| `memory_bank.py` | 265 | Memory bank variants (Standard, Factorized, ReducedDim, Chaptered) |
-| `memory_attention.py` | 383 | Cross-attention for memory access |
-| `memory_block.py` | 468 | Transformer blocks (Variant A/B, Vanilla) |
-| `router.py` | 274 | Chapter routing with MoE losses |
-| `lora.py` | 238 | Standard LoRA implementation |
-| `model.py` | 356 | Full MemoryTransformer |
-| `adapter.py` | 483 | MemoryAdapter for pretrained models |
-| `quantization.py` | 160 | Memory bank quantization |
-| `utils.py` | 213 | Utilities and helpers |
+| `__init__.py` | 40 | Package exports with lazy loading |
+| `config.py` | 324 | Configuration system (50+ options) |
+| `memory_bank.py` | 306 | Memory bank variants (Standard, Factorized, ReducedDim, Chaptered) |
+| `memory_attention.py` | 487 | Cross-attention for memory access |
+| `memory_block.py` | 455 | Transformer blocks (Variant A/B, Vanilla) |
+| `router.py` | 309 | Chapter routing with MoE losses |
+| `lora.py` | 248 | Standard LoRA implementation |
+| `model.py` | 387 | Full MemoryTransformer |
+| `adapter.py` | 482 | MemoryAdapter for pretrained models |
+| `quantization.py` | 167 | Memory bank quantization |
+| `utils.py` | 198 | Utilities and helpers |
 
 ### Training Infrastructure (`training/`)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `__init__.py` | 10 | Package init |
-| `trainer.py` | 305 | Training loop with Accelerate |
-| `data.py` | 210 | Dataset loading (any HF dataset) |
-| `losses.py` | 55 | Router auxiliary losses |
+| `__init__.py` | 6 | Package init |
+| `trainer.py` | 633 | Training loop with Accelerate |
+| `data.py` | 215 | Dataset loading (any HF dataset) |
+| `losses.py` | 54 | Router auxiliary losses |
 
 ### Inference (`inference/`)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `__init__.py` | 10 | Package init |
-| `generate.py` | 150 | Text generation utilities |
-| `routing_strategies.py` | 200 | Inference routing (sequence/rolling/token/hybrid) |
+| `__init__.py` | 9 | Package init |
+| `generate.py` | 218 | Text generation utilities |
+| `merge.py` | 377 | Model merging and quantization |
+| `routing_strategies.py` | 234 | Inference routing (sequence/rolling/token/hybrid) |
 
 ### Scripts (`scripts/`)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `train.py` | 50 | Training entry point |
-| `eval.py` | 150 | Evaluation (perplexity) |
-| `inference.py` | 110 | Generation script |
+| `train.py` | 45 | Training entry point |
+| `eval.py` | 253 | Evaluation (perplexity) |
+| `inference.py` | 135 | Generation script |
 
 ### Configurations (`configs/`)
 

@@ -145,6 +145,7 @@ Memory/
 │   ├── README.md            # Inference documentation
 │   ├── __init__.py
 │   ├── generate.py          # Text generation
+│   ├── merge.py             # Model merging and quantization
 │   └── routing_strategies.py # Inference routing (sequence/rolling/token)
 │
 ├── scripts/                  # Entry point scripts
@@ -174,7 +175,9 @@ Memory/
 │
 └── idea/                     # Original research documents
     ├── idea.txt             # Conceptual explanation
-    └── main.tex             # LaTeX paper draft
+    ├── main.tex             # LaTeX paper draft
+    ├── proposal.md          # Project proposal
+    └── Memory_Layer_in_Transformers.pdf  # Reference PDF
 ```
 
 ---

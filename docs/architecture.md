@@ -252,20 +252,20 @@ The Memory-Augmented Transformer provides:
 
 #### Memory Initialization
 ```python
-# memory_bank.py line 40
-nn.init.normal_(self.memory, mean=0.0, std=init_std)  # Default 0.02
+# memory_bank.py line 67
+nn.init.normal_(self.memory, mean=0.0, std=self.init_std)  # Default 0.02
 ```
 
-#### Zero W_o Initialization
+#### Zero Output Projection Initialization
 ```python
-# memory_attention.py lines 100-101
+# memory_attention.py line 112
 if wo_init_zero:
-    nn.init.zeros_(self.wo.weight)
+    nn.init.zeros_(self.o_proj.weight)
 ```
 
 #### Block Variant Selection
 ```python
-# memory_block.py lines 364-395
+# memory_block.py lines 370-400
 if self.memory_block_variant == "A":
     # Self-Attn → Memory → MLP
     hidden = self.self_attn(hidden)
@@ -281,7 +281,7 @@ elif self.memory_block_variant == "B":
 
 #### Hook-Based Adapter Injection
 ```python
-# adapter.py lines 309-347
+# adapter.py lines 310-356
 def create_hook(layer_idx):
     def hook(module, input, output):
         # Apply memory cross-attention after layer

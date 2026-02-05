@@ -152,11 +152,11 @@ Each folder has its own README with detailed documentation:
 
 | README | Lines | Contents |
 |--------|-------|----------|
-| [`memory_transformer/README.md`](../memory_transformer/README.md) | ~300 | All 11 core modules documented |
-| [`training/README.md`](../training/README.md) | ~200 | Trainer, data loading, losses |
-| [`inference/README.md`](../inference/README.md) | ~180 | Generation, routing strategies |
-| [`scripts/README.md`](../scripts/README.md) | ~200 | CLI scripts with all arguments |
-| [`configs/README.md`](../configs/README.md) | ~300 | Complete config reference |
+| [`memory_transformer/README.md`](../memory_transformer/README.md) | ~256 | All 11 core modules documented |
+| [`training/README.md`](../training/README.md) | ~225 | Trainer, data loading, losses |
+| [`inference/README.md`](../inference/README.md) | ~259 | Generation, merge, routing strategies |
+| [`scripts/README.md`](../scripts/README.md) | ~216 | CLI scripts with all arguments |
+| [`configs/README.md`](../configs/README.md) | ~294 | Complete config reference |
 
 ---
 
@@ -220,7 +220,7 @@ When adding new features, update documentation in this order:
 |----------|-------|-------|
 | Deep Dive Docs | 5 | ~1,500 |
 | Meta Artifacts | 3+ | ~800+ |
-| Package READMEs | 5 | ~1,180 |
-| Root README | 1 | ~335 |
-| Config README | 1 | ~300 |
-| **Total** | **15+** | **~4,115+** |
+| Package READMEs | 5 | ~1,250 |
+| Root README | 1 | ~300 |
+| Config README | 1 | ~294 |
+| **Total** | **15+** | **~4,144+** |
