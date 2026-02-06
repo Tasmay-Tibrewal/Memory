@@ -264,20 +264,27 @@ count_parameters(model)  # Returns param count
 - Llama 2 / Llama 3 series
 - Mistral series
 
-**Gradient Checkpointing Note (Adapter Mode)**:
-- `MemoryAdapter` injects memory using temporary forward hooks.
-- Hook-based injection is model-dependent when `training.gradient_checkpointing: true`.
-- In `transformers==4.52.4`, this includes common text-only families (`qwen2`, `qwen3`,
-  `llama`, `mistral`) because decoder layers use checkpointed `__call__` recompute.
-- It also affects `qwen2_moe`, `qwen3_moe`, `mixtral`, `qwen2_vl`, and `qwen2_5_vl`.
-- If unsure, set `training.gradient_checkpointing: false` for adapter training.
-- Full rationale and caveats: `docs/design.md` ("Adapter Hooks + Gradient Checkpointing Are Model-Dependent").
+**Gradient Checkpointing (Adapter Mode)**:
+- `MemoryAdapter` injects memory using **persistent** forward hooks (registered lazily on
+  first `forward()`, never removed). This is compatible with `GradientCheckpointingLayer`
+  backward recomputation (`qwen2`, `qwen3`, `llama`, `mistral`, etc.).
+- Hooks preserve the original output type (tuple vs tensor). HF layers return 1-tuples;
+  returning a bare tensor would break `layer_outputs[0]` in the model loop.
+- Per-forward state is stashed on `self._fwd_*`; side effects (router losses, cache mutation)
+  are suppressed during recompute via `self._fwd_processed_layers`.
+- **Limitation 1**: assumes one forward → one backward per micro-step (standard training).
+  Multiple forwards before a single backward is not supported with adapter GC.
+- **Limitation 2**: the out-of-band guard (`_fwd_all_router_losses is None`) is best-effort.
+  After `adapter.forward()`, `_fwd_*` state stays alive for backward GC recompute, so direct
+  `self.base_model(...)` calls will still trigger memory hooks. Always use `adapter.forward()`.
+- Full rationale: `docs/design.md` ("Adapter Hooks + Gradient Checkpointing").
 
 **How It Works**:
 1. Loads pretrained model from HuggingFace
 2. Freezes base model parameters (optional)
 3. Creates memory banks and adapters
-4. Uses PyTorch hooks to inject memory after each layer
+4. Registers persistent forward hooks on decoder layers (lazily on first forward)
+5. Hooks inject memory cross-attention after each layer, surviving GC recompute
 
 **Key Methods**:
 ```python

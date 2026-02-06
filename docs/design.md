@@ -46,18 +46,23 @@ This document records design choices, compromises, known issues, and areas for f
 - Memory contribution gradually increases as training progresses
 - Prevents instability when injecting adapters into pretrained models
 
-### 5. Router Hooking for Adapter Mode
+### 5. Persistent Hook Injection for Adapter Mode
 
-**Choice**: Use PyTorch hooks to inject memory after each layer.
+**Choice**: Use persistent PyTorch forward hooks (registered lazily on first forward, never removed) to inject memory after each decoder layer.
 
 **Rationale**:
 - Non-invasive to pretrained model code
 - Works across many model architectures
-- Alternative (patching forward) would be more fragile
+- Survives `GradientCheckpointingLayer` backward recomputation (hooks fire during recompute, producing correct memory-path gradients)
+- Lazy registration ensures DDP/FSDP/compile wrapping is applied before hooks attach
 
 **Trade-offs**:
 - Slight overhead from hook mechanism.
-- Compatibility depends on how a given HF architecture implements gradient checkpointing.
+- Per-forward state is stashed on instance attributes (`self._fwd_*`); hooks read these instead of closure variables.
+- Side effects (router loss accumulation, routing-cache mutation) are suppressed during recompute via a `_fwd_processed_layers` set.
+- Hooks must preserve the original output type (tuple vs tensor). HF decoder layers return 1-tuples like `(hidden_states,)`; returning a bare tensor would cause the model loop's `layer_outputs[0]` to index into the tensor's batch dimension instead of unpacking the tuple.
+- Assumes one forward per backward per micro-step. Multiple forwards before a single backward is NOT supported when gradient checkpointing is active.
+- The out-of-band guard (`_fwd_all_router_losses is None`) is best-effort: after `adapter.forward()` returns, `_fwd_*` state is intentionally kept alive for backward GC recompute, so direct `self.base_model(...)` calls will still trigger memory injection. Always use `adapter.forward()` as the API surface.
 
 ## Known Limitations
 
@@ -121,28 +126,22 @@ be biased.
 - Use these helpers with hidden states that do not include padded positions, or
 - Apply masked pooling before routing when padding is present.
 
-### 7. Adapter Hooks + Gradient Checkpointing Are Model-Dependent
+### 7. Adapter Hooks + Gradient Checkpointing (Resolved)
 
-`MemoryAdapter` registers temporary forward hooks before `self.base_model(...)` and removes
-them immediately after forward completes. This is safe only if backward does not recompute
-decoder layer forwards after hook removal.
+**Previous issue**: `MemoryAdapter` used to register temporary forward hooks before
+`self.base_model(...)` and remove them in a `finally` block. In `transformers>=4.35`,
+decoder layers (Qwen2, Llama, Mistral, etc.) inherit `GradientCheckpointingLayer`, whose
+`__call__` wraps forward in `_gradient_checkpointing_func` during backward recompute. With
+temporary hooks, recompute ran without memory injection — producing incorrect gradients.
 
-Some HuggingFace architectures do recomputation through
-`_gradient_checkpointing_func(decoder_layer.__call__, ...)`. In that case, recompute can run
-without the memory-injection hooks, so memory-path gradients may be incorrect.
+**Current fix**: Hooks are now **persistent** (registered lazily on first `forward()`, never
+removed). Per-forward state is stashed on `self._fwd_*` instance attributes. Recompute is
+detected via `self._fwd_processed_layers`; side effects (router loss append, routing cache
+mutation) are suppressed on recompute, but memory injection always runs.
 
-For this repository with `transformers==4.52.4`, the risk applies broadly:
-- `qwen2`, `qwen3`, `llama`, `mistral` decoder layers inherit `GradientCheckpointingLayer`
-  (checkpointing is applied inside `decoder_layer.__call__` during backward recompute).
-- `qwen2_moe`, `qwen3_moe`, `mixtral`, `qwen2_vl`, `qwen2_5_vl` also use checkpointed
-  decoder-layer recompute paths.
-
-So with temporary per-forward hooks, treat adapter + gradient checkpointing as unsupported
-on these families unless adapter injection is refactored.
-
-**Workarounds**:
-- Set `training.gradient_checkpointing: false` for unsupported families, or
-- Refactor adapter integration to avoid temporary per-forward hooks (persistent hooks or explicit wrapped layer calls).
+**Known limitations**:
+- The design assumes one forward → one backward per micro-step (standard training with Accelerate). Multiple forwards before a single backward is **not supported** when gradient checkpointing is active on the base model.
+- The out-of-band guard is best-effort (see Trade-offs in §5 above). Do not call `self.base_model(...)` directly; always go through `adapter.forward()`.
 
 ## Compromises
 

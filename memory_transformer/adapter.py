@@ -166,12 +166,32 @@ class MemoryAdapter(nn.Module):
         self.memory_adapters = nn.ModuleDict()
         self._create_memory_adapters()
         
-        # Hook to capture intermediate states
-        self._hooks = []
-        self._hidden_states_cache = {}
-
         # Routing cache for rolling/hybrid inference strategies (per layer)
         self._routing_cache: Dict[str, torch.Tensor] = {}
+
+        # Persistent hook state for gradient-checkpointing compatibility.
+        # Hooks are registered lazily on first forward() and never removed,
+        # so they survive GradientCheckpointingLayer backward recomputation.
+        # Per-forward state is stashed on self._fwd_* and read by hooks.
+        #
+        # Hooks preserve the original output type (tuple vs tensor). HF
+        # decoder layers return 1-tuples like (hidden_states,); returning a
+        # bare tensor would cause layer_outputs[0] to index the batch dim.
+        #
+        # Limitation 1: assumes one forward → one backward per micro-step
+        # (standard training). Multiple forwards before a single backward is
+        # NOT supported with adapter gradient checkpointing.
+        #
+        # Limitation 2: the out-of-band guard (_fwd_all_router_losses is None)
+        # is best-effort. After forward() returns, _fwd_* state stays alive for
+        # backward GC recompute, so direct self.base_model(...) calls will still
+        # trigger memory hooks. Always use adapter.forward() as the API surface.
+        self._hooks_registered: bool = False
+        self._fwd_attention_mask: Optional[torch.Tensor] = None
+        self._fwd_use_cache: bool = False
+        self._fwd_past_key_values: Optional[tuple] = None
+        self._fwd_all_router_losses: Optional[List[Dict[str, torch.Tensor]]] = None
+        self._fwd_processed_layers: set = set()
     
     def _detect_architecture(self):
         """Detect pretrained model architecture."""
@@ -317,6 +337,177 @@ class MemoryAdapter(nn.Module):
         # both regular and ChapteredMemoryBank implement get_memory()
         return bank.get_memory()
     
+    @staticmethod
+    def _masked_mean(states: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Mean-pool over sequence while ignoring padding (mask==0).
+
+        mask is expected to be (B, T_mask). If T_mask != T_states, we align by
+        taking the rightmost T_states positions (common for KV-cache decoding where
+        attention_mask covers the full kv_len while states are a shorter window).
+        """
+        if mask is None:
+            return states.mean(dim=1)
+        if mask.dim() != 2:
+            raise ValueError(f"attention_mask must be 2D (got shape {tuple(mask.shape)})")
+        if mask.shape[0] != states.shape[0]:
+            raise ValueError(
+                f"attention_mask batch ({mask.shape[0]}) must match states batch ({states.shape[0]})"
+            )
+        if mask.shape[1] < states.shape[1]:
+            raise ValueError(
+                f"attention_mask length ({mask.shape[1]}) must be >= states length ({states.shape[1]})"
+            )
+        if mask.shape[1] != states.shape[1]:
+            mask = mask[:, -states.shape[1]:]
+
+        m = mask.to(dtype=states.dtype, device=states.device).unsqueeze(-1)  # (B, T, 1)
+        denom = m.sum(dim=1).clamp(min=1.0)  # (B, 1)
+        return (states * m).sum(dim=1) / denom
+
+    def _register_memory_hooks(self):
+        """
+        Register persistent forward hooks on each decoder layer.
+
+        Hooks are registered lazily on the first forward() call (not in __init__)
+        so that any module wrapping (DDP, FSDP, torch.compile) has already been
+        applied to the decoder layers.
+
+        The hooks are never removed. During gradient-checkpointing backward
+        recomputation (GradientCheckpointingLayer.__call__), the hooks fire again
+        which is required for correct memory-path gradients. Side effects (router
+        loss accumulation, routing-cache mutation) are suppressed on recompute
+        via self._fwd_processed_layers.
+        """
+        layers = self._get_layers_fn()
+        for layer_idx, layer in enumerate(layers):
+            layer.register_forward_hook(self._create_memory_hook(layer_idx))
+        self._hooks_registered = True
+
+    def _create_memory_hook(self, layer_idx: int):
+        """
+        Build a persistent forward hook for decoder layer ``layer_idx``.
+
+        The hook reads per-forward state from self._fwd_* attributes (set at
+        the top of forward()) rather than closure variables, so that it works
+        correctly across gradient-checkpointing recomputation passes.
+        """
+        def hook(module, input, output):
+            # Guard: only run when we're inside our own forward().
+            # _fwd_all_router_losses is set to a list at the start of each
+            # forward() and is None otherwise.
+            if self._fwd_all_router_losses is None:
+                return  # out-of-band base_model call — pass through unchanged
+
+            # Fast path: non-memory layers need no output modification.
+            if layer_idx not in self.memory_layer_indices:
+                if layer_idx not in self._fwd_processed_layers:
+                    self._fwd_processed_layers.add(layer_idx)
+                return  # return None = don't modify output
+
+            # Unpack output — remember the original type so we can preserve it.
+            # HF decoder layers always return tuples, often 1-tuples like
+            # (hidden_states,). We must return a tuple too, otherwise the
+            # caller's `layer_outputs[0]` would index into the tensor's dim-0
+            # instead of unpacking the first tuple element.
+            output_was_tuple = isinstance(output, tuple)
+            if output_was_tuple:
+                hidden_states = output[0]
+                rest = output[1:]
+            else:
+                hidden_states = output
+                rest = ()
+
+            # Detect recompute: the layer was already processed in this forward.
+            # During recompute we still run memory injection (needed for correct
+            # gradients) but suppress side effects (router loss append, cache
+            # mutation).
+            is_recompute = layer_idx in self._fwd_processed_layers
+
+            # Apply memory (we already know this is a memory layer)
+            if not self.memory_config.vanilla_mode:
+                memory = self.get_memory_for_layer(layer_idx)
+
+                # Route if using chapters
+                if self.memory_config.use_chapters and memory is not None:
+                    router_key = str(layer_idx)
+                    router = self.routers[router_key] if router_key in self.routers else None
+                    if router is not None:
+                        mem_cfg = self.memory_config
+                        use_cache = self._fwd_use_cache
+                        past_key_values = self._fwd_past_key_values
+                        attention_mask = self._fwd_attention_mask
+                        strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+
+                        if self.training or (not use_cache) or strategy in {"sequence", "token"}:
+                            router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                            chapter_indices, chapter_weights, router_losses = router(
+                                hidden_states, return_losses=self.training
+                            )
+                        elif strategy in {"rolling", "hybrid"}:
+                            cache_key = str(layer_idx)
+                            window_size = mem_cfg.routing_window_size
+
+                            if strategy == "hybrid" and past_key_values is None:
+                                pooled = self._masked_mean(hidden_states, attention_mask)
+                                cache_states = hidden_states
+                                if cache_states.shape[1] > window_size:
+                                    cache_states = cache_states[:, -window_size:]
+                                # Side effect: only mutate cache on first pass
+                                if not is_recompute:
+                                    self._routing_cache[cache_key] = cache_states.detach()
+                            else:
+                                cached = self._routing_cache.get(cache_key)
+                                combined = (
+                                    torch.cat([cached, hidden_states], dim=1)
+                                    if cached is not None
+                                    else hidden_states
+                                )
+                                if combined.shape[1] > window_size:
+                                    combined = combined[:, -window_size:]
+                                # Side effect: only mutate cache on first pass
+                                if not is_recompute:
+                                    self._routing_cache[cache_key] = combined.detach()
+                                pooled = self._masked_mean(combined, attention_mask)
+
+                            logits = router.router(pooled)
+                            probs = F.softmax(logits, dim=-1)
+                            chapter_weights, chapter_indices = torch.topk(probs, router.top_k, dim=-1)
+                            chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True)
+                            router_losses = {}
+                        else:
+                            raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
+
+                        # Side effect: only append router losses on first pass
+                        if not is_recompute:
+                            self._fwd_all_router_losses.append(router_losses)
+
+                        bank_idx = self.memory_bank_assignments[layer_idx]
+                        chaptered_bank = self.memory_banks[str(bank_idx)]
+                        memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
+
+                        # Bug 14 fix: Weight memory tokens by routing probabilities
+                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
+                        w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+                        w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
+                        w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
+                        memory = memory * w
+
+                # Memory injection always runs (first pass AND recompute)
+                if memory is not None:
+                    adapter = self.memory_adapters[str(layer_idx)]
+                    hidden_states = adapter(hidden_states, memory)
+
+            # Mark this layer as processed (only on first pass)
+            if not is_recompute:
+                self._fwd_processed_layers.add(layer_idx)
+
+            if output_was_tuple:
+                return (hidden_states,) + rest
+            return hidden_states
+
+        return hook
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -328,15 +519,27 @@ class MemoryAdapter(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass with memory adaptation.
-        
-        This implementation uses hooks to inject memory after each layer.
-        
+
+        Memory injection is performed by persistent forward hooks on each
+        decoder layer (see _register_memory_hooks). Per-forward state is
+        stashed on self._fwd_* so hooks can read it, including during
+        gradient-checkpointing backward recomputation.
+
+        Limitation: assumes one forward → one backward per micro-step.
+        Multiple forwards before a single backward is NOT supported when
+        gradient checkpointing is active on the base model.
+
         Note: position_offset is ignored for adapter mode since HF models
         handle positional encoding internally with past_key_values.
         """
         # Filter out position_offset - HF models don't support it and handle
         # positions internally via past_key_values
         kwargs.pop('position_offset', None)
+
+        # Lazy hook registration: wait until first forward() so that any
+        # module wrapping (DDP, FSDP, compile) has already been applied.
+        if not self._hooks_registered:
+            self._register_memory_hooks()
 
         # Reset rolling/hybrid routing cache at the start of a new cached sequence (prefill)
         if (
@@ -347,149 +550,37 @@ class MemoryAdapter(nn.Module):
             and self.memory_config.routing_strategy_inference in {"rolling", "hybrid"}
         ):
             self._routing_cache = {}
-        
-        batch_size, seq_len = input_ids.shape
-        all_router_losses = []
 
-        def _masked_mean(states: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
-            """
-            Mean-pool over sequence while ignoring padding (mask==0).
+        # Stash per-forward state for persistent hooks to read.
+        # _fwd_all_router_losses doubles as an "active forward" sentinel:
+        # hooks check `is None` to skip out-of-band base_model calls.
+        all_router_losses: List[Dict[str, torch.Tensor]] = []
+        self._fwd_attention_mask = attention_mask
+        self._fwd_use_cache = use_cache
+        self._fwd_past_key_values = past_key_values
+        self._fwd_all_router_losses = all_router_losses
+        self._fwd_processed_layers = set()
 
-            mask is expected to be (B, T_mask). If T_mask != T_states, we align by
-            taking the rightmost T_states positions (common for KV-cache decoding where
-            attention_mask covers the full kv_len while states are a shorter window).
-            """
-            if mask is None:
-                return states.mean(dim=1)
-            if mask.dim() != 2:
-                raise ValueError(f"attention_mask must be 2D (got shape {tuple(mask.shape)})")
-            if mask.shape[0] != states.shape[0]:
-                raise ValueError(
-                    f"attention_mask batch ({mask.shape[0]}) must match states batch ({states.shape[0]})"
-                )
-            if mask.shape[1] < states.shape[1]:
-                raise ValueError(
-                    f"attention_mask length ({mask.shape[1]}) must be >= states length ({states.shape[1]})"
-                )
-            if mask.shape[1] != states.shape[1]:
-                mask = mask[:, -states.shape[1]:]
+        # Forward through base model — persistent hooks inject memory
+        outputs = self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            use_cache=use_cache,
+            past_key_values=past_key_values,
+            **kwargs,
+        )
 
-            m = mask.to(dtype=states.dtype, device=states.device).unsqueeze(-1)  # (B, T, 1)
-            denom = m.sum(dim=1).clamp(min=1.0)  # (B, 1)
-            return (states * m).sum(dim=1) / denom
-        
-        # Create wrapper for forward with memory injection
-        def create_hook(layer_idx):
-            def hook(module, input, output):
-                # output is usually (hidden_states, ...) or just hidden_states
-                if isinstance(output, tuple):
-                    hidden_states = output[0]
-                    rest = output[1:]
-                else:
-                    hidden_states = output
-                    rest = ()
-                
-                # Apply memory if this layer has it
-                if (layer_idx in self.memory_layer_indices 
-                    and not self.memory_config.vanilla_mode):
-                    
-                    memory = self.get_memory_for_layer(layer_idx)
-                    
-                    # Route if using chapters
-                    if self.memory_config.use_chapters and memory is not None:
-                        router_key = str(layer_idx)
-                        router = self.routers[router_key] if router_key in self.routers else None
-                        if router is not None:
-                            mem_cfg = self.memory_config
-                            strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+        # Do NOT clear self._fwd_* here: backward with gradient checkpointing
+        # may still need to recompute layers and fire hooks. State is
+        # overwritten at the start of the next forward() call instead.
 
-                            if self.training or (not use_cache) or strategy in {"sequence", "token"}:
-                                router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
-                                chapter_indices, chapter_weights, router_losses = router(
-                                    hidden_states, return_losses=self.training
-                                )
-                            elif strategy in {"rolling", "hybrid"}:
-                                cache_key = str(layer_idx)
-                                window_size = mem_cfg.routing_window_size
-
-                                if strategy == "hybrid" and past_key_values is None:
-                                    pooled = _masked_mean(hidden_states, attention_mask)
-                                    cache_states = hidden_states
-                                    if cache_states.shape[1] > window_size:
-                                        cache_states = cache_states[:, -window_size:]
-                                    self._routing_cache[cache_key] = cache_states.detach()
-                                else:
-                                    cached = self._routing_cache.get(cache_key)
-                                    combined = (
-                                        torch.cat([cached, hidden_states], dim=1)
-                                        if cached is not None
-                                        else hidden_states
-                                    )
-                                    if combined.shape[1] > window_size:
-                                        combined = combined[:, -window_size:]
-                                    self._routing_cache[cache_key] = combined.detach()
-                                    pooled = _masked_mean(combined, attention_mask)
-
-                                logits = router.router(pooled)
-                                probs = F.softmax(logits, dim=-1)
-                                chapter_weights, chapter_indices = torch.topk(probs, router.top_k, dim=-1)
-                                chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True)
-                                router_losses = {}
-                            else:
-                                raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
-
-                            all_router_losses.append(router_losses)
-                            
-                            bank_idx = self.memory_bank_assignments[layer_idx]
-                            chaptered_bank = self.memory_banks[str(bank_idx)]
-                            memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
-                            
-                            # Bug 14 fix: Weight memory tokens by routing probabilities
-                            tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
-                            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
-                            w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
-                            w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
-                            memory = memory * w
-                    
-                    # Apply memory adapter
-                    if memory is not None:
-                        adapter = self.memory_adapters[str(layer_idx)]
-                        hidden_states = adapter(hidden_states, memory)
-                
-                if rest:
-                    return (hidden_states,) + rest
-                return hidden_states
-            
-            return hook
-        
-        # Register hooks
-        layers = self._get_layers_fn()
-        handles = []
-        for layer_idx, layer in enumerate(layers):
-            handle = layer.register_forward_hook(create_hook(layer_idx))
-            handles.append(handle)
-        
-        try:
-            # Forward through base model with use_cache and past_key_values
-            outputs = self.base_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-                use_cache=use_cache,
-                past_key_values=past_key_values,
-                **kwargs,
-            )
-        finally:
-            # Remove hooks
-            for handle in handles:
-                handle.remove()
-        
         # Add router losses to main loss
         loss = outputs.loss
         if loss is not None and all_router_losses and self.training:
             router_loss = self._aggregate_router_losses(all_router_losses)
             loss = loss + router_loss
-        
+
         return {
             "logits": outputs.logits,
             "loss": loss,

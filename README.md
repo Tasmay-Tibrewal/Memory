@@ -368,11 +368,10 @@ training:
   mixed_precision: bf16
 ```
 
-Adapter mode note: hook-based memory injection is incompatible with gradient checkpointing
-for multiple HF architectures in `transformers==4.52.4`, including
-`qwen2`, `qwen3`, `llama`, `mistral`, `qwen2_moe`, `qwen3_moe`, `mixtral`,
-`qwen2_vl`, and `qwen2_5_vl`. Set `training.gradient_checkpointing: false` for adapter
-training unless adapter injection is refactored. See `docs/design.md`.
+Adapter mode uses persistent hooks that are compatible with gradient checkpointing
+(`GradientCheckpointingLayer` in `transformers>=4.35`). Hooks survive backward recompute;
+side effects are suppressed via `_fwd_processed_layers`. One limitation: assumes one forward
+per backward per micro-step. See `docs/design.md` for details.
 
 ### Model Not Learning
 - Check `wo_init_zero: true` (critical for stable training — adapter and from-scratch)

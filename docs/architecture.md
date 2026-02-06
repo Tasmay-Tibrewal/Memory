@@ -279,18 +279,40 @@ elif self.memory_block_variant == "B":
     hidden = self.mlp2(hidden)
 ```
 
-#### Hook-Based Adapter Injection
+#### Persistent Hook-Based Adapter Injection
 ```python
-# adapter.py lines 310-356
-def create_hook(layer_idx):
+# adapter.py — hooks registered lazily on first forward(), never removed.
+# This ensures hooks survive GradientCheckpointingLayer backward recompute.
+def _create_memory_hook(self, layer_idx):
     def hook(module, input, output):
-        # Apply memory cross-attention after layer
-        if layer_idx in self.memory_layer_indices:
-            memory = self.get_memory_for_layer(layer_idx)
-            hidden_states = self.memory_adapters[str(layer_idx)](output, memory)
-            return hidden_states
+        if self._fwd_all_router_losses is None:
+            return  # out-of-band call — pass through (best-effort; see note below)
+        if layer_idx not in self.memory_layer_indices:
+            if layer_idx not in self._fwd_processed_layers:
+                self._fwd_processed_layers.add(layer_idx)
+            return  # non-memory layer — don't modify output
+        # Preserve original output type: HF layers return 1-tuples like
+        # (hidden_states,); returning a bare tensor would break layer_outputs[0].
+        output_was_tuple = isinstance(output, tuple)
+        hidden_states = output[0] if output_was_tuple else output
+        rest = output[1:] if output_was_tuple else ()
+        is_recompute = layer_idx in self._fwd_processed_layers
+        memory = self.get_memory_for_layer(layer_idx)
+        # Router + chapter selection (side effects suppressed on recompute)
+        # ...
+        if memory is not None:
+            hidden_states = self.memory_adapters[str(layer_idx)](hidden_states, memory)
+        if not is_recompute:
+            self._fwd_processed_layers.add(layer_idx)
+        return (hidden_states,) + rest if output_was_tuple else hidden_states
     return hook
 ```
+
+**Note on out-of-band guard**: The `_fwd_all_router_losses is None` check is best-effort.
+After an `adapter.forward()` call, `_fwd_all_router_losses` is intentionally **not** cleared
+(backward GC recompute still needs it). Direct `self.base_model(...)` calls after a forward
+will therefore still trigger memory injection. Always use `adapter.forward()` as the API
+surface; do not call `self.base_model(...)` directly.
 
 ---
 
