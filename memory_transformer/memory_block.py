@@ -61,6 +61,7 @@ class RotaryPositionalEmbedding(nn.Module):
         x: torch.Tensor, 
         seq_len: int,
         offset: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get cos and sin for positions.
@@ -69,10 +70,43 @@ class RotaryPositionalEmbedding(nn.Module):
             x: Input tensor (for device)
             seq_len: Sequence length
             offset: Position offset (for generation)
+            position_ids: Optional explicit position IDs. If provided, this overrides
+                (seq_len, offset) and can support per-example positions for batched
+                generation with padding.
             
         Returns:
-            cos, sin tensors of shape (seq_len, dim)
+            cos, sin tensors of shape:
+            - (seq_len, dim) when using (seq_len, offset)
+            - (batch_size, seq_len, dim) when using position_ids
         """
+        if position_ids is not None:
+            if position_ids.dim() not in (1, 2):
+                raise ValueError(
+                    f"position_ids must be 1D or 2D (got shape {tuple(position_ids.shape)})"
+                )
+            if position_ids.shape[-1] != seq_len:
+                raise ValueError(
+                    f"position_ids last dim ({position_ids.shape[-1]}) must match seq_len ({seq_len})"
+                )
+            pos = position_ids.to(device=self.cos_cached.device, dtype=torch.long)
+            if pos.numel() == 0:
+                # Degenerate but safe: return empty cos/sin with correct trailing dim.
+                empty = self.cos_cached[:0]
+                return empty, empty
+
+            if (pos < 0).any():
+                raise ValueError(
+                    "position_ids must be non-negative (pads should be 0 and masked via attention_mask)."
+                )
+
+            max_pos = int(pos.max().item())
+            if max_pos + 1 > self.cos_cached.shape[0]:
+                self._build_cache(max_pos + 1)
+
+            cos = self.cos_cached[pos]
+            sin = self.sin_cached[pos]
+            return cos, sin
+
         if seq_len + offset > self.cos_cached.shape[0]:
             self._build_cache(seq_len + offset)
         
@@ -95,9 +129,21 @@ def apply_rotary_pos_emb(
     sin: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Apply rotary embedding to q and k."""
-    # Reshape cos/sin for broadcasting
-    cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, dim)
-    sin = sin.unsqueeze(0).unsqueeze(0)
+    # Reshape cos/sin for broadcasting.
+    # - If cos/sin are (seq_len, dim): broadcast across batch and heads.
+    # - If cos/sin are (batch, seq_len, dim): broadcast across heads only.
+    if cos.dim() == 2:
+        cos = cos.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, dim)
+        sin = sin.unsqueeze(0).unsqueeze(0)
+    elif cos.dim() == 3:
+        cos = cos.unsqueeze(1)  # (batch, 1, seq_len, dim)
+        sin = sin.unsqueeze(1)
+    else:
+        raise ValueError(f"Unexpected cos/sin shape: {tuple(cos.shape)}")
+
+    # Avoid mixed-precision upcasting (e.g., bf16/fp16 q,k multiplied by fp32 cos/sin).
+    cos = cos.to(dtype=q.dtype)
+    sin = sin.to(dtype=q.dtype)
     
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
@@ -123,9 +169,19 @@ class SelfAttention(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        # Bug 42 fix: Validate attention head sizing to avoid silent shape mismatches later.
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+            )
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.use_rope = use_rope
+        if self.use_rope and (self.head_dim % 2 != 0):
+            raise ValueError(
+                f"RoPE requires even head_dim (got {self.head_dim}). "
+                "Adjust hidden_dim/num_heads."
+            )
         
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.k_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -157,6 +213,7 @@ class SelfAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_offset: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -167,6 +224,8 @@ class SelfAttention(nn.Module):
             hidden_states: (batch_size, seq_len, hidden_dim)
             attention_mask: Optional mask
             position_offset: For generation
+            position_ids: Optional per-token position IDs. When provided, overrides
+                position_offset and supports padded batches with KV-cache.
             past_kv: Cached K,V from previous steps
             use_cache: Whether to return updated cache
             
@@ -187,7 +246,12 @@ class SelfAttention(nn.Module):
         # Apply rotary embeddings (optional)
         if self.use_rope:
             assert self.rotary is not None
-            cos, sin = self.rotary(q, seq_len, position_offset)
+            cos, sin = self.rotary(
+                q,
+                seq_len,
+                position_offset,
+                position_ids=position_ids,
+            )
             q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
             k = k.transpose(1, 2)
             q, k = apply_rotary_pos_emb(q, k, cos, sin)
@@ -379,6 +443,7 @@ class MemoryTransformerBlock(nn.Module):
         memory: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_offset: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -390,6 +455,8 @@ class MemoryTransformerBlock(nn.Module):
             memory: Memory bank tokens (optional)
             attention_mask: Optional attention mask
             position_offset: Position offset for generation
+            position_ids: Optional per-token position IDs. When provided, overrides
+                position_offset and supports padded batches with KV-cache.
             past_kv: Cached KV for generation
             use_cache: Whether to return updated KV cache
             
@@ -403,6 +470,7 @@ class MemoryTransformerBlock(nn.Module):
             hidden_states,
             attention_mask=attention_mask,
             position_offset=position_offset,
+            position_ids=position_ids,
             past_kv=past_kv,
             use_cache=use_cache,
         )
@@ -500,6 +568,7 @@ class VanillaTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_offset: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
         past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
@@ -511,6 +580,7 @@ class VanillaTransformerBlock(nn.Module):
             hidden_states,
             attention_mask=attention_mask,
             position_offset=position_offset,
+            position_ids=position_ids,
             past_kv=past_kv,
             use_cache=use_cache,
         )

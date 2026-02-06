@@ -65,6 +65,16 @@ outputs = generate_batch(
 # Returns list of generated strings
 ```
 
+**Padding note (important)**:
+- `generate_batch()` uses **right padding** for simplicity (`padding=True`) and then appends new tokens to the right.
+- This can produce **non-monotonic** attention masks like `[1, 1, 1, 0, 0, 1]` ("1 after 0") for shorter prompts.
+- The from-scratch `MemoryTransformer` treats `attention_mask` as a **key padding mask** (0 = masked) and does not require
+  the mask to be a strict prefix of 1s.
+- For the from-scratch `MemoryTransformer`, `generate_batch()` passes explicit `position_ids` so RoPE positions remain correct
+  even when prompts have different true lengths.
+- Some external model implementations may assume a monotonic mask; for maximum compatibility consider **left padding**
+  (`tokenizer.padding_side = "left"`) or using `transformers.generate()` for HF models.
+
 ---
 
 ### `routing_strategies.py` - Inference Routing

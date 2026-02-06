@@ -62,9 +62,12 @@ trainer.train()  # Runs full training loop
 **Checkpoint Structure**:
 ```
 outputs/checkpoint-1000/
-├── model.pt           # Model state dict
-├── config.yaml        # Full configuration
-└── training_state.pt  # Optimizer, scheduler, step
+├── model.pt            # Consolidated model weights (inference convenience)
+├── config.yaml         # Full configuration
+├── trainer_state.json  # Trainer metadata (step/epoch/best_loss)
+├── model.safetensors   # Accelerate model weights (or FSDP variants like fsdp_model.bin)
+├── optimizer.bin       # Optimizer state (FSDP-aware)
+└── scheduler.bin       # Scheduler state
 ```
 
 **Resume Training**:

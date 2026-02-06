@@ -332,7 +332,16 @@ def export_to_gguf(
     print("Model saved. To convert to GGUF, you typically need llama.cpp.")
     print("Run the following commands if you have llama.cpp installed:")
     print("")
-    print(f"python {llama_cpp_path}/convert.py {intermediate_path} --outfile {output_path} --outtype {quantization_type}")
+    if llama_cpp_path:
+        print(
+            f"python {Path(llama_cpp_path) / 'convert.py'} {intermediate_path} "
+            f"--outfile {output_path} --outtype {quantization_type}"
+        )
+    else:
+        print(
+            f"python /path/to/llama.cpp/convert.py {intermediate_path} "
+            f"--outfile {output_path} --outtype {quantization_type}"
+        )
     print("")
     print("Note: Memory-Augmented transformers usually need custom C++ implementation")
     print("in llama.cpp to be fully supported. Standard conversion might fail")

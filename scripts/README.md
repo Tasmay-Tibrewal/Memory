@@ -63,12 +63,19 @@ outputs/
 ├── checkpoint-500/
 │   ├── model.pt
 │   ├── config.yaml
-│   └── training_state.pt
+│   ├── trainer_state.json
+│   ├── model.safetensors
+│   ├── optimizer.bin
+│   └── scheduler.bin
 ├── checkpoint-1000/
 │   └── ...
 └── final_model/
     ├── model.pt
-    └── config.yaml
+    ├── config.yaml
+    ├── trainer_state.json
+    ├── model.safetensors
+    ├── optimizer.bin
+    └── scheduler.bin
 ```
 
 ---

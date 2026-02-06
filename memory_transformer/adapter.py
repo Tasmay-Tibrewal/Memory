@@ -472,19 +472,38 @@ class MemoryAdapter(nn.Module):
         mem_cfg = self.memory_config
         device = next(self.parameters()).device
         total = torch.tensor(0.0, device=device)
+        non_empty = 0
         
         for losses in all_losses:
             if not losses:
                 continue
+            non_empty += 1
             layer_loss = compute_total_router_loss(
                 losses,
                 load_balance_coef=mem_cfg.load_balance_coefficient if mem_cfg.use_load_balance_loss else 0.0,
                 auxiliary_coef=mem_cfg.auxiliary_loss_coefficient if mem_cfg.use_auxiliary_loss else 0.0,
                 z_loss_coef=mem_cfg.z_loss_coefficient if mem_cfg.use_z_loss else 0.0,
+                reference_tensor=total,
             )
             total = total + layer_loss
         
-        return total / len(all_losses) if all_losses else total
+        # Bug 32 fix: Divide by the number of non-empty loss dicts (we skip empties above).
+        return total / non_empty if non_empty > 0 else total
+
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing on the underlying pretrained model (if supported)."""
+        if hasattr(self.base_model, "gradient_checkpointing_enable"):
+            self.base_model.gradient_checkpointing_enable()
+        # HF models generally require disabling KV cache for checkpointing correctness.
+        if hasattr(self.base_model, "config") and hasattr(self.base_model.config, "use_cache"):
+            self.base_model.config.use_cache = False
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing on the underlying pretrained model (if supported)."""
+        if hasattr(self.base_model, "gradient_checkpointing_disable"):
+            self.base_model.gradient_checkpointing_disable()
+        if hasattr(self.base_model, "config") and hasattr(self.base_model.config, "use_cache"):
+            self.base_model.config.use_cache = True
     
     def get_trainable_parameters(self) -> List[nn.Parameter]:
         """Get all trainable parameters."""

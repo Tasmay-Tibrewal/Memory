@@ -145,23 +145,31 @@ def generate_batch(
     attention_mask = inputs["attention_mask"].to(device)
     
     batch_size = input_ids.shape[0]
-    finished = [False] * batch_size
+    finished = torch.zeros(batch_size, device=device, dtype=torch.bool)
+
+    # Compute explicit per-token positions for the initial prefill. This makes RoPE
+    # positions correct even with right padding (different true lengths per row).
+    # Pads are set to 0 and should be ignored via attention_mask.
+    position_ids_full = attention_mask.long().cumsum(dim=1) - 1
+    position_ids_full = position_ids_full.masked_fill(attention_mask == 0, 0)
     
     # Bug 8 fix: Add KV cache support
     past_key_values = None
     is_first_step = True  # Bug 21 fix: Track first step separately
     
     for _ in range(max_new_tokens):
-        if all(finished):
+        if bool(finished.all()):
             break
         
         # Forward pass with KV cache
         if past_key_values is not None:
             model_input = input_ids[:, -1:]
             position_offset = input_ids.shape[1] - 1
+            position_ids = (attention_mask.long().sum(dim=1) - 1).clamp(min=0).unsqueeze(1)
         else:
             model_input = input_ids
             position_offset = 0
+            position_ids = position_ids_full
         
         outputs = model(
             input_ids=model_input,
@@ -169,6 +177,7 @@ def generate_batch(
             use_cache=True,
             past_key_values=past_key_values,
             position_offset=position_offset,
+            position_ids=position_ids,
         )
         logits = outputs["logits"]
         past_key_values = outputs.get("past_key_values")
@@ -220,21 +229,19 @@ def generate_batch(
         else:
             pad_id = tokenizer.eos_token_id  # Fallback to EOS if no pad
         
-        for i, is_finished in enumerate(finished):
-            if is_finished:
-                next_tokens[i] = pad_id
+        next_tokens[finished] = pad_id
         
         # Append (pad tokens for finished sequences won't affect decode with skip_special_tokens)
         input_ids = torch.cat([input_ids, next_tokens], dim=-1)
         attention_mask = torch.cat([
             attention_mask,
-            torch.ones((batch_size, 1), device=device, dtype=attention_mask.dtype)
+            # Cleaner masking: finished sequences append PAD with mask=0, unfinished append with mask=1.
+            (~finished).to(dtype=attention_mask.dtype).unsqueeze(1)
         ], dim=-1)
         
         # Check for EOS (only for non-finished sequences)
-        for i, token in enumerate(next_tokens.squeeze(-1)):
-            if not finished[i] and token.item() == tokenizer.eos_token_id:
-                finished[i] = True
+        eos_mask = (~finished) & (next_tokens.squeeze(-1) == tokenizer.eos_token_id)
+        finished = finished | eos_mask
     
     # Decode all
     outputs = [

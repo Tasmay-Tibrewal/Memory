@@ -141,8 +141,17 @@ def quantize_memory_bank(
         quant_bits: Bits for quantization
         
     Returns:
-        Tuple of (quantized_memory, scales)
+        Tuple of (quantized_memory, scales).
+
+        Notes:
+        - For 8-bit: quantized_memory has shape (num_tokens, dim) and dtype int8.
+        - For 4-bit: quantized_memory is packed INT4 stored as int8, with shape
+          (num_tokens, dim // 2). Each int8 stores two signed 4-bit values.
     """
+    if memory_tensor.ndim != 2:
+        raise ValueError(
+            f"memory_tensor must be 2D (num_tokens, dim), got shape {tuple(memory_tensor.shape)}"
+        )
     abs_max = memory_tensor.abs().max(dim=1, keepdim=True).values
     
     if quant_bits == 8:
@@ -153,6 +162,15 @@ def quantize_memory_bank(
         scales = abs_max / 7.0
         scales = scales.clamp(min=1e-8)
         quantized = torch.round(memory_tensor / scales).clamp(-8, 7).to(torch.int8)
+
+        dim = int(memory_tensor.shape[1])
+        if dim % 2 != 0:
+            raise ValueError("4-bit quantization requires even dim for packing")
+
+        # Pack two signed 4-bit values into one byte (int8), matching QuantizedMemoryBank.
+        q = quantized.view(quantized.shape[0], -1, 2)
+        quantized = (q[:, :, 0] & 0x0F) | ((q[:, :, 1] & 0x0F) << 4)
+        quantized = quantized.to(torch.int8)
     else:
         raise ValueError(f"Unsupported quant_bits: {quant_bits}")
     
@@ -162,6 +180,7 @@ def quantize_memory_bank(
 def dequantize_memory_bank(
     quantized_memory: torch.Tensor,
     scales: torch.Tensor,
+    quant_bits: int = 8,
 ) -> torch.Tensor:
     """
     Dequantize a memory tensor.
@@ -169,8 +188,26 @@ def dequantize_memory_bank(
     Args:
         quantized_memory: Quantized memory (int8)
         scales: Per-row scales
+        quant_bits: Bits used for quantization (4 or 8)
         
     Returns:
         Dequantized float tensor
     """
-    return quantized_memory.float() * scales.unsqueeze(1)
+    if quant_bits == 8:
+        return quantized_memory.float() * scales.unsqueeze(1)
+    if quant_bits != 4:
+        raise ValueError(f"Unsupported quant_bits: {quant_bits}")
+
+    if quantized_memory.ndim != 2:
+        raise ValueError(
+            f"quantized_memory must be 2D (num_tokens, packed_dim), got shape {tuple(quantized_memory.shape)}"
+        )
+    # Unpack INT4 nibbles from packed INT8 representation, matching QuantizedMemoryBank._dequantize().
+    packed = quantized_memory.to(torch.int8)
+    low = (packed & 0x0F).to(torch.int8)
+    low = torch.where(low > 7, low - 16, low)
+    high = ((packed >> 4) & 0x0F).to(torch.int8)
+    high = torch.where(high > 7, high - 16, high)
+
+    unpacked = torch.stack([low, high], dim=-1).view(packed.shape[0], -1)
+    return unpacked.float() * scales.unsqueeze(1)

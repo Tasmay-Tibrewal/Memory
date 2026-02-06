@@ -12,7 +12,7 @@ Usage:
     python scripts/eval.py --config configs/adapter_qwen2.5_1.5b.yaml --checkpoint outputs/final_model
     
     # Multi-GPU (distributed)
-    accelerate launch scripts/eval.py --config configs/base.yaml --checkpoint outputs/final_model
+    accelerate launch scripts/eval.py --distributed --config configs/base_small.yaml --checkpoint outputs/final_model
 """
 
 import argparse
@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 import json
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import math
@@ -51,8 +52,27 @@ def load_model(config, checkpoint_path: str = None):
     
     if checkpoint_path:
         checkpoint_dir = Path(checkpoint_path)
-        state_dict = torch.load(checkpoint_dir / "model.pt", map_location="cpu")
-        model.load_state_dict(state_dict)
+        model_path_pt = checkpoint_dir / "model.pt"
+        if model_path_pt.exists():
+            state_dict = torch.load(model_path_pt, map_location="cpu")
+            model.load_state_dict(state_dict)
+        else:
+            # Fallback: support Accelerate/Transformers-style checkpoint files.
+            safe_path = checkpoint_dir / "model.safetensors"
+            bin_path = checkpoint_dir / "pytorch_model.bin"
+            if safe_path.exists():
+                from safetensors.torch import load_file
+
+                state_dict = load_file(str(safe_path), device="cpu")
+                model.load_state_dict(state_dict)
+            elif bin_path.exists():
+                state_dict = torch.load(bin_path, map_location="cpu")
+                model.load_state_dict(state_dict)
+            else:
+                raise FileNotFoundError(
+                    f"No supported model weights found in {checkpoint_dir} "
+                    f"(expected {model_path_pt.name}, {safe_path.name}, or {bin_path.name})."
+                )
     
     return model
 
@@ -111,8 +131,10 @@ def compute_perplexity_single(model, dataloader, device):
 def compute_perplexity_distributed(model, dataloader, accelerator):
     """Compute perplexity on a dataset (distributed)."""
     model.eval()
-    total_loss = 0.0
-    total_tokens = 0
+    total_loss_sum = torch.tensor(0.0, device=accelerator.device)
+    total_tokens = torch.tensor(0, device=accelerator.device, dtype=torch.long)
+    gather_for_metrics = getattr(accelerator, "gather_for_metrics", None)
+    use_gather_for_metrics = callable(gather_for_metrics)
     
     progress_bar = tqdm(
         dataloader, 
@@ -125,22 +147,35 @@ def compute_perplexity_distributed(model, dataloader, accelerator):
             outputs = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask"),
-                labels=batch["labels"],
             )
-            
-            loss = outputs["loss"]
-            # Bug 12 fix: Account for label shifting (model uses labels[..., 1:])
-            shifted_labels = batch["labels"][..., 1:]
-            num_tokens = (shifted_labels != -100).sum()
-            
-            # Gather across processes
-            gathered_loss = accelerator.gather(loss * num_tokens)
-            gathered_tokens = accelerator.gather(num_tokens)
-            
-            total_loss += gathered_loss.sum().item()
-            total_tokens += gathered_tokens.sum().item()
-    
-    avg_loss = total_loss / max(total_tokens, 1)
+
+            logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = batch["labels"][..., 1:].contiguous()
+
+            per_token_loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).view_as(shift_labels)
+
+            token_mask = shift_labels != -100
+            per_sample_loss_sum = (per_token_loss * token_mask).sum(dim=1)
+            per_sample_tokens = token_mask.sum(dim=1)
+
+            if use_gather_for_metrics:
+                per_sample_loss_sum = gather_for_metrics(per_sample_loss_sum)
+                per_sample_tokens = gather_for_metrics(per_sample_tokens)
+
+            total_loss_sum = total_loss_sum + per_sample_loss_sum.sum()
+            total_tokens = total_tokens + per_sample_tokens.sum()
+
+    if not use_gather_for_metrics:
+        total_loss_sum = accelerator.reduce(total_loss_sum, reduction="sum")
+        total_tokens = accelerator.reduce(total_tokens, reduction="sum")
+
+    avg_loss = (total_loss_sum / total_tokens.clamp_min(1).to(total_loss_sum.dtype)).item()
     perplexity = math.exp(avg_loss)
     
     return perplexity, avg_loss

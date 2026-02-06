@@ -39,8 +39,26 @@ def load_model(config_path: str = None, checkpoint_path: str = None):
     # Load weights if checkpoint provided
     if checkpoint_path:
         checkpoint_dir = Path(checkpoint_path)
-        state_dict = torch.load(checkpoint_dir / "model.pt", map_location="cpu")
-        model.load_state_dict(state_dict)
+        model_path_pt = checkpoint_dir / "model.pt"
+        if model_path_pt.exists():
+            state_dict = torch.load(model_path_pt, map_location="cpu")
+            model.load_state_dict(state_dict)
+        else:
+            safe_path = checkpoint_dir / "model.safetensors"
+            bin_path = checkpoint_dir / "pytorch_model.bin"
+            if safe_path.exists():
+                from safetensors.torch import load_file
+
+                state_dict = load_file(str(safe_path), device="cpu")
+                model.load_state_dict(state_dict)
+            elif bin_path.exists():
+                state_dict = torch.load(bin_path, map_location="cpu")
+                model.load_state_dict(state_dict)
+            else:
+                raise FileNotFoundError(
+                    f"No supported model weights found in {checkpoint_dir} "
+                    f"(expected {model_path_pt.name}, {safe_path.name}, or {bin_path.name})."
+                )
     
     return model, config
 

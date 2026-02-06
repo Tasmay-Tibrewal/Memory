@@ -144,6 +144,17 @@ class MemoryTransformer(nn.Module):
                         nn.init.zeros_(module.o_proj.weight)
                     if hasattr(module, 'o_up'):            # low_rank path
                         nn.init.zeros_(module.o_up.weight)
+
+        # Bug 39 fix: Training-level gradient checkpointing support (enabled via Trainer when requested).
+        self._gradient_checkpointing = False
+
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing for transformer layers (from-scratch model)."""
+        self._gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing for transformer layers (from-scratch model)."""
+        self._gradient_checkpointing = False
     
     def _init_weights(self, module):
         """Initialize weights."""
@@ -231,6 +242,7 @@ class MemoryTransformer(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         position_offset: int = 0,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False,
         return_dict: bool = True,
@@ -243,6 +255,8 @@ class MemoryTransformer(nn.Module):
             attention_mask: Optional attention mask
             labels: Optional labels for loss computation
             position_offset: Position offset for generation
+            position_ids: Optional per-token position IDs. When provided, overrides
+                position_offset and supports padded batches with KV-cache.
             past_key_values: Cached KV for generation
             use_cache: Whether to return KV cache
             return_dict: Whether to return dict (always True)
@@ -274,6 +288,15 @@ class MemoryTransformer(nn.Module):
             self._routing_cache = {}
         
         new_key_values = []
+        use_gradient_checkpointing = (
+            self._gradient_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+            and not use_cache
+        )
+        checkpoint_fn = None
+        if use_gradient_checkpointing:
+            from torch.utils.checkpoint import checkpoint as checkpoint_fn
         
         # Forward through layers
         for layer_idx, layer in enumerate(self.layers):
@@ -344,23 +367,56 @@ class MemoryTransformer(nn.Module):
                         w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
                         memory = memory * w
                 
-                hidden_states, new_kv = layer(
-                    hidden_states,
-                    memory=memory,
-                    attention_mask=attention_mask,
-                    position_offset=position_offset,
-                    past_kv=past_kv,
-                    use_cache=use_cache,
-                )
+                if use_gradient_checkpointing:
+                    def _layer_forward(h: torch.Tensor) -> torch.Tensor:
+                        out, _ = layer(
+                            h,
+                            memory=memory,
+                            attention_mask=attention_mask,
+                            position_offset=position_offset,
+                            position_ids=position_ids,
+                            past_kv=None,
+                            use_cache=False,
+                        )
+                        return out
+
+                    hidden_states = checkpoint_fn(_layer_forward, hidden_states, use_reentrant=False)
+                    new_kv = None
+                else:
+                    hidden_states, new_kv = layer(
+                        hidden_states,
+                        memory=memory,
+                        attention_mask=attention_mask,
+                        position_offset=position_offset,
+                        position_ids=position_ids,
+                        past_kv=past_kv,
+                        use_cache=use_cache,
+                    )
             else:
                 # Vanilla layer (no memory argument)
-                hidden_states, new_kv = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_offset=position_offset,
-                    past_kv=past_kv,
-                    use_cache=use_cache,
-                )
+                if use_gradient_checkpointing:
+                    def _layer_forward(h: torch.Tensor) -> torch.Tensor:
+                        out, _ = layer(
+                            h,
+                            attention_mask=attention_mask,
+                            position_offset=position_offset,
+                            position_ids=position_ids,
+                            past_kv=None,
+                            use_cache=False,
+                        )
+                        return out
+
+                    hidden_states = checkpoint_fn(_layer_forward, hidden_states, use_reentrant=False)
+                    new_kv = None
+                else:
+                    hidden_states, new_kv = layer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_offset=position_offset,
+                        position_ids=position_ids,
+                        past_kv=past_kv,
+                        use_cache=use_cache,
+                    )
             
             new_key_values.append(new_kv)
         
@@ -407,6 +463,7 @@ class MemoryTransformer(nn.Module):
                 load_balance_coef=mem_cfg.load_balance_coefficient if mem_cfg.use_load_balance_loss else 0.0,
                 auxiliary_coef=mem_cfg.auxiliary_loss_coefficient if mem_cfg.use_auxiliary_loss else 0.0,
                 z_loss_coef=mem_cfg.z_loss_coefficient if mem_cfg.use_z_loss else 0.0,
+                reference_tensor=total,
             )
             total = total + layer_loss
         

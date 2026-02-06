@@ -11,12 +11,14 @@ Supports:
 """
 
 import os
+import json
 import math
 import shutil
 from typing import Optional, Dict, Any, Union, List
 from pathlib import Path
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -106,6 +108,10 @@ class Trainer:
                 "If you requested FSDP, upgrade accelerate (>=0.25.0) or set "
                 "training.distributed_strategy='ddp'."
             ) from e
+
+        # Note: Keep Accelerate's default even_batches=True. This keeps evaluation loops safe for FSDP
+        # (all ranks run the same number of forward passes). We avoid metric bias from duplicated samples
+        # by using accelerator.gather_for_metrics() in evaluate().
 
         # Validate (advisory) num_gpus against actual launched processes
         if config.training.num_gpus and self.accelerator.num_processes != config.training.num_gpus:
@@ -311,7 +317,9 @@ class Trainer:
         
         if train_cfg.num_epochs is not None:
             # Epoch-based training
-            steps_per_epoch = len(self.train_dataloader) // train_cfg.gradient_accumulation_steps
+            grad_accum = max(int(train_cfg.gradient_accumulation_steps), 1)
+            # Bug 29 fix: Use ceil to include partial accumulation at end of epoch.
+            steps_per_epoch = math.ceil(len(self.train_dataloader) / grad_accum)
             self.total_steps = train_cfg.num_epochs * steps_per_epoch
             self.steps_per_epoch = steps_per_epoch
         else:
@@ -359,52 +367,116 @@ class Trainer:
         """Resume training from checkpoint."""
         checkpoint_dir = Path(checkpoint_path)
         
-        # Load model weights
-        model_path = checkpoint_dir / "model.pt"
-        if model_path.exists():
-            state_dict = torch.load(model_path, map_location="cpu")
-            self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+        # Prefer Accelerate-native state restore (required for FSDP correctness).
+        # Bug 34 fix: manual load_state_dict() on sharded models is invalid in FSDP.
+        loaded_accelerate_state = False
+        try:
+            self.accelerator.load_state(str(checkpoint_dir))
+            loaded_accelerate_state = True
             if self.accelerator.is_main_process:
-                print(f"Loaded model from {model_path}")
-        
-        # Load training state
-        state_path = checkpoint_dir / "training_state.pt"
-        if state_path.exists():
-            state = torch.load(state_path, map_location="cpu")
-            self.optimizer.load_state_dict(state["optimizer"])
-            self.scheduler.load_state_dict(state["scheduler"])
-            self.global_step = state["step"]
-            self.best_loss = state.get("best_loss", float('inf'))
+                print(f"Loaded accelerator state from {checkpoint_dir}")
+        except Exception as e:
+            # Legacy fallback for older checkpoints (single GPU / DDP only).
+            if self.train_config.distributed_strategy == "fsdp":
+                raise RuntimeError(
+                    "Failed to resume from checkpoint in FSDP mode. "
+                    "This checkpoint does not appear to be an Accelerate checkpoint, "
+                    "and legacy model.pt loading is not FSDP-safe."
+                ) from e
+
+            model_path = checkpoint_dir / "model.pt"
+            state_path = checkpoint_dir / "training_state.pt"
+            if model_path.exists() and state_path.exists():
+                state_dict = torch.load(model_path, map_location="cpu")
+                self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+
+                state = torch.load(state_path, map_location="cpu")
+                self.optimizer.load_state_dict(state["optimizer"])
+                self.scheduler.load_state_dict(state["scheduler"])
+                self.global_step = int(state.get("step", 0))
+                self.best_loss = float(state.get("best_loss", float("inf")))
+                self.epoch = int(state.get("epoch", 0))
+                self.patience_counter = int(state.get("patience_counter", 0))
+                if self.accelerator.is_main_process:
+                    print(
+                        f"Resumed (legacy) from step {self.global_step}, best_loss={self.best_loss:.4f}"
+                    )
+            else:
+                raise RuntimeError(
+                    f"Checkpoint at {checkpoint_dir} is missing required files for legacy resume."
+                ) from e
+
+        # Load trainer metadata (global_step/best_loss/etc.) saved alongside the accelerate checkpoint.
+        trainer_state_path = checkpoint_dir / "trainer_state.json"
+        if trainer_state_path.exists():
+            with open(trainer_state_path, "r") as f:
+                trainer_state = json.load(f)
+            self.global_step = int(trainer_state.get("global_step", self.global_step))
+            self.best_loss = float(trainer_state.get("best_loss", self.best_loss))
+            self.epoch = int(trainer_state.get("epoch", self.epoch))
+            self.patience_counter = int(trainer_state.get("patience_counter", self.patience_counter))
+
             if self.accelerator.is_main_process:
-                print(f"Resumed from step {self.global_step}, best_loss={self.best_loss:.4f}")
+                resume_kind = "accelerate" if loaded_accelerate_state else "legacy"
+                print(
+                    f"Resumed ({resume_kind}) trainer state: step={self.global_step}, "
+                    f"epoch={self.epoch}, best_loss={self.best_loss:.4f}"
+                )
     
     def evaluate(self) -> Dict[str, float]:
         """Run evaluation on eval dataset."""
         self.model.eval()
-        total_loss = 0.0
-        total_samples = 0
+
+        # Bug 28 fix: Token-weighted loss (sum over tokens / sum tokens), aggregated globally.
+        # Bug 36 fix: Use gather_for_metrics to drop duplicated samples introduced by even_batches=True
+        # while keeping FSDP-safe synchronized batch counts.
+        total_loss_sum = torch.tensor(0.0, device=self.accelerator.device)
+        total_tokens = torch.tensor(0, device=self.accelerator.device, dtype=torch.long)
+        gather_for_metrics = getattr(self.accelerator, "gather_for_metrics", None)
+        use_gather_for_metrics = callable(gather_for_metrics)
         
         with torch.no_grad():
             for batch in self.eval_dataloader:
                 outputs = self.model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch.get("attention_mask"),
-                    labels=batch["labels"],
                 )
-                
-                loss = outputs["loss"]
-                batch_size = batch["input_ids"].shape[0]
-                
-                # Gather losses across processes
-                loss = self.accelerator.gather(loss).mean()
-                
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
+
+                logits = outputs["logits"]
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+
+                # Per-token loss, then sum per sample so gather_for_metrics can drop duplicates correctly.
+                per_token_loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).view_as(shift_labels)
+
+                token_mask = shift_labels != -100
+                per_sample_loss_sum = (per_token_loss * token_mask).sum(dim=1)
+                per_sample_tokens = token_mask.sum(dim=1)
+
+                if use_gather_for_metrics:
+                    per_sample_loss_sum = gather_for_metrics(per_sample_loss_sum)
+                    per_sample_tokens = gather_for_metrics(per_sample_tokens)
+                else:
+                    # Fallback: reduce totals at end (may include duplicated samples if even_batches=True).
+                    pass
+
+                total_loss_sum = total_loss_sum + per_sample_loss_sum.sum()
+                total_tokens = total_tokens + per_sample_tokens.sum()
         
         self.model.train()
-        
-        avg_loss = total_loss / max(total_samples, 1)
-        return {"eval_loss": avg_loss}
+
+        if not use_gather_for_metrics:
+            # Reduce across processes once.
+            total_loss_sum = self.accelerator.reduce(total_loss_sum, reduction="sum")
+            total_tokens = self.accelerator.reduce(total_tokens, reduction="sum")
+
+        avg_loss = (total_loss_sum / total_tokens.clamp_min(1).to(total_loss_sum.dtype)).item()
+        return {"eval_loss": float(avg_loss)}
     
     def _check_early_stopping(self, eval_loss: float) -> bool:
         """Check if training should stop early."""
@@ -457,117 +529,143 @@ class Trainer:
         # Training loop
         self.model.train()
         progress_bar = tqdm(
-            range(self.global_step, self.total_steps),
+            total=self.total_steps,
+            initial=self.global_step,
             disable=not self.accelerator.is_main_process,
             desc="Training",
-            initial=self.global_step,
-            total=self.total_steps,
         )
-        
-        data_iter = iter(self.train_dataloader)
+
+        # Track loss statistics for logging windows (Bug 38 fix: divide by actual count, not a fixed constant)
         running_loss = 0.0
-        loss = None  # Bug 4 fix: Initialize loss for empty loop case (resume from completed)
-        
-        for step in progress_bar:
-            if self.should_stop:
-                break
-            
-            # Get batch (handle epoch rollover)
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                self.epoch += 1
-                data_iter = iter(self.train_dataloader)
-                batch = next(data_iter)
-            
-            # Forward
-            with self.accelerator.accumulate(self.model):
-                outputs = self.model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch.get("attention_mask"),
-                    labels=batch["labels"],
-                )
-                
-                loss = outputs["loss"]
-                
-                # Backward
-                self.accelerator.backward(loss)
-                
-                # Gradient clipping
-                if train_cfg.max_grad_norm > 0:
-                    self.accelerator.clip_grad_norm_(
-                        self.model.parameters(),
-                        train_cfg.max_grad_norm,
-                    )
-                
-                # Optimizer step
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-            
-            # Update metrics
-            running_loss += loss.item()
-            self.global_step = step + 1
-            
-            # Logging - Bug 13 fix: Log first step and then every logging_steps
-            if (step + 1) % train_cfg.logging_steps == 0 or step == 0:
-                avg_loss = running_loss / (train_cfg.logging_steps if step > 0 else 1)
-                lr = self.scheduler.get_last_lr()[0]
-                
-                progress_bar.set_postfix({
-                    "loss": f"{avg_loss:.4f}",
-                    "lr": f"{lr:.2e}",
-                })
-                
-                if train_cfg.log_to_wandb and self.accelerator.is_main_process:
-                    self.accelerator.log({
-                        "train/loss": avg_loss,
-                        "train/learning_rate": lr,
-                        "train/step": step,
-                        "train/epoch": self.epoch,
-                    })
-                
-                running_loss = 0.0
-            
-            # Evaluation
-            if step > 0 and step % train_cfg.eval_steps == 0:
-                eval_metrics = self.evaluate()
-                eval_loss = eval_metrics["eval_loss"]
-                
-                if self.accelerator.is_main_process:
-                    print(f"\nStep {step}: eval_loss = {eval_loss:.4f}")
-                    
-                    if train_cfg.log_to_wandb:
-                        self.accelerator.log({
-                            "eval/loss": eval_loss,
-                            "eval/step": step,
-                        })
-                
-                # Save best model
-                if train_cfg.save_best_model and eval_loss < self.best_loss:
-                    self.best_loss = eval_loss
-                    self._save_checkpoint(step, eval_loss, best=True)
-                
-                # Early stopping check
-                if self._check_early_stopping(eval_loss):
-                    self.should_stop = True
+        running_loss_steps = 0
+        last_loss_value: Optional[float] = None
+
+        # Determine epoch stopping condition
+        max_epochs = train_cfg.num_epochs if train_cfg.num_epochs is not None else float("inf")
+
+        while (
+            self.epoch < max_epochs
+            and self.global_step < self.total_steps
+            and not self.should_stop
+        ):
+            for batch in self.train_dataloader:
+                if self.global_step >= self.total_steps or self.should_stop:
                     break
-            
-            # Save checkpoint
-            if step > 0 and step % train_cfg.save_steps == 0:
-                self._save_checkpoint(step, loss.item())
-                self._cleanup_checkpoints()
-            
-            # Check if done
-            if step >= self.total_steps - 1:
-                break
-        
-        # Bug 4 fix: Guard final save - loss may be None if resuming from completed run
-        if loss is not None:
-            self._save_checkpoint(self.global_step, loss.item(), final=True)
-        else:
-            # Save without loss value for edge case of empty training loop
-            self._save_checkpoint(self.global_step, self.best_loss, final=True)
+
+                did_optimizer_step = False
+
+                with self.accelerator.accumulate(self.model):
+                    outputs = self.model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch.get("attention_mask"),
+                        labels=batch["labels"],
+                    )
+
+                    loss = outputs["loss"]
+                    last_loss_value = float(loss.detach().item())
+
+                    self.accelerator.backward(loss)
+
+                    # Bug 35 fix: Only clip/step when gradients are being synchronized (i.e., at end of accumulation).
+                    if self.accelerator.sync_gradients:
+                        if train_cfg.max_grad_norm > 0:
+                            self.accelerator.clip_grad_norm_(
+                                self.model.parameters(),
+                                train_cfg.max_grad_norm,
+                            )
+
+                        self.optimizer.step()
+                        self.scheduler.step()
+                        self.optimizer.zero_grad()
+                        did_optimizer_step = True
+
+                if not did_optimizer_step:
+                    continue
+
+                # Update step counters (Bug 29 fix: global_step counts optimizer steps, not microsteps).
+                self.global_step += 1
+                progress_bar.update(1)
+
+                # Update logging window
+                if last_loss_value is not None:
+                    running_loss += last_loss_value
+                    running_loss_steps += 1
+
+                # Logging: first optimizer step and then every logging_steps.
+                if self.global_step == 1 or (self.global_step % train_cfg.logging_steps == 0):
+                    avg_loss = running_loss / max(running_loss_steps, 1)
+                    lr = self.scheduler.get_last_lr()[0]
+
+                    progress_bar.set_postfix({
+                        "loss": f"{avg_loss:.4f}",
+                        "lr": f"{lr:.2e}",
+                    })
+
+                    if train_cfg.log_to_wandb and self.accelerator.is_main_process:
+                        self.accelerator.log({
+                            "train/loss": avg_loss,
+                            "train/learning_rate": lr,
+                            "train/step": self.global_step,
+                            "train/epoch": self.epoch,
+                        })
+
+                    running_loss = 0.0
+                    running_loss_steps = 0
+
+                # Evaluation
+                if self.global_step > 0 and (self.global_step % train_cfg.eval_steps == 0):
+                    eval_metrics = self.evaluate()
+                    eval_loss = float(eval_metrics["eval_loss"])
+
+                    if self.accelerator.is_main_process:
+                        print(f"\nStep {self.global_step}: eval_loss = {eval_loss:.4f}")
+                        if train_cfg.log_to_wandb:
+                            self.accelerator.log({
+                                "eval/loss": eval_loss,
+                                "eval/step": self.global_step,
+                            })
+
+                    # Determine whether this is a new best eval (synchronized across ranks).
+                    # Note: Early stopping compares against the *previous* best_loss, so we update best_loss after
+                    # calling _check_early_stopping().
+                    is_best_local = bool(eval_loss < self.best_loss)
+                    is_best_flag = torch.tensor(
+                        1 if is_best_local else 0,
+                        device=self.accelerator.device,
+                        dtype=torch.int,
+                    )
+                    is_best = bool(self.accelerator.reduce(is_best_flag, reduction="sum").item() > 0)
+
+                    # Early stopping decision (synchronized)
+                    stop_local = self._check_early_stopping(eval_loss)
+                    stop_flag = torch.tensor(
+                        1 if stop_local else 0,
+                        device=self.accelerator.device,
+                        dtype=torch.int,
+                    )
+                    self.should_stop = bool(self.accelerator.reduce(stop_flag, reduction="sum").item() > 0)
+
+                    # Update best loss and optionally save best checkpoint.
+                    if is_best:
+                        self.best_loss = eval_loss
+                        if train_cfg.save_best_model:
+                            self._save_checkpoint(self.global_step, eval_loss, best=True)
+                    if self.should_stop:
+                        break
+
+                # Save checkpoint
+                if self.global_step > 0 and (self.global_step % train_cfg.save_steps == 0):
+                    self._save_checkpoint(self.global_step, last_loss_value or 0.0)
+                    self._cleanup_checkpoints()
+
+            self.epoch += 1
+
+        # Final save
+        self._save_checkpoint(
+            self.global_step,
+            (last_loss_value if last_loss_value is not None else self.best_loss),
+            final=True,
+        )
         
         if self.accelerator.is_main_process:
             print(f"\nTraining complete! Final step: {self.global_step}")
@@ -575,30 +673,40 @@ class Trainer:
     
     def _save_checkpoint(self, step: int, loss: float, final: bool = False, best: bool = False):
         """Save training checkpoint."""
-        if not self.accelerator.is_main_process:
-            return
-        
         output_dir = Path(self.train_config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save model
-        unwrapped = self.accelerator.unwrap_model(self.model)
-        
+
         if final:
             save_path = output_dir / "final_model"
         else:
             save_path = output_dir / f"checkpoint-{step}"
-        
-        save_path.mkdir(parents=True, exist_ok=True)
 
-        if best:
-            save_path_best = output_dir / "best_model"
-            save_path_best.mkdir(parents=True, exist_ok=True)
-        
-        # Get state dict (unwrapped)
-        state_dict = unwrapped.state_dict()
-        
-        # Handle precision conversion if requested
+        # Save full training state via Accelerate (Bug 30 fix: FSDP-aware model/optimizer saving).
+        # Must be called on all processes.
+        save_path.mkdir(parents=True, exist_ok=True)
+        self.accelerator.wait_for_everyone()
+        self.accelerator.save_state(str(save_path))
+        self.accelerator.wait_for_everyone()
+
+        if self.accelerator.is_main_process:
+            # Save config for reproducibility
+            from memory_transformer.config import save_config
+            save_config(self.config, save_path / "config.yaml")
+
+            # Save trainer metadata (avoid optimizer/scheduler shards here; they live in accelerate state)
+            trainer_state = {
+                "global_step": step,
+                "loss": float(loss),
+                "best_loss": float(self.best_loss),
+                "epoch": int(self.epoch),
+                "patience_counter": int(self.patience_counter),
+            }
+            with open(save_path / "trainer_state.json", "w") as f:
+                json.dump(trainer_state, f, indent=2, sort_keys=True)
+
+        # Optional convenience: save a consolidated model state_dict for inference scripts.
+        # For FSDP this gathers the full state dict on rank 0.
+        state_dict = self.accelerator.get_state_dict(self.model)
         if self.train_config.save_precision:
             dtype_map = {
                 "fp32": torch.float32,
@@ -606,54 +714,27 @@ class Trainer:
                 "bf16": torch.bfloat16,
             }
             target_dtype = dtype_map.get(self.train_config.save_precision)
-            
-            if target_dtype:
-                if self.accelerator.is_main_process:
-                    print(f"Converting model checkpoint to {self.train_config.save_precision}...")
+            if target_dtype and self.accelerator.is_main_process:
+                print(f"Converting model checkpoint to {self.train_config.save_precision}...")
                 state_dict = {k: v.to(target_dtype) for k, v in state_dict.items()}
-        
-        # Save state dict
-        torch.save(
-            state_dict,
-            save_path / "model.pt",
-        )
 
+        if self.accelerator.is_main_process:
+            torch.save(state_dict, save_path / "model.pt")
+
+        self.accelerator.wait_for_everyone()
+
+        # Keep best_model as a mirror of the best checkpoint directory.
         if best:
-            torch.save(
-                state_dict,
-                save_path_best / "model.pt",
-            )
-        
-        # Save config
-        from memory_transformer.config import save_config
-        save_config(self.config, save_path / "config.yaml")
-        
-        # Save optimizer and scheduler state
-        torch.save({
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "step": step,
-            "loss": loss,
-            "best_loss": self.best_loss,
-            "epoch": self.epoch,
-        }, save_path / "training_state.pt")
-        
-        # Bug 3 fix: Save config and training_state to best_model too
-        if best:
-            save_config(self.config, save_path_best / "config.yaml")
-            torch.save({
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "step": step,
-                "loss": loss,
-                "best_loss": self.best_loss,
-                "epoch": self.epoch,
-            }, save_path_best / "training_state.pt")
-        
-        if not best:
+            save_path_best = output_dir / "best_model"
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                if save_path_best.exists():
+                    shutil.rmtree(save_path_best)
+                shutil.copytree(save_path, save_path_best)
+                print(f"Saved best checkpoint to {save_path_best}")
+            self.accelerator.wait_for_everyone()
+        elif self.accelerator.is_main_process:
             print(f"Saved checkpoint to {save_path}")
-        else:
-            print(f"Saved best checkpoint to {save_path_best}, and also to {save_path}.")
     
     @staticmethod
     def find_lr(
@@ -680,6 +761,8 @@ class Trainer:
         temp_config = copy.deepcopy(config)
         temp_config.training.max_steps = num_steps
         temp_config.training.log_to_wandb = False
+        # Bug 37 fix: LR finder should not use gradient accumulation (skews curves via loss scaling and step semantics)
+        temp_config.training.gradient_accumulation_steps = 1
         
         trainer = Trainer(temp_config)
         

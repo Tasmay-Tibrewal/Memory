@@ -293,8 +293,12 @@ groups = adapter.get_parameter_groups()
 
 **Functions**:
 ```python
-quantize_memory_bank(tensor, bits=8)   # Returns (quantized, scales)
-dequantize_memory_bank(quantized, scales)  # Returns float tensor
+quantize_memory_bank(tensor, quant_bits=8)         # -> (int8 (num_tokens, dim), scales)
+dequantize_memory_bank(quantized, scales, quant_bits=8)  # -> float (num_tokens, dim)
+
+# 4-bit is packed (two signed INT4 values per byte), dim must be even:
+quantize_memory_bank(tensor, quant_bits=4)         # -> (int8 (num_tokens, dim//2), scales)
+dequantize_memory_bank(quantized, scales, quant_bits=4)  # -> float (num_tokens, dim)
 ```
 
 **Note**: Quantization during training requires gradient handling. Currently best for inference.

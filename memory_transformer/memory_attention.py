@@ -80,6 +80,11 @@ class MemoryCrossAttention(nn.Module):
         self.hidden_dim = hidden_dim
         self.memory_dim = memory_dim if memory_dim is not None else hidden_dim
         self.num_heads = num_heads
+        # Bug 42 fix: Validate attention head sizing to avoid silent shape mismatches later.
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
+            )
         self.head_dim = hidden_dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.dropout = dropout

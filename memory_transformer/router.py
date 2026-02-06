@@ -38,6 +38,16 @@ class ChapterRouter(nn.Module):
         """
         super().__init__()
         
+        # Bug 43 fix: Validate chapter routing configuration early for clearer errors.
+        if num_chapters <= 0:
+            raise ValueError(f"num_chapters must be > 0, got {num_chapters}")
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if top_k > num_chapters:
+            raise ValueError(
+                f"top_k ({top_k}) must be <= num_chapters ({num_chapters})"
+            )
+
         self.hidden_dim = hidden_dim
         self.num_chapters = num_chapters
         self.top_k = top_k
@@ -295,6 +305,7 @@ def compute_total_router_loss(
     load_balance_coef: float = 0.01,
     auxiliary_coef: float = 0.0,
     z_loss_coef: float = 0.0,
+    reference_tensor: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Compute total router auxiliary loss.
@@ -308,7 +319,14 @@ def compute_total_router_loss(
     Returns:
         Total auxiliary loss
     """
-    total = torch.tensor(0.0, device=next(iter(losses.values())).device)
+    # Bug 31 fix: Robust to empty loss dicts (can occur in some inference routing paths).
+    if not losses:
+        if reference_tensor is not None:
+            return reference_tensor.new_tensor(0.0)
+        return torch.tensor(0.0)
+
+    first_loss = next(iter(losses.values()))
+    total = first_loss.new_tensor(0.0)
     
     if "load_balance" in losses and load_balance_coef > 0:
         total = total + load_balance_coef * losses["load_balance"]
