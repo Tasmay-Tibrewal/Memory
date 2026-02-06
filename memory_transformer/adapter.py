@@ -344,6 +344,33 @@ class MemoryAdapter(nn.Module):
         
         batch_size, seq_len = input_ids.shape
         all_router_losses = []
+
+        def _masked_mean(states: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+            """
+            Mean-pool over sequence while ignoring padding (mask==0).
+
+            mask is expected to be (B, T_mask). If T_mask != T_states, we align by
+            taking the rightmost T_states positions (common for KV-cache decoding where
+            attention_mask covers the full kv_len while states are a shorter window).
+            """
+            if mask is None:
+                return states.mean(dim=1)
+            if mask.dim() != 2:
+                raise ValueError(f"attention_mask must be 2D (got shape {tuple(mask.shape)})")
+            if mask.shape[0] != states.shape[0]:
+                raise ValueError(
+                    f"attention_mask batch ({mask.shape[0]}) must match states batch ({states.shape[0]})"
+                )
+            if mask.shape[1] < states.shape[1]:
+                raise ValueError(
+                    f"attention_mask length ({mask.shape[1]}) must be >= states length ({states.shape[1]})"
+                )
+            if mask.shape[1] != states.shape[1]:
+                mask = mask[:, -states.shape[1]:]
+
+            m = mask.to(dtype=states.dtype, device=states.device).unsqueeze(-1)  # (B, T, 1)
+            denom = m.sum(dim=1).clamp(min=1.0)  # (B, 1)
+            return (states * m).sum(dim=1) / denom
         
         # Create wrapper for forward with memory injection
         def create_hook(layer_idx):
@@ -380,7 +407,7 @@ class MemoryAdapter(nn.Module):
                                 window_size = mem_cfg.routing_window_size
 
                                 if strategy == "hybrid" and past_key_values is None:
-                                    pooled = hidden_states.mean(dim=1)
+                                    pooled = _masked_mean(hidden_states, attention_mask)
                                     cache_states = hidden_states
                                     if cache_states.shape[1] > window_size:
                                         cache_states = cache_states[:, -window_size:]
@@ -395,7 +422,7 @@ class MemoryAdapter(nn.Module):
                                     if combined.shape[1] > window_size:
                                         combined = combined[:, -window_size:]
                                     self._routing_cache[cache_key] = combined.detach()
-                                    pooled = combined.mean(dim=1)
+                                    pooled = _masked_mean(combined, attention_mask)
 
                                 logits = router.router(pooled)
                                 probs = F.softmax(logits, dim=-1)
