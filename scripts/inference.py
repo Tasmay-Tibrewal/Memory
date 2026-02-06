@@ -41,7 +41,7 @@ def load_model(config_path: str = None, checkpoint_path: str = None):
         checkpoint_dir = Path(checkpoint_path)
         model_path_pt = checkpoint_dir / "model.pt"
         if model_path_pt.exists():
-            state_dict = torch.load(model_path_pt, map_location="cpu")
+            state_dict = torch.load(model_path_pt, map_location="cpu", weights_only=True)
             model.load_state_dict(state_dict)
         else:
             safe_path = checkpoint_dir / "model.safetensors"
@@ -52,7 +52,7 @@ def load_model(config_path: str = None, checkpoint_path: str = None):
                 state_dict = load_file(str(safe_path), device="cpu")
                 model.load_state_dict(state_dict)
             elif bin_path.exists():
-                state_dict = torch.load(bin_path, map_location="cpu")
+                state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
                 model.load_state_dict(state_dict)
             else:
                 raise FileNotFoundError(
@@ -115,6 +115,9 @@ def main():
     with torch.no_grad():
         # Bug 15 + Bug 8 fix: Proper sampling with top_p and KV cache
         input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
         past_key_values = None
         
         for _ in range(args.max_new_tokens):
@@ -128,6 +131,7 @@ def main():
             
             outputs = model(
                 input_ids=model_input,
+                attention_mask=attention_mask,
                 use_cache=True,
                 past_key_values=past_key_values,
                 position_offset=position_offset,
@@ -159,6 +163,10 @@ def main():
             
             # Append to sequence
             input_ids = torch.cat([input_ids, next_token], dim=-1)
+            attention_mask = torch.cat([
+                attention_mask,
+                torch.ones((attention_mask.shape[0], 1), device=attention_mask.device, dtype=attention_mask.dtype),
+            ], dim=-1)
             
             # Check for EOS
             if next_token.item() == tokenizer.eos_token_id:

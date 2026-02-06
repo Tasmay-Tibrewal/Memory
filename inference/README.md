@@ -72,6 +72,8 @@ outputs = generate_batch(
   the mask to be a strict prefix of 1s.
 - For the from-scratch `MemoryTransformer`, `generate_batch()` passes explicit `position_ids` so RoPE positions remain correct
   even when prompts have different true lengths.
+- For cached decoding, pass an `attention_mask` that covers the **full KV length** each step.
+  Passing only step-length masks is rejected in `SelfAttention`.
 - Some external model implementations may assume a monotonic mask; for maximum compatibility consider **left padding**
   (`tokenizer.padding_side = "left"`) or using `transformers.generate()` for HF models.
 
@@ -93,6 +95,11 @@ During training, we have the full sequence and can use sequence-level routing. D
 | `RollingWindowRouter` | Use recent N tokens | Long generation |
 | `TokenLevelRouter` | Per-token routing | Single token generation |
 | `HybridRouter` | Sequence for prefill, rolling for generation | General use |
+
+**Padding caveat**:
+- `SequenceLevelRouter` and `RollingWindowRouter` use unmasked mean pooling.
+- If hidden states include padded positions, routing can be biased.
+- Use non-padded hidden states for routing, or apply masked pooling before routing.
 
 **Class Descriptions**:
 
@@ -182,7 +189,7 @@ import torch
 # Load model
 config = load_config("configs/adapter_qwen2.5_1.5b.yaml")
 model = MemoryAdapter(config)
-state_dict = torch.load("outputs/final_model/model.pt")
+state_dict = torch.load("outputs/final_model/model.pt", weights_only=True)
 model.load_state_dict(state_dict)
 model.cuda().eval()
 

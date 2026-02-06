@@ -205,7 +205,7 @@ def load_checkpoint(
     scheduler: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Load training checkpoint."""
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     
     model.load_state_dict(checkpoint["model_state_dict"])
     

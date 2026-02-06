@@ -131,14 +131,8 @@ def quantize_memory_for_deployment(
             num_tokens=inner.num_tokens,
             dim=inner.dim,
             quant_bits=bits,
+            memory=original_memory,
         )
-        
-        # Apply quantization by calling the appropriate method
-        with torch.no_grad():
-            if bits == 8:
-                quantized._quantize_8bit(original_memory)
-            elif bits == 4:
-                quantized._quantize_4bit(original_memory)
         
         # Replace the bank
         if isinstance(bank, ChapteredMemoryBank):

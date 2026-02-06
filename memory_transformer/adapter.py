@@ -277,6 +277,11 @@ class MemoryAdapter(nn.Module):
             return
         
         mem_cfg = self.memory_config
+        memory_dropout = (
+            self.model_config.dropout
+            if mem_cfg.memory_dropout is None
+            else mem_cfg.memory_dropout
+        )
         
         for layer_idx in self.memory_layer_indices:
             adapter = MemoryAdapterLayer(
@@ -291,6 +296,7 @@ class MemoryAdapter(nn.Module):
                 ),
                 reduced_dim=mem_cfg.memory_rank if mem_cfg.low_rank_mode == "reduced_dim" else None,
                 wo_init_zero=mem_cfg.wo_init_zero,
+                dropout=memory_dropout,
                 use_flash_attention=self.model_config.use_flash_attention,
                 gradient_checkpointing=mem_cfg.memory_gradient_checkpointing,
             )

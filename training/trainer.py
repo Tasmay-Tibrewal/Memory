@@ -387,10 +387,10 @@ class Trainer:
             model_path = checkpoint_dir / "model.pt"
             state_path = checkpoint_dir / "training_state.pt"
             if model_path.exists() and state_path.exists():
-                state_dict = torch.load(model_path, map_location="cpu")
+                state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
                 self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
 
-                state = torch.load(state_path, map_location="cpu")
+                state = torch.load(state_path, map_location="cpu", weights_only=False)
                 self.optimizer.load_state_dict(state["optimizer"])
                 self.scheduler.load_state_dict(state["scheduler"])
                 self.global_step = int(state.get("step", 0))
@@ -670,6 +670,7 @@ class Trainer:
         if self.accelerator.is_main_process:
             print(f"\nTraining complete! Final step: {self.global_step}")
             print(f"Best eval loss: {self.best_loss:.4f}")
+        self.accelerator.end_training()
     
     def _save_checkpoint(self, step: int, loss: float, final: bool = False, best: bool = False):
         """Save training checkpoint."""

@@ -151,6 +151,7 @@ block = MemoryTransformerBlock(
     num_heads=12,
     has_memory=True,
     memory_block_variant="A",
+    memory_dropout=0.0,
     wo_init_zero=True,
 )
 output = block(hidden_states, memory=memory_tokens)
@@ -262,6 +263,18 @@ count_parameters(model)  # Returns param count
 - Qwen 2.5 / Qwen 3 series
 - Llama 2 / Llama 3 series
 - Mistral series
+
+**Gradient Checkpointing Note (Adapter Mode)**:
+- `MemoryAdapter` injects memory using temporary forward hooks.
+- Hook-based injection is model-dependent when `training.gradient_checkpointing: true`.
+- In `transformers==4.52.4`, do **not** combine adapter hooks with checkpointing on:
+  - `qwen2_moe`, `qwen3_moe`
+  - `mixtral`
+  - `qwen2_vl`, `qwen2_5_vl`
+- In the same version, this specific hook/checkpointing conflict was not observed in:
+  - `qwen2`, `qwen3`, `llama`, `mistral`
+- If unsure, set `training.gradient_checkpointing: false` for adapter training.
+- Full rationale and caveats: `docs/design.md` ("Adapter Hooks + Gradient Checkpointing Are Model-Dependent").
 
 **How It Works**:
 1. Loads pretrained model from HuggingFace

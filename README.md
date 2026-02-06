@@ -247,6 +247,7 @@ memory:
   memory_layer_placement: all  # all/first_k/last_k/every_n/custom
   memory_sharing: shared       # shared/per_layer/every_k_layers
   memory_block_variant: A      # A: SA→Mem→MLP, B: SA→MLP→Mem→MLP
+  memory_dropout: null         # Memory cross-attn dropout (null => model.dropout)
   
   # Chapter routing
   use_chapters: true           # Enable MoE-style routing
@@ -360,11 +361,17 @@ memory:
 
 ### Slow Training
 ```yaml
-training:
+model:
   use_flash_attention: true    # Requires flash-attn package
+training:
   gradient_checkpointing: true
   mixed_precision: bf16
 ```
+
+Adapter mode note: hook-based memory injection is incompatible with gradient checkpointing
+on some HF architectures. For `transformers==4.52.4`, set
+`training.gradient_checkpointing: false` on `qwen2_moe`, `qwen3_moe`, `mixtral`,
+`qwen2_vl`, and `qwen2_5_vl`. See `docs/design.md`.
 
 ### Model Not Learning
 - Check `wo_init_zero: true` (critical for stable training — adapter and from-scratch)

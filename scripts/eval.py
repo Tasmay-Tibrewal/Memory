@@ -54,7 +54,7 @@ def load_model(config, checkpoint_path: str = None):
         checkpoint_dir = Path(checkpoint_path)
         model_path_pt = checkpoint_dir / "model.pt"
         if model_path_pt.exists():
-            state_dict = torch.load(model_path_pt, map_location="cpu")
+            state_dict = torch.load(model_path_pt, map_location="cpu", weights_only=True)
             model.load_state_dict(state_dict)
         else:
             # Fallback: support Accelerate/Transformers-style checkpoint files.
@@ -66,7 +66,7 @@ def load_model(config, checkpoint_path: str = None):
                 state_dict = load_file(str(safe_path), device="cpu")
                 model.load_state_dict(state_dict)
             elif bin_path.exists():
-                state_dict = torch.load(bin_path, map_location="cpu")
+                state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
                 model.load_state_dict(state_dict)
             else:
                 raise FileNotFoundError(

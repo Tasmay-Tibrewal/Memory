@@ -28,6 +28,7 @@ memory:
   memory_layer_n: 4 # Every 4th layer: [0, 4, 8, 12, 16, 20, 24]
   memory_sharing: shared
   memory_block_variant: A
+  memory_dropout: null # null => fallback to model.dropout for memory cross-attention
 
   # Chapters for efficiency
   use_chapters: true

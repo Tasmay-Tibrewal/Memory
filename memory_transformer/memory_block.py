@@ -312,15 +312,16 @@ class SelfAttention(nn.Module):
             if attention_mask is not None:
                 # attention_mask is (B, S) with 1=valid, 0=masked
                 # Reshape for broadcasting: (B, 1, 1, kv_len)
-                # Need to handle KV cache case where mask may be for full sequence
                 mask_len = attention_mask.shape[1]
-                if mask_len < kv_len:
-                    # Extend mask for cached tokens (assume all cached are valid)
-                    pad_len = kv_len - mask_len
-                    attention_mask = torch.cat([
-                        torch.ones(batch_size, pad_len, device=attention_mask.device, dtype=attention_mask.dtype),
-                        attention_mask
-                    ], dim=1)
+                if mask_len != kv_len:
+                    if past_kv is not None:
+                        raise ValueError(
+                            f"When using past_kv, attention_mask must cover full kv_len. "
+                            f"Got mask_len={mask_len}, kv_len={kv_len}."
+                        )
+                    raise ValueError(
+                        f"attention_mask length ({mask_len}) must match kv_len ({kv_len})."
+                    )
                 padding_mask = (attention_mask == 0).unsqueeze(1).unsqueeze(2)  # (B, 1, 1, kv_len)
                 attn_weights = attn_weights.masked_fill(padding_mask, float("-inf"))
             
@@ -375,6 +376,7 @@ class MemoryTransformerBlock(nn.Module):
         use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        memory_dropout: Optional[float] = None,
         attention_dropout: float = 0.0,
         use_rms_norm: bool = True,
         norm_eps: float = 1e-6,
@@ -414,6 +416,7 @@ class MemoryTransformerBlock(nn.Module):
         
         # MLP
         self.mlp = MLP(hidden_dim, intermediate_dim, dropout)
+        memory_attn_dropout = dropout if memory_dropout is None else memory_dropout
         
         # Memory cross-attention (optional)
         if has_memory:
@@ -427,7 +430,7 @@ class MemoryTransformerBlock(nn.Module):
                 reduced_dim_mode=reduced_dim_mode,
                 reduced_dim=reduced_dim,
                 wo_init_zero=wo_init_zero,
-                dropout=dropout,
+                dropout=memory_attn_dropout,
                 use_flash_attention=use_flash_attention,
                 gradient_checkpointing=gradient_checkpointing,
             )

@@ -103,6 +103,7 @@ class MemoryTransformer(nn.Module):
                     use_rope=config.model.use_rope,
                     rope_theta=config.model.rope_theta,
                     dropout=config.model.dropout,
+                    memory_dropout=mem_cfg.memory_dropout,
                     attention_dropout=config.model.attention_dropout,
                     use_rms_norm=config.model.use_rms_norm,
                     norm_eps=config.model.norm_eps,
@@ -395,10 +396,14 @@ class MemoryTransformer(nn.Module):
                         memory = memory * w
                 
                 if use_gradient_checkpointing:
-                    def _layer_forward(h: torch.Tensor) -> torch.Tensor:
-                        out, _ = layer(
+                    def _layer_forward(
+                        h: torch.Tensor,
+                        _layer: nn.Module = layer,
+                        _memory: Optional[torch.Tensor] = memory,
+                    ) -> torch.Tensor:
+                        out, _ = _layer(
                             h,
-                            memory=memory,
+                            memory=_memory,
                             attention_mask=attention_mask,
                             position_offset=position_offset,
                             position_ids=position_ids,
@@ -422,8 +427,11 @@ class MemoryTransformer(nn.Module):
             else:
                 # Vanilla layer (no memory argument)
                 if use_gradient_checkpointing:
-                    def _layer_forward(h: torch.Tensor) -> torch.Tensor:
-                        out, _ = layer(
+                    def _layer_forward(
+                        h: torch.Tensor,
+                        _layer: nn.Module = layer,
+                    ) -> torch.Tensor:
+                        out, _ = _layer(
                             h,
                             attention_mask=attention_mask,
                             position_offset=position_offset,

@@ -188,8 +188,8 @@ python scripts/inference.py \
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `--config` | One of these | - | Path to YAML config |
-| `--checkpoint` | required | - | Path to checkpoint directory |
+| `--config` | One of `--config` or `--checkpoint` | None | Path to YAML config |
+| `--checkpoint` | One of `--config` or `--checkpoint` | None | Path to checkpoint directory |
 | `--prompt` | Yes | - | Input prompt text |
 | `--max_new_tokens` | No | 256 | Maximum tokens to generate |
 | `--temperature` | No | 0.7 | Sampling temperature |

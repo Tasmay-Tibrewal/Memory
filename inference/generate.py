@@ -42,6 +42,11 @@ def generate(
     # Tokenize
     inputs = tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(device)
+    attention_mask = inputs.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, device=device)
+    else:
+        attention_mask = attention_mask.to(device)
     
     # Bug 8 fix: Add KV cache support
     past_key_values = None
@@ -59,6 +64,7 @@ def generate(
         
         outputs = model(
             input_ids=model_input,
+            attention_mask=attention_mask,
             use_cache=True,
             past_key_values=past_key_values,
             position_offset=position_offset,
@@ -100,6 +106,10 @@ def generate(
         
         # Append (still needed for final decode)
         input_ids = torch.cat([input_ids, next_token], dim=-1)
+        attention_mask = torch.cat([
+            attention_mask,
+            torch.ones((attention_mask.shape[0], 1), device=device, dtype=attention_mask.dtype),
+        ], dim=-1)
         
         # Check for EOS
         if next_token.item() == tokenizer.eos_token_id:

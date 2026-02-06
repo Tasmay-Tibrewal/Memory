@@ -34,6 +34,7 @@ memory:
   # Shared memory bank across all memory layers
   memory_sharing: shared
   memory_block_variant: A
+  memory_dropout: null # null => fallback to model.dropout for memory cross-attention
 
   # Chapter routing
   use_chapters: true

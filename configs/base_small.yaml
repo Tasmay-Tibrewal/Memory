@@ -44,6 +44,7 @@ memory:
   memory_layer_placement: all
   memory_sharing: shared # Single shared bank
   memory_block_variant: A # SA -> Mem -> MLP
+  memory_dropout: null # null => fallback to model.dropout for memory cross-attention
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true

@@ -36,6 +36,7 @@ memory:
   # These are ignored when vanilla_mode=true
   # but listed for documentation
   num_memory_tokens: 4096
+  memory_dropout: null
   use_chapters: false
   use_lora: false
   use_memory_adapter: false

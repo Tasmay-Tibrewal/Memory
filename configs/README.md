@@ -92,6 +92,7 @@ memory:
   
   # === Block Integration ===
   memory_block_variant: A      # Block structure
+  memory_dropout: null         # Dropout only for memory cross-attention (null => model.dropout)
                                # "A": Self-Attn → Memory → MLP
                                # "B": Self-Attn → MLP → Memory → MLP
   

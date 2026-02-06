@@ -39,6 +39,9 @@ class MemoryConfig:
     # "A": Self-Attn -> Memory Cross-Attn -> MLP (default)
     # "B": Self-Attn -> MLP -> Memory Cross-Attn -> MLP
     memory_block_variant: str = "A"
+    # Dropout used specifically in memory cross-attention. If None, falls back
+    # to model.dropout for backward compatibility.
+    memory_dropout: Optional[float] = None
     
     # === Low-rank options ===
     use_low_rank_memory: bool = False

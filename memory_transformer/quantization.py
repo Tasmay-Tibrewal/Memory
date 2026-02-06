@@ -34,13 +34,16 @@ class QuantizedMemoryBank(nn.Module):
         dim: int,
         quant_bits: int = 8,
         init_std: float = 0.02,
+        memory: Optional[torch.Tensor] = None,
     ):
         """
         Args:
             num_tokens: Number of memory tokens
             dim: Dimension of each token
             quant_bits: Quantization bits (4 or 8)
-            init_std: Initialization std
+            init_std: Initialization std (used only when memory is None)
+            memory: Optional full-precision memory tensor of shape (num_tokens, dim).
+                If provided, quantizes this tensor directly and skips random init.
         """
         super().__init__()
         
@@ -48,9 +51,20 @@ class QuantizedMemoryBank(nn.Module):
         self.dim = dim
         self.quant_bits = quant_bits
         
-        # Full precision memory for initialization
-        memory = torch.empty(num_tokens, dim)
-        nn.init.normal_(memory, mean=0.0, std=init_std)
+        if memory is None:
+            memory = torch.empty(num_tokens, dim)
+            nn.init.normal_(memory, mean=0.0, std=init_std)
+        else:
+            if memory.ndim != 2:
+                raise ValueError(
+                    f"memory must be 2D (num_tokens, dim), got shape {tuple(memory.shape)}"
+                )
+            expected_shape = (num_tokens, dim)
+            if tuple(memory.shape) != expected_shape:
+                raise ValueError(
+                    f"memory shape must be {expected_shape}, got {tuple(memory.shape)}"
+                )
+            memory = memory.detach()
         
         # Store quantized version
         if quant_bits == 8:

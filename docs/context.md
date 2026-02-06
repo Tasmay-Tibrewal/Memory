@@ -172,6 +172,7 @@ memory_sharing_k: int = 2            # For every_k_layers
 
 # Block structure
 memory_block_variant: str = "A"      # A or B
+memory_dropout: float = null         # Memory cross-attn dropout (null => model.dropout)
 
 # Low-rank
 use_low_rank_memory: bool = false

@@ -52,22 +52,29 @@ This document records design choices, compromises, known issues, and areas for f
 
 **Rationale**:
 - Non-invasive to pretrained model code
-- Works across different model architectures
+- Works across many model architectures
 - Alternative (patching forward) would be more fragile
 
-**Trade-off**: Slight overhead from hook mechanism.
+**Trade-offs**:
+- Slight overhead from hook mechanism.
+- Compatibility depends on how a given HF architecture implements gradient checkpointing.
 
 ## Known Limitations
 
-### 1. No Quantized Memory Bank (Yet)
+### 1. Quantized Memory Bank Is Inference-Oriented
 
-**Status**: Config option exists but not fully implemented.
+**Status**: Implemented for inference/evaluation workflows.
 
-**Issue**: Quantizing during training requires careful handling of gradients.
+**Current support**:
+- Memory-bank quantization utilities are available (INT8 and packed INT4).
+- Deployment helpers can quantize memory banks and full models for inference.
 
-**Workaround**: Use low-rank factorization for memory compression instead.
+**Limitation**:
+- Training-time quantization-aware updates are not implemented.
 
-**Future**: Implement QAT or post-training quantization.
+**Workaround**: Use low-rank factorization for training-time memory compression.
+
+**Future**: Add QAT-style training path.
 
 ### 2. Token-Level Routing Memory Issue
 
@@ -95,6 +102,49 @@ Currently tested with:
 - Basic Llama/Mistral structure
 
 Other architectures may need adapter.py modifications.
+
+### 5. KV-Cache Attention Mask Requires Full-Length Mask
+
+`SelfAttention` now requires full-length masks during cached decoding:
+- When `past_kv` is provided, `attention_mask.shape[1]` must equal `kv_len`.
+- Short step-only masks are rejected with a clear `ValueError`.
+
+This avoids silently unmasking cached padded positions.
+
+### 6. Inference Routing Helpers Are Not Pad-Aware
+
+`inference/routing_strategies.py` uses unmasked mean pooling for sequence and rolling
+routers. If hidden states include padding positions, routing logits/chapter selection can
+be biased.
+
+**Recommendation**:
+- Use these helpers with hidden states that do not include padded positions, or
+- Apply masked pooling before routing when padding is present.
+
+### 7. Adapter Hooks + Gradient Checkpointing Are Model-Dependent
+
+`MemoryAdapter` registers temporary forward hooks before `self.base_model(...)` and removes
+them immediately after forward completes. This is safe only if backward does not recompute
+decoder layer forwards after hook removal.
+
+Some HuggingFace architectures do recomputation through
+`_gradient_checkpointing_func(decoder_layer.__call__, ...)`. In that case, recompute can run
+without the memory-injection hooks, so memory-path gradients may be incorrect.
+
+For this repository with `transformers==4.52.4`, treat the following as unsupported with
+`MemoryAdapter` + `training.gradient_checkpointing: true`:
+- `qwen2_moe`, `qwen3_moe`
+- `mixtral`
+- `qwen2_vl`, `qwen2_5_vl`
+
+For the same version, this specific pattern was not observed in the tested text-only families:
+- `qwen2`, `qwen3`
+- `llama`
+- `mistral`
+
+**Workarounds**:
+- Set `training.gradient_checkpointing: false` for unsupported families, or
+- Refactor adapter integration to avoid temporary per-forward hooks (persistent hooks or explicit wrapped layer calls).
 
 ## Compromises
 
