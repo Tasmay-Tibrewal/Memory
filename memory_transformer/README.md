@@ -267,12 +267,9 @@ count_parameters(model)  # Returns param count
 **Gradient Checkpointing Note (Adapter Mode)**:
 - `MemoryAdapter` injects memory using temporary forward hooks.
 - Hook-based injection is model-dependent when `training.gradient_checkpointing: true`.
-- In `transformers==4.52.4`, do **not** combine adapter hooks with checkpointing on:
-  - `qwen2_moe`, `qwen3_moe`
-  - `mixtral`
-  - `qwen2_vl`, `qwen2_5_vl`
-- In the same version, this specific hook/checkpointing conflict was not observed in:
-  - `qwen2`, `qwen3`, `llama`, `mistral`
+- In `transformers==4.52.4`, this includes common text-only families (`qwen2`, `qwen3`,
+  `llama`, `mistral`) because decoder layers use checkpointed `__call__` recompute.
+- It also affects `qwen2_moe`, `qwen3_moe`, `mixtral`, `qwen2_vl`, and `qwen2_5_vl`.
 - If unsure, set `training.gradient_checkpointing: false` for adapter training.
 - Full rationale and caveats: `docs/design.md` ("Adapter Hooks + Gradient Checkpointing Are Model-Dependent").
 

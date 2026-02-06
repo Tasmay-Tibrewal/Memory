@@ -369,9 +369,10 @@ training:
 ```
 
 Adapter mode note: hook-based memory injection is incompatible with gradient checkpointing
-on some HF architectures. For `transformers==4.52.4`, set
-`training.gradient_checkpointing: false` on `qwen2_moe`, `qwen3_moe`, `mixtral`,
-`qwen2_vl`, and `qwen2_5_vl`. See `docs/design.md`.
+for multiple HF architectures in `transformers==4.52.4`, including
+`qwen2`, `qwen3`, `llama`, `mistral`, `qwen2_moe`, `qwen3_moe`, `mixtral`,
+`qwen2_vl`, and `qwen2_5_vl`. Set `training.gradient_checkpointing: false` for adapter
+training unless adapter injection is refactored. See `docs/design.md`.
 
 ### Model Not Learning
 - Check `wo_init_zero: true` (critical for stable training — adapter and from-scratch)

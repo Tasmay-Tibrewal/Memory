@@ -131,16 +131,14 @@ Some HuggingFace architectures do recomputation through
 `_gradient_checkpointing_func(decoder_layer.__call__, ...)`. In that case, recompute can run
 without the memory-injection hooks, so memory-path gradients may be incorrect.
 
-For this repository with `transformers==4.52.4`, treat the following as unsupported with
-`MemoryAdapter` + `training.gradient_checkpointing: true`:
-- `qwen2_moe`, `qwen3_moe`
-- `mixtral`
-- `qwen2_vl`, `qwen2_5_vl`
+For this repository with `transformers==4.52.4`, the risk applies broadly:
+- `qwen2`, `qwen3`, `llama`, `mistral` decoder layers inherit `GradientCheckpointingLayer`
+  (checkpointing is applied inside `decoder_layer.__call__` during backward recompute).
+- `qwen2_moe`, `qwen3_moe`, `mixtral`, `qwen2_vl`, `qwen2_5_vl` also use checkpointed
+  decoder-layer recompute paths.
 
-For the same version, this specific pattern was not observed in the tested text-only families:
-- `qwen2`, `qwen3`
-- `llama`
-- `mistral`
+So with temporary per-forward hooks, treat adapter + gradient checkpointing as unsupported
+on these families unless adapter injection is refactored.
 
 **Workarounds**:
 - Set `training.gradient_checkpointing: false` for unsupported families, or
