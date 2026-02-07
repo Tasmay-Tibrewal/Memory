@@ -64,6 +64,7 @@ class ChapterRouter(nn.Module):
         self,
         hidden_states: torch.Tensor,
         return_losses: bool = True,
+        exclude_prefix_chapters: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute chapter routing.
@@ -71,6 +72,8 @@ class ChapterRouter(nn.Module):
         Args:
             hidden_states: Input tensor (batch_size, seq_len, hidden_dim)
             return_losses: Whether to compute and return auxiliary losses
+            exclude_prefix_chapters: Exclude first N chapters from top-k selection
+                (useful when those chapters are always included as shared chapters).
             
         Returns:
             Tuple of:
@@ -95,13 +98,39 @@ class ChapterRouter(nn.Module):
         # Compute routing probabilities
         router_probs = F.softmax(router_logits, dim=-1)  # (batch_size, num_chapters)
         
-        # Select top-k chapters
-        top_k_weights, top_k_indices = torch.topk(
-            router_probs, self.top_k, dim=-1
-        )  # Both: (batch_size, top_k)
-        
-        # Normalize weights of selected chapters
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        if exclude_prefix_chapters < 0 or exclude_prefix_chapters > self.num_chapters:
+            raise ValueError(
+                f"exclude_prefix_chapters must be in [0, {self.num_chapters}], "
+                f"got {exclude_prefix_chapters}"
+            )
+
+        # Select top-k chapters (optionally excluding a shared prefix).
+        if exclude_prefix_chapters > 0:
+            available = self.num_chapters - exclude_prefix_chapters
+            select_k = min(int(self.top_k), int(available))
+            if select_k <= 0:
+                top_k_indices = torch.empty(
+                    (batch_size, 0),
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+                top_k_weights = torch.empty(
+                    (batch_size, 0),
+                    dtype=router_probs.dtype,
+                    device=hidden_states.device,
+                )
+            else:
+                probs = router_probs.clone()
+                probs[:, :exclude_prefix_chapters] = 0.0
+                denom = probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+                probs = probs / denom
+                top_k_weights, top_k_indices = torch.topk(probs, select_k, dim=-1)
+                top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        else:
+            top_k_weights, top_k_indices = torch.topk(
+                router_probs, self.top_k, dim=-1
+            )  # Both: (batch_size, top_k)
+            top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         
         # Compute auxiliary losses
         losses = {}
@@ -167,6 +196,11 @@ class ChapterRouter(nn.Module):
         log_sum_exp = torch.logsumexp(router_logits, dim=-1)  # (batch_size,)
         z_loss = (log_sum_exp ** 2).mean()
         losses["z_loss"] = z_loss
+
+        # Entropy metric (for monitoring router sharpness/collapse).
+        # Not part of total router loss by default.
+        entropy = -(router_probs * torch.log(router_probs.clamp_min(1e-12))).sum(dim=-1).mean()
+        losses["entropy"] = entropy
         
         return losses
 

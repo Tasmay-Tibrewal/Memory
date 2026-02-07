@@ -62,6 +62,10 @@ class MemoryConfig:
     num_chapters: int = 100
     # tokens_per_chapter is auto-calculated as num_memory_tokens // num_chapters
     top_k_chapters: int = 20
+    # Always include first N chapters in memory selection (global/shared chapters).
+    num_shared_chapters: int = 0
+    # Scale routed chapter weights relative to shared-chapter weights.
+    routed_scaling_factor: float = 1.0
     
     # Routing strategy: "sequence" (mean-pool), "token" (per-token, generation only)
     routing_strategy_train: str = "sequence"

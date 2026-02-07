@@ -120,6 +120,8 @@ memory:
   use_chapters: false          # Enable chapter-based routing
   num_chapters: 100            # Number of chapters
   top_k_chapters: 20           # Chapters to select per forward pass
+  num_shared_chapters: 0       # Always include first N chapters for every sample
+  routed_scaling_factor: 1.0   # Scale routed chapter weights relative to shared chapters
   
   routing_strategy_train: sequence      # Training: always sequence-level
   routing_strategy_inference: sequence  # Inference: "sequence", "rolling", "token", "hybrid"
@@ -229,6 +231,8 @@ training:
   log_to_wandb: false          # Enable Weights & Biases
   wandb_project: memory-transformer
   wandb_run_name: null         # Auto-generated if null
+  # WandB logs include: loss/total_loss, learning_rate, step_time_s, grad_norm,
+  # router metrics (including entropy when chapters are enabled), and CUDA memory stats.
   
   # === Output ===
   output_dir: ./outputs        # Output directory

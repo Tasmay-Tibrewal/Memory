@@ -109,6 +109,21 @@ class MemoryAdapter(nn.Module):
         self.config = config
         self.model_config = config.model
         self.memory_config = config.memory
+
+        # Validate shared-chapter routing configuration early.
+        if self.memory_config.num_shared_chapters < 0:
+            raise ValueError(
+                f"memory.num_shared_chapters must be >= 0, got {self.memory_config.num_shared_chapters}"
+            )
+        if self.memory_config.use_chapters and self.memory_config.num_shared_chapters > self.memory_config.num_chapters:
+            raise ValueError(
+                f"memory.num_shared_chapters ({self.memory_config.num_shared_chapters}) "
+                f"must be <= memory.num_chapters ({self.memory_config.num_chapters})"
+            )
+        if self.memory_config.routed_scaling_factor < 0:
+            raise ValueError(
+                f"memory.routed_scaling_factor must be >= 0, got {self.memory_config.routed_scaling_factor}"
+            )
         
         # Load pretrained model
         if config.model.base_model_name is None:
@@ -384,6 +399,68 @@ class MemoryAdapter(nn.Module):
         denom = m.sum(dim=1).clamp(min=1.0)  # (B, 1)
         return (states * m).sum(dim=1) / denom
 
+    @staticmethod
+    def _select_routed_chapters_from_probs(
+        probs: torch.Tensor,
+        top_k: int,
+        num_shared_chapters: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Select routed chapters from router probabilities, excluding shared prefix."""
+        batch_size, num_chapters = probs.shape
+        shared = max(0, min(int(num_shared_chapters), int(num_chapters)))
+        available = num_chapters - shared
+        select_k = min(int(top_k), int(available))
+        if select_k <= 0:
+            return (
+                torch.empty((batch_size, 0), dtype=torch.long, device=probs.device),
+                torch.empty((batch_size, 0), dtype=probs.dtype, device=probs.device),
+            )
+
+        masked_probs = probs.clone()
+        if shared > 0:
+            masked_probs[:, :shared] = 0.0
+        masked_probs = masked_probs / masked_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        chapter_weights, chapter_indices = torch.topk(masked_probs, select_k, dim=-1)
+        chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        return chapter_indices, chapter_weights
+
+    @staticmethod
+    def _prepend_shared_chapters(
+        chapter_indices: torch.Tensor,
+        chapter_weights: torch.Tensor,
+        *,
+        num_chapters: int,
+        num_shared_chapters: int,
+        routed_scaling_factor: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Prepend always-on shared chapters and normalize combined chapter weights."""
+        shared = max(0, min(int(num_shared_chapters), int(num_chapters)))
+        if shared <= 0:
+            return chapter_indices, chapter_weights
+
+        batch_size = chapter_indices.shape[0]
+        shared_idx = torch.arange(
+            shared,
+            dtype=torch.long,
+            device=chapter_indices.device,
+        ).unsqueeze(0).expand(batch_size, -1)
+        shared_weights = torch.ones(
+            (batch_size, shared),
+            dtype=chapter_weights.dtype,
+            device=chapter_weights.device,
+        )
+
+        if chapter_indices.shape[1] > 0:
+            routed_weights = chapter_weights * float(routed_scaling_factor)
+            combined_indices = torch.cat([shared_idx, chapter_indices], dim=-1)
+            combined_weights = torch.cat([shared_weights, routed_weights], dim=-1)
+        else:
+            combined_indices = shared_idx
+            combined_weights = shared_weights
+
+        combined_weights = combined_weights / combined_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        return combined_indices, combined_weights
+
     def _register_memory_hooks(self):
         """
         Register persistent forward hooks on each decoder layer.
@@ -461,7 +538,9 @@ class MemoryAdapter(nn.Module):
                         if self.training or (not use_cache) or strategy in {"sequence", "token"}:
                             router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
                             chapter_indices, chapter_weights, router_losses = router(
-                                hidden_states, return_losses=self.training
+                                hidden_states,
+                                return_losses=self.training,
+                                exclude_prefix_chapters=mem_cfg.num_shared_chapters,
                             )
                         elif strategy in {"rolling", "hybrid"}:
                             cache_key = str(layer_idx)
@@ -491,11 +570,22 @@ class MemoryAdapter(nn.Module):
 
                             logits = router.router(pooled)
                             probs = F.softmax(logits, dim=-1)
-                            chapter_weights, chapter_indices = torch.topk(probs, router.top_k, dim=-1)
-                            chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True)
+                            chapter_indices, chapter_weights = self._select_routed_chapters_from_probs(
+                                probs,
+                                top_k=router.top_k,
+                                num_shared_chapters=mem_cfg.num_shared_chapters,
+                            )
                             router_losses = {}
                         else:
                             raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
+
+                        chapter_indices, chapter_weights = self._prepend_shared_chapters(
+                            chapter_indices,
+                            chapter_weights,
+                            num_chapters=mem_cfg.num_chapters,
+                            num_shared_chapters=mem_cfg.num_shared_chapters,
+                            routed_scaling_factor=mem_cfg.routed_scaling_factor,
+                        )
 
                         # Side effect: only append router losses on first pass
                         if not is_recompute:

@@ -45,7 +45,7 @@ memory:
   vanilla_mode: false
 
   # Memory bank settings
-  num_memory_tokens: 16384
+  num_memory_tokens: 65536
   memory_dim: null # Uses hidden_dim
   memory_num_heads: null # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: null # null => fallback to model.num_kv_heads (or model.num_heads if null)
@@ -58,8 +58,10 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 64
-  top_k_chapters: 8
+  num_chapters: 256
+  top_k_chapters: 16
+  num_shared_chapters: 4 # First N chapters are always included for every sample
+  routed_scaling_factor: 4 # Scales routed chapter weights relative to shared chapters
   routing_strategy_train: sequence
   routing_strategy_inference: sequence
 

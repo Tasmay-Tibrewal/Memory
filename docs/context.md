@@ -10,8 +10,8 @@ This document provides a comprehensive summary for future work, session handoffs
 |-------|-------|
 | **Goal** | Implement memory-augmented transformers with learnable cross-attention memory banks |
 | **Repository** | `Memory/` |
-| **Status** | âœ… **COMPLETE** - All requirements implemented, ready for experiments |
-| **Session** | Sessions 1-9 (implementation + fixes + verification + docs + memory-head overrides) |
+| **Status** | COMPLETE - implementation + verification + docs updated through Session 10 |
+| **Session** | Sessions 1-10 (implementation + fixes + verification + docs + shared-chapter routing + logging updates) |
 | **Date** | February 7, 2026 |
 
 ---
@@ -189,6 +189,8 @@ use_chapters: bool = false
 num_chapters: int = 100
 # tokens_per_chapter is auto-calculated as num_memory_tokens // num_chapters
 top_k_chapters: int = 20
+num_shared_chapters: int = 0          # Always include first N chapters in selection
+routed_scaling_factor: float = 1.0    # Scale routed chapter weights vs shared chapter weights
 routing_strategy_train: str = "sequence"
 routing_strategy_inference: str = "sequence"  # sequence/rolling/token/hybrid
 routing_window_size: int = 128                # For rolling/hybrid inference
@@ -409,7 +411,7 @@ Run these 4 configs to compare approaches:
 
 ## Session History
 
-See `docs/meta_artifacts/session_summary.md` for session summaries, `docs/meta_artifacts/session9/session.md` for the latest detailed log, and `docs/meta_artifacts/session1/session.md` for earlier historical details, including:
+See `docs/meta_artifacts/session_summary.md` for session summaries, `docs/meta_artifacts/session10/session.md` for the latest detailed log, and `docs/meta_artifacts/session1/session.md` for earlier historical details, including:
 - All decisions made and rationale
 - Every file created with descriptions
 - Issues encountered and resolutions

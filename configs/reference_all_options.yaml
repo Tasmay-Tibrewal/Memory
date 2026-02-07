@@ -85,6 +85,8 @@ memory:
   use_chapters: false
   num_chapters: 100
   top_k_chapters: 20
+  num_shared_chapters: 0           # Always include first N chapters for every sample
+  routed_scaling_factor: 1.0       # Scale routed chapter weights vs shared chapter weights
   routing_strategy_train: sequence
   routing_strategy_inference: sequence  # sequence/rolling/token/hybrid
   routing_window_size: 128

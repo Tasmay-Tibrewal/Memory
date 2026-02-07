@@ -200,8 +200,9 @@ Memory/
 â”‚   â””â”€â”€ meta_artifacts/      # Session artifacts for context management
 â”‚       â”œâ”€â”€ README.md        # Meta artifacts overview
 â”‚       â”œâ”€â”€ session_summary.md  # Consolidated session summaries
-â”‚       â””â”€â”€ session1/        # Session 1 historical artifacts
-│       └── session9/        # Latest detailed session artifacts
+â”‚       â”œâ”€â”€ session1/        # Session 1 historical artifacts
+â”‚       â”œâ”€â”€ session9/        # Prior detailed session artifacts
+â”‚       â””â”€â”€ session10/       # Latest detailed session artifacts
 â”‚
 â””â”€â”€ idea/                     # Original research documents
     â”œâ”€â”€ idea.txt             # Conceptual explanation
@@ -268,6 +269,8 @@ memory:
   use_chapters: true           # Enable MoE-style routing
   num_chapters: 16             # Number of chapters
   top_k_chapters: 4            # Chapters to select
+  num_shared_chapters: 0       # Always include first N chapters for every sample
+  routed_scaling_factor: 1.0   # Scale routed chapter weights vs shared chapters
   routing_strategy_inference: hybrid  # sequence/rolling/token/hybrid
   routing_window_size: 128            # Rolling/hybrid window size (tokens)
   
@@ -304,6 +307,8 @@ training:
   wsd_stable_ratio: 0.3
   decay_start_ratio: null
   save_total_limit: 3          # null => keep all checkpoints
+  # WandB logs include loss/total_loss, step_time_s, grad_norm, router metrics
+  # (including entropy when routing is enabled), and CUDA memory usage.
 ```
 
 ### Example Configurations

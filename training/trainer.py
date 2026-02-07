@@ -13,6 +13,7 @@ Supports:
 import os
 import json
 import math
+import time
 import shutil
 from typing import Optional, Dict, Any, Union, List
 from pathlib import Path
@@ -475,6 +476,28 @@ class Trainer:
             "memory": self.config.memory.__dict__,
             "training": self.config.training.__dict__,
         }
+
+    @staticmethod
+    def _summarize_router_losses(router_losses: Any) -> Dict[str, float]:
+        """Average router metrics across layers for logging."""
+        if not isinstance(router_losses, list) or not router_losses:
+            return {}
+
+        sums: Dict[str, float] = {}
+        counts: Dict[str, int] = {}
+        for layer_losses in router_losses:
+            if not isinstance(layer_losses, dict):
+                continue
+            for key, value in layer_losses.items():
+                if not torch.is_tensor(value):
+                    continue
+                sums[key] = sums.get(key, 0.0) + float(value.detach().item())
+                counts[key] = counts.get(key, 0) + 1
+
+        return {
+            key: sums[key] / max(counts.get(key, 1), 1)
+            for key in sums.keys()
+        }
     
     def _resume_from_checkpoint(self, checkpoint_path: str):
         """Resume training from checkpoint."""
@@ -653,7 +676,13 @@ class Trainer:
         # Track loss statistics for logging windows (Bug 38 fix: divide by actual count, not a fixed constant)
         running_loss = 0.0
         running_loss_steps = 0
+        running_step_time = 0.0
+        running_step_time_steps = 0
+        running_router_sums: Dict[str, float] = {}
+        running_router_counts: Dict[str, int] = {}
+        last_grad_norm: Optional[float] = None
         last_loss_value: Optional[float] = None
+        step_timer_start = time.perf_counter()
 
         # Determine epoch stopping condition
         max_epochs = train_cfg.num_epochs if train_cfg.num_epochs is not None else float("inf")
@@ -668,6 +697,7 @@ class Trainer:
                     break
 
                 did_optimizer_step = False
+                step_router_metrics: Dict[str, float] = {}
 
                 with self.accelerator.accumulate(self.model):
                     outputs = self.model(
@@ -678,16 +708,23 @@ class Trainer:
 
                     loss = outputs["loss"]
                     last_loss_value = float(loss.detach().item())
+                    step_router_metrics = self._summarize_router_losses(
+                        outputs.get("router_losses")
+                    )
 
                     self.accelerator.backward(loss)
 
                     # Bug 35 fix: Only clip/step when gradients are being synchronized (i.e., at end of accumulation).
                     if self.accelerator.sync_gradients:
                         if train_cfg.max_grad_norm > 0:
-                            self.accelerator.clip_grad_norm_(
+                            grad_norm = self.accelerator.clip_grad_norm_(
                                 self.model.parameters(),
                                 train_cfg.max_grad_norm,
                             )
+                            if torch.is_tensor(grad_norm):
+                                last_grad_norm = float(grad_norm.detach().item())
+                            elif grad_norm is not None:
+                                last_grad_norm = float(grad_norm)
 
                         self.optimizer.step()
                         self.scheduler.step()
@@ -705,27 +742,60 @@ class Trainer:
                 if last_loss_value is not None:
                     running_loss += last_loss_value
                     running_loss_steps += 1
+                now = time.perf_counter()
+                running_step_time += (now - step_timer_start)
+                running_step_time_steps += 1
+                step_timer_start = now
+
+                for key, value in step_router_metrics.items():
+                    running_router_sums[key] = running_router_sums.get(key, 0.0) + float(value)
+                    running_router_counts[key] = running_router_counts.get(key, 0) + 1
 
                 # Logging: first optimizer step and then every logging_steps.
                 if self.global_step == 1 or (self.global_step % train_cfg.logging_steps == 0):
                     avg_loss = running_loss / max(running_loss_steps, 1)
                     lr = self.scheduler.get_last_lr()[0]
+                    avg_step_time = running_step_time / max(running_step_time_steps, 1)
 
                     progress_bar.set_postfix({
                         "loss": f"{avg_loss:.4f}",
                         "lr": f"{lr:.2e}",
+                        "step_s": f"{avg_step_time:.3f}",
                     })
 
                     if train_cfg.log_to_wandb and self.accelerator.is_main_process:
-                        self.accelerator.log({
+                        log_payload = {
                             "train/loss": avg_loss,
+                            "train/total_loss": avg_loss,
                             "train/learning_rate": lr,
                             "train/step": self.global_step,
                             "train/epoch": self.epoch,
-                        })
+                            "train/step_time_s": avg_step_time,
+                        }
+                        if last_grad_norm is not None:
+                            log_payload["train/grad_norm"] = last_grad_norm
+                        for key in sorted(running_router_sums.keys()):
+                            denom = max(running_router_counts.get(key, 1), 1)
+                            log_payload[f"train/router/{key}"] = running_router_sums[key] / denom
+                        if torch.cuda.is_available() and self.accelerator.device.type == "cuda":
+                            device = self.accelerator.device
+                            log_payload["train/memory_allocated_gb"] = (
+                                torch.cuda.memory_allocated(device) / 1024**3
+                            )
+                            log_payload["train/memory_reserved_gb"] = (
+                                torch.cuda.memory_reserved(device) / 1024**3
+                            )
+                            log_payload["train/max_memory_allocated_gb"] = (
+                                torch.cuda.max_memory_allocated(device) / 1024**3
+                            )
+                        self.accelerator.log(log_payload)
 
                     running_loss = 0.0
                     running_loss_steps = 0
+                    running_step_time = 0.0
+                    running_step_time_steps = 0
+                    running_router_sums = {}
+                    running_router_counts = {}
 
                 # Evaluation
                 if self.global_step > 0 and (self.global_step % train_cfg.eval_steps == 0):

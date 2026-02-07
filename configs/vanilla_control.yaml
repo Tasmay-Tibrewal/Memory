@@ -48,6 +48,8 @@ memory:
   memory_num_kv_heads: null
   memory_dropout: null
   use_chapters: false
+  num_shared_chapters: 0
+  routed_scaling_factor: 1.0
   use_lora: false
   use_memory_adapter: false
 

@@ -104,7 +104,7 @@ Memory/
 
 ### Core Components
 
-#### [NEW] [config.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/memory_transformer/config.py)
+#### [NEW] [config.py](../../../memory_transformer/config.py)
 
 Configuration dataclass covering all flags from user requirements:
 
@@ -220,7 +220,7 @@ class ModelConfig:
 
 ---
 
-#### [NEW] [memory_bank.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/memory_transformer/memory_bank.py)
+#### [NEW] [memory_bank.py](../../../memory_transformer/memory_bank.py)
 
 Memory bank implementations:
 
@@ -231,7 +231,7 @@ Memory bank implementations:
 
 ---
 
-#### [NEW] [memory_attention.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/memory_transformer/memory_attention.py)
+#### [NEW] [memory_attention.py](../../../memory_transformer/memory_attention.py)
 
 Cross-attention layer that:
 - Takes hidden states H (B × L × d) as queries
@@ -242,7 +242,7 @@ Cross-attention layer that:
 
 ---
 
-#### [NEW] [router.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/memory_transformer/router.py)
+#### [NEW] [router.py](../../../memory_transformer/router.py)
 
 Chapter-based routing:
 - Router network: Linear(d, num_chapters)
@@ -253,7 +253,7 @@ Chapter-based routing:
 
 ---
 
-#### [NEW] [adapter.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/memory_transformer/adapter.py)
+#### [NEW] [adapter.py](../../../memory_transformer/adapter.py)
 
 Memory adapter for pretrained models:
 - Load base model from HuggingFace
@@ -265,7 +265,7 @@ Memory adapter for pretrained models:
 
 ### Training Infrastructure
 
-#### [NEW] [trainer.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/training/trainer.py)
+#### [NEW] [trainer.py](../../../training/trainer.py)
 
 Training loop with:
 - Multi-GPU support via Accelerate (DDP/FSDP)
@@ -274,7 +274,7 @@ Training loop with:
 - Mixed precision training
 - Logging and checkpointing
 
-#### [NEW] [data.py](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/training/data.py)
+#### [NEW] [data.py](../../../training/data.py)
 
 Flexible dataset loading:
 - Support any HuggingFace dataset
@@ -286,7 +286,7 @@ Flexible dataset loading:
 
 ### Config Files
 
-#### [NEW] [configs/base_small.yaml](file:///c:/Users/kesha/OneDrive/Desktop/Tasmay/UG/Memory/configs/base_small.yaml)
+#### [NEW] [configs/base_small.yaml](../../../configs/base_small.yaml)
 
 Example config for small from-scratch model:
 

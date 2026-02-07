@@ -889,6 +889,58 @@ Perform a full documentation and session-artifact audit after recent implementat
 - Updated all relevant YAML/docs to reflect the new options/behavior.
 
 ---
+# Session 10 Summary
+
+**Date**: 2026-02-07  
+**Status**: Complete  
+**Artifacts**: [`session10/`](session10/)
+
+## Objective
+Implement shared chapter routing controls, improve wandb training telemetry, and re-sync docs/session artifacts.
+
+## Work Completed
+- Added shared chapter routing support across from-scratch and adapter paths:
+  - `memory.num_shared_chapters`
+  - `memory.routed_scaling_factor`
+- Updated router behavior to allow excluding shared prefix chapters from routed top-k and added router `entropy` metric.
+- Updated trainer logging to include:
+  - `train/step_time_s`
+  - `train/total_loss`
+  - `train/grad_norm` (when available)
+  - `train/router/*` aggregated metrics
+  - live CUDA memory metrics (`allocated/reserved/max_allocated`)
+- Updated all relevant runnable YAMLs and config docs to include shared chapter knobs.
+- Updated root/package/training docs plus `docs/context.md`.
+- Added this session artifact (`docs/meta_artifacts/session10/session.md`) and updated meta index.
+
+## Files Modified
+- `memory_transformer/config.py`
+- `memory_transformer/router.py`
+- `memory_transformer/model.py`
+- `memory_transformer/adapter.py`
+- `training/trainer.py`
+- `configs/base_small.yaml`
+- `configs/adapter_qwen2.5_1.5b.yaml`
+- `configs/memory_lora_combined.yaml`
+- `configs/vanilla_control.yaml`
+- `configs/reference_all_options.yaml`
+- `configs/README.md`
+- `README.md`
+- `training/README.md`
+- `memory_transformer/README.md`
+- `docs/context.md`
+- `docs/meta_artifacts/README.md`
+- `docs/meta_artifacts/session_summary.md`
+- `docs/meta_artifacts/session10/session.md` (new)
+
+## Verification
+- `python -m compileall memory_transformer training inference scripts`
+- Runtime smoke assertions for:
+  - shared chapter selection/combination behavior
+  - edge case with fully shared chapter pool
+  - router metric summary helper
+
+---
 # Template for Future Session Summaries
 
 ```markdown

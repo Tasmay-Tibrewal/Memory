@@ -43,6 +43,8 @@ memory_transformer/
 - `model.initializer_range`: Std used for from-scratch `nn.Linear`/`nn.Embedding` initialization.
 - `model.tie_embeddings`: Tie or untie token embeddings and LM head.
 - `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
+- `memory.num_shared_chapters`: Always include first N chapters in chaptered memory routing.
+- `memory.routed_scaling_factor`: Scale routed chapter weights relative to shared chapter weights.
 - `training.save_total_limit`: Checkpoint retention limit (`null` => disable cleanup / keep all).
 - `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
@@ -186,6 +188,8 @@ output = block(hidden_states, memory=memory_tokens)
 | Load Balance | Encourage uniform chapter usage | 0.01 |
 | Auxiliary | Penalize over/under-utilization | 0.01 |
 | Z-Loss | Regularize router logits | 0.001 |
+
+`ChapterRouter` also emits `entropy` as a monitoring metric (not added to training loss unless explicitly wired).
 
 **Example**:
 ```python

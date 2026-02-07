@@ -44,6 +44,8 @@ memory:
   use_chapters: true
   num_chapters: 4
   top_k_chapters: 1
+  num_shared_chapters: 0 # First N chapters are always included for every sample
+  routed_scaling_factor: 1.0 # Scales routed chapter weights relative to shared chapters
 
   # Router losses
   use_load_balance_loss: true

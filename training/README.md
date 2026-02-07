@@ -288,6 +288,17 @@ training:
   output_dir: ./outputs
 ```
 
+### WandB Metrics Logged During Training
+
+When `training.log_to_wandb: true`, the trainer logs:
+- `train/loss` and `train/total_loss`
+- `train/learning_rate`
+- `train/step_time_s`
+- `train/grad_norm` (when clipping is enabled)
+- `train/router/*` aggregated router metrics (including `entropy` when chapter routing is active)
+- CUDA memory metrics (`train/memory_allocated_gb`, `train/memory_reserved_gb`, `train/max_memory_allocated_gb`) on GPU runs
+- `eval/loss` at evaluation intervals
+
 Model-side initialization control (used for from-scratch models):
 
 ```yaml
