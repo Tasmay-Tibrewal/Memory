@@ -34,6 +34,10 @@ from memory_transformer.utils import (
     load_checkpoint,
     count_parameters,
     format_params,
+    configure_tokenizer_special_ids,
+    get_cosine_schedule_with_warmup,
+    get_linear_schedule_with_warmup,
+    get_wsd_schedule_with_warmup,
 )
 from .data import create_dataloader
 
@@ -183,15 +187,22 @@ class Trainer:
             self._resume_from_checkpoint(config.training.resume_from_checkpoint)
         
         # Initialize wandb if configured
-        if config.training.log_to_wandb and self.accelerator.is_main_process:
-            init_kwargs = {"project": config.training.wandb_project}
-            if config.training.wandb_run_name:
-                init_kwargs["name"] = config.training.wandb_run_name
-            self.accelerator.init_trackers(
-                project_name=config.training.wandb_project,
-                config=self._config_to_dict(),
-                init_kwargs={"wandb": init_kwargs} if config.training.wandb_run_name else None,
-            )
+        self._setup_tracking()
+
+    def _setup_tracking(self):
+        """Initialize experiment tracking backends (currently Weights & Biases via Accelerate)."""
+        if not self.train_config.log_to_wandb or not self.accelerator.is_main_process:
+            return
+
+        wandb_init = {"project": self.train_config.wandb_project}
+        if self.train_config.wandb_run_name:
+            wandb_init["name"] = self.train_config.wandb_run_name
+
+        self.accelerator.init_trackers(
+            project_name=self.train_config.wandb_project,
+            config=self._config_to_dict(),
+            init_kwargs={"wandb": wandb_init},
+        )
     
     def _create_model(self) -> nn.Module:
         """Create model based on config."""
@@ -217,14 +228,11 @@ class Trainer:
             tokenizer_name,
             trust_remote_code=True,
         )
+        configure_tokenizer_special_ids(tokenizer, self.config.model)
 
         # Persist resolved tokenizer name for checkpoint reproducibility.
         if self.config.model.tokenizer_name is None:
             self.config.model.tokenizer_name = tokenizer_name
-
-        # Ensure tokenizer has pad token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
 
         # From-scratch: validate vocab size matches tokenizer
         if self.config.model.base_model_name is None:
@@ -252,11 +260,30 @@ class Trainer:
         if isinstance(self.model, MemoryAdapter):
             param_groups = self.model.get_parameter_groups()
         else:
-            # From-scratch training: use base_model_lr for all parameters
-            # Bug 25 fix: Use base_model_lr (not memory_lr) since entire model is being trained
-            param_groups = [
-                {"params": self.model.parameters(), "lr": train_cfg.base_model_lr}
-            ]
+            # From-scratch training: split memory-related modules and backbone params.
+            memory_markers = (
+                "memory_banks.",
+                "routers.",
+                ".memory_attn.",
+                ".memory_layernorm.",
+                ".post_memory_layernorm.",
+                ".post_memory_mlp.",
+            )
+            memory_params: List[nn.Parameter] = []
+            backbone_params: List[nn.Parameter] = []
+            for name, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if any(marker in name for marker in memory_markers):
+                    memory_params.append(p)
+                else:
+                    backbone_params.append(p)
+
+            param_groups = []
+            if memory_params:
+                param_groups.append({"params": memory_params, "lr": train_cfg.memory_lr, "name": "memory"})
+            if backbone_params:
+                param_groups.append({"params": backbone_params, "lr": train_cfg.base_model_lr, "name": "base_model"})
         
         # Filter to only trainable params
         filtered_groups = []
@@ -267,6 +294,13 @@ class Trainer:
                     **group,
                     "params": trainable,
                 })
+
+        if not filtered_groups:
+            raise ValueError(
+                "No trainable parameters found for optimizer setup. "
+                "Check freeze settings and adapter/memory toggles "
+                "(e.g., freeze_base_model, use_memory_adapter, use_lora)."
+            )
         
         # Create optimizer
         if train_cfg.optimizer == "adamw":
@@ -333,24 +367,68 @@ class Trainer:
         
         warmup_steps = train_cfg.warmup_steps
         if train_cfg.warmup_ratio is not None:
+            if not (0.0 <= train_cfg.warmup_ratio <= 1.0):
+                raise ValueError(
+                    f"warmup_ratio must be in [0, 1], got {train_cfg.warmup_ratio}"
+                )
             warmup_steps = int(self.total_steps * train_cfg.warmup_ratio)
-        
-        # Bug 4 fix: Use project's cosine schedule for min_lr_ratio support
-        if train_cfg.scheduler == "cosine":
-            from memory_transformer.utils import get_cosine_schedule_with_warmup
+
+        decay_start_step = train_cfg.decay_start_step
+        if decay_start_step is None and train_cfg.decay_start_ratio is not None:
+            if not (0.0 <= train_cfg.decay_start_ratio <= 1.0):
+                raise ValueError(
+                    f"decay_start_ratio must be in [0, 1], got {train_cfg.decay_start_ratio}"
+                )
+            decay_start_step = int(self.total_steps * train_cfg.decay_start_ratio)
+
+        scheduler_name = train_cfg.scheduler.lower()
+
+        # Bug 4 fix + extension: support delayed-decay cosine/linear and WSD.
+        if scheduler_name == "cosine":
             scheduler = get_cosine_schedule_with_warmup(
                 self.optimizer,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=self.total_steps,
                 min_lr_ratio=train_cfg.min_lr_ratio,
+                decay_start_step=decay_start_step,
             )
-        else:
-            # Use HF scheduler for linear/constant
+        elif scheduler_name == "linear":
+            scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=self.total_steps,
+                decay_start_step=decay_start_step,
+            )
+        elif scheduler_name == "wsd":
+            stable_steps = train_cfg.wsd_stable_steps
+            if stable_steps is None:
+                if not (0.0 <= train_cfg.wsd_stable_ratio <= 1.0):
+                    raise ValueError(
+                        f"wsd_stable_ratio must be in [0, 1], got {train_cfg.wsd_stable_ratio}"
+                    )
+                stable_steps = int(self.total_steps * train_cfg.wsd_stable_ratio)
+            elif int(stable_steps) < 0:
+                raise ValueError(f"wsd_stable_steps must be >= 0, got {stable_steps}")
+            if decay_start_step is not None:
+                stable_steps = max(int(decay_start_step) - int(warmup_steps), 0)
+            scheduler = get_wsd_schedule_with_warmup(
+                self.optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=self.total_steps,
+                num_stable_steps=stable_steps,
+                min_lr_ratio=train_cfg.min_lr_ratio,
+            )
+        elif scheduler_name == "constant":
             scheduler = get_scheduler(
-                train_cfg.scheduler,
+                scheduler_name,
                 optimizer=self.optimizer,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=self.total_steps,
+            )
+        else:
+            raise ValueError(
+                f"Unknown scheduler: {train_cfg.scheduler}. "
+                "Supported: cosine, linear, constant, wsd"
             )
         
         return scheduler

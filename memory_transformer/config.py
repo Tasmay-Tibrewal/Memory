@@ -22,6 +22,10 @@ class MemoryConfig:
     # === Memory bank settings ===
     num_memory_tokens: int = 1024
     memory_dim: Optional[int] = None  # Defaults to model hidden_dim if None
+    # Optional memory-cross-attention head overrides.
+    # If None, falls back to model.num_heads / model.num_kv_heads.
+    memory_num_heads: Optional[int] = None
+    memory_num_kv_heads: Optional[int] = None
     
     # === Memory layer placement ===
     # Options: "all", "first_k", "last_k", "every_n", "custom", "none"
@@ -105,16 +109,23 @@ class ModelConfig:
     # === Architecture (for from-scratch training) ===
     hidden_dim: int = 768
     num_heads: int = 12
+    # Grouped-query attention: number of KV heads. If None, defaults to num_heads.
+    num_kv_heads: Optional[int] = None
     num_layers: int = 12
     intermediate_dim: int = 3072
     vocab_size: int = 32000
     max_seq_len: int = 8192
+    # Optional alias (HF-style naming). If set, takes precedence over max_seq_len.
+    max_position_embeddings: Optional[int] = None
 
     # === Tokenizer (for from-scratch and optional override in adapter mode) ===
     # If None:
     # - Adapter mode defaults to base_model_name
     # - From-scratch defaults to a Llama-style 32k tokenizer (see Trainer._load_tokenizer)
     tokenizer_name: Optional[str] = None
+    bos_token_id: Optional[int] = None
+    eos_token_id: Optional[int] = None
+    pad_token_id: Optional[int] = None
     
     # === Positional encoding ===
     use_rope: bool = True
@@ -123,6 +134,7 @@ class ModelConfig:
     # === Regularization ===
     dropout: float = 0.0
     attention_dropout: float = 0.0
+    hidden_activation: str = "swiglu"  # swiglu/silu/relu/gelu/sigmoid/tanh
     
     # === Normalization ===
     norm_eps: float = 1e-6
@@ -134,6 +146,7 @@ class ModelConfig:
     
     # === Attention implementation ===
     use_flash_attention: bool = True  # Use Flash Attention if available
+    tie_embeddings: bool = True  # Tie input embedding and LM head
 
 
 @dataclass
@@ -186,8 +199,15 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     
     # === Scheduler ===
-    scheduler: str = "cosine"  # "cosine", "linear", "constant"
+    scheduler: str = "cosine"  # "cosine", "linear", "constant", "wsd"
     min_lr_ratio: float = 0.1  # Minimum LR as ratio of peak LR
+    # Optional delayed decay (for cosine/linear): hold peak LR until this point.
+    # If both are set, decay_start_step takes precedence.
+    decay_start_step: Optional[int] = None
+    decay_start_ratio: Optional[float] = None
+    # WSD = Warmup -> Stable -> Decay. Stable length can be absolute or ratio.
+    wsd_stable_steps: Optional[int] = None
+    wsd_stable_ratio: float = 0.0
     
     # === Mixed precision ===
     mixed_precision: str = "bf16"  # "no", "fp16", "bf16"

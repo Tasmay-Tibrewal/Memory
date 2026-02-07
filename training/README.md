@@ -260,7 +260,9 @@ training:
   max_grad_norm: 1.0
 
   # Scheduler
-  scheduler: cosine  # or "linear", "constant"
+  scheduler: cosine  # "cosine", "linear", "constant", "wsd"
+  decay_start_ratio: null  # optional delayed decay start
+  wsd_stable_ratio: 0.0    # only used when scheduler=wsd
 
   # === Mixed Precision ===
   mixed_precision: bf16        # "no", "fp16", "bf16"

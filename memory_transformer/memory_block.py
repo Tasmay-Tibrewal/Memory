@@ -158,6 +158,7 @@ class SelfAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
+        num_kv_heads: Optional[int] = None,
         max_seq_len: int = 8192,
         use_rope: bool = True,
         rope_theta: float = 10000.0,
@@ -169,12 +170,23 @@ class SelfAttention(nn.Module):
         
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         # Bug 42 fix: Validate attention head sizing to avoid silent shape mismatches later.
+        if self.num_heads <= 0:
+            raise ValueError(f"num_heads must be > 0, got {self.num_heads}")
         if hidden_dim % num_heads != 0:
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
             )
+        if self.num_kv_heads <= 0:
+            raise ValueError(f"num_kv_heads must be > 0, got {self.num_kv_heads}")
+        if num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
+            )
         self.head_dim = hidden_dim // num_heads
+        self.kv_hidden_dim = self.num_kv_heads * self.head_dim
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.scale = self.head_dim ** -0.5
         self.use_rope = use_rope
         if self.use_rope and (self.head_dim % 2 != 0):
@@ -184,8 +196,8 @@ class SelfAttention(nn.Module):
             )
         
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_dim, self.kv_hidden_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_dim, self.kv_hidden_dim, bias=False)
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
         
         self.rotary = None
@@ -207,6 +219,12 @@ class SelfAttention(nn.Module):
             self._has_flash = True
         except ImportError:
             self._has_flash = False
+
+    def _expand_kv_heads(self, kv: torch.Tensor) -> torch.Tensor:
+        """Expand grouped KV heads to query-head count for attention compute."""
+        if self.num_kv_heads == self.num_heads:
+            return kv
+        return kv.repeat_interleave(self.num_kv_groups, dim=2)
     
     def forward(
         self,
@@ -240,8 +258,8 @@ class SelfAttention(nn.Module):
         
         # Reshape for attention
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         
         # Apply rotary embeddings (optional)
         if self.use_rope:
@@ -266,6 +284,10 @@ class SelfAttention(nn.Module):
         
         new_kv = (k, v) if use_cache else None
         
+        # Expand grouped KV heads to full head count for attention compute.
+        k_attn = self._expand_kv_heads(k)
+        v_attn = self._expand_kv_heads(v)
+
         # Attention
         if self._has_flash and self.use_flash_attention:
             # Flash attention expects (batch, seq, heads, head_dim)
@@ -282,7 +304,7 @@ class SelfAttention(nn.Module):
             
             if use_flash_here:
                 attn_output = self._flash_attn(
-                    q, k, v,
+                    q, k_attn, v_attn,
                     dropout_p=self.attention_dropout if self.training else 0.0,
                     causal=True,
                 )
@@ -295,13 +317,13 @@ class SelfAttention(nn.Module):
         if not (self._has_flash and self.use_flash_attention) or not use_flash_here:
             # Standard attention
             q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
+            k_attn = k_attn.transpose(1, 2)
+            v_attn = v_attn.transpose(1, 2)
             
-            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            attn_weights = torch.matmul(q, k_attn.transpose(-2, -1)) * self.scale
             
             # Causal mask
-            kv_len = k.shape[2]
+            kv_len = k_attn.shape[2]
             causal_mask = torch.triu(
                 torch.ones(seq_len, kv_len, device=q.device, dtype=torch.bool),
                 diagonal=kv_len - seq_len + 1
@@ -327,7 +349,7 @@ class SelfAttention(nn.Module):
             
             attn_weights = F.softmax(attn_weights, dim=-1)
             attn_weights = self.attn_dropout(attn_weights)
-            attn_output = torch.matmul(attn_weights, v)
+            attn_output = torch.matmul(attn_weights, v_attn)
             attn_output = attn_output.transpose(1, 2)  # (batch, seq, heads, head_dim)
         
         # Reshape and project
@@ -345,18 +367,39 @@ class MLP(nn.Module):
         hidden_dim: int,
         intermediate_dim: int,
         dropout: float = 0.0,
+        activation: str = "swiglu",
     ):
         super().__init__()
-        
-        self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
+        self.activation_name = activation.lower()
+        allowed = {"swiglu", "silu", "relu", "gelu", "sigmoid", "tanh"}
+        if self.activation_name not in allowed:
+            raise ValueError(
+                f"Unknown hidden_activation: '{activation}'. Supported: {sorted(allowed)}"
+            )
+
+        self.is_gated = self.activation_name == "swiglu"
+        if self.is_gated:
+            self.gate_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
         self.up_proj = nn.Linear(hidden_dim, intermediate_dim, bias=False)
         self.down_proj = nn.Linear(intermediate_dim, hidden_dim, bias=False)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(
-            self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
-        )
+        if self.is_gated:
+            hidden = F.silu(self.gate_proj(x)) * self.up_proj(x)
+        else:
+            hidden = self.up_proj(x)
+            if self.activation_name == "silu":
+                hidden = F.silu(hidden)
+            elif self.activation_name == "relu":
+                hidden = F.relu(hidden)
+            elif self.activation_name == "gelu":
+                hidden = F.gelu(hidden)
+            elif self.activation_name == "sigmoid":
+                hidden = torch.sigmoid(hidden)
+            elif self.activation_name == "tanh":
+                hidden = torch.tanh(hidden)
+        return self.dropout(self.down_proj(hidden))
 
 
 class MemoryTransformerBlock(nn.Module):
@@ -372,10 +415,14 @@ class MemoryTransformerBlock(nn.Module):
         hidden_dim: int,
         num_heads: int,
         intermediate_dim: int,
+        num_kv_heads: Optional[int] = None,
+        memory_num_heads: Optional[int] = None,
+        memory_num_kv_heads: Optional[int] = None,
         max_seq_len: int = 8192,
         use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        hidden_activation: str = "swiglu",
         memory_dropout: Optional[float] = None,
         attention_dropout: float = 0.0,
         use_rms_norm: bool = True,
@@ -406,6 +453,7 @@ class MemoryTransformerBlock(nn.Module):
         self.self_attn = SelfAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             max_seq_len=max_seq_len,
             use_rope=use_rope,
             rope_theta=rope_theta,
@@ -415,15 +463,20 @@ class MemoryTransformerBlock(nn.Module):
         )
         
         # MLP
-        self.mlp = MLP(hidden_dim, intermediate_dim, dropout)
+        self.mlp = MLP(hidden_dim, intermediate_dim, dropout, activation=hidden_activation)
         memory_attn_dropout = dropout if memory_dropout is None else memory_dropout
         
         # Memory cross-attention (optional)
         if has_memory:
+            effective_memory_heads = num_heads if memory_num_heads is None else memory_num_heads
+            effective_memory_kv_heads = (
+                num_kv_heads if memory_num_kv_heads is None else memory_num_kv_heads
+            )
             self.memory_layernorm = norm_cls(hidden_dim, eps=norm_eps)
             self.memory_attn = MemoryCrossAttention(
                 hidden_dim=hidden_dim,
-                num_heads=num_heads,
+                num_heads=effective_memory_heads,
+                num_kv_heads=effective_memory_kv_heads,
                 memory_dim=memory_dim,
                 use_low_rank_projections=use_low_rank_projections,
                 projection_rank=projection_rank,
@@ -438,7 +491,12 @@ class MemoryTransformerBlock(nn.Module):
             # Variant B has extra MLP after memory
             if memory_block_variant == "B":
                 self.post_memory_layernorm = norm_cls(hidden_dim, eps=norm_eps)
-                self.post_memory_mlp = MLP(hidden_dim, intermediate_dim, dropout)
+                self.post_memory_mlp = MLP(
+                    hidden_dim,
+                    intermediate_dim,
+                    dropout,
+                    activation=hidden_activation,
+                )
     
     def forward(
         self,
@@ -538,10 +596,12 @@ class VanillaTransformerBlock(nn.Module):
         hidden_dim: int,
         num_heads: int,
         intermediate_dim: int,
+        num_kv_heads: Optional[int] = None,
         max_seq_len: int = 8192,
         use_rope: bool = True,
         rope_theta: float = 10000.0,
         dropout: float = 0.0,
+        hidden_activation: str = "swiglu",
         attention_dropout: float = 0.0,
         use_rms_norm: bool = True,
         norm_eps: float = 1e-6,
@@ -556,6 +616,7 @@ class VanillaTransformerBlock(nn.Module):
         self.self_attn = SelfAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             max_seq_len=max_seq_len,
             use_rope=use_rope,
             rope_theta=rope_theta,
@@ -564,7 +625,7 @@ class VanillaTransformerBlock(nn.Module):
             use_flash_attention=use_flash_attention,
         )
         
-        self.mlp = MLP(hidden_dim, intermediate_dim, dropout)
+        self.mlp = MLP(hidden_dim, intermediate_dim, dropout, activation=hidden_activation)
     
     def forward(
         self,

@@ -1,4 +1,4 @@
-# Memory-Augmented Transformer: Context for Handoffs
+﻿# Memory-Augmented Transformer: Context for Handoffs
 
 This document provides a comprehensive summary for future work, session handoffs, context compaction, or agent transitions. It is designed to give any reader the complete picture of the project state.
 
@@ -10,9 +10,9 @@ This document provides a comprehensive summary for future work, session handoffs
 |-------|-------|
 | **Goal** | Implement memory-augmented transformers with learnable cross-attention memory banks |
 | **Repository** | `Memory/` |
-| **Status** | ✅ **COMPLETE** - All requirements implemented, ready for experiments |
-| **Session** | Sessions 1â€“7 (implementation + fixes + verification + doc refresh) |
-| **Date** | February 5, 2026 |
+| **Status** | âœ… **COMPLETE** - All requirements implemented, ready for experiments |
+| **Session** | Sessions 1-9 (implementation + fixes + verification + docs + memory-head overrides) |
+| **Date** | February 7, 2026 |
 
 ---
 
@@ -39,10 +39,10 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | `training/` | 4 | ~975 |
 | `inference/` | 4 | ~840 |
 | `scripts/` | 3 | ~450 |
-| `configs/` | 5 | ~670 |
+| `configs/` | 6 | ~860 |
 | `docs/` | 5 | ~1,420 |
-| `docs/meta_artifacts/` | 3+ folders | ~2,400+ |
-| **Total** | **35+** | **~10,700+** |
+| `docs/meta_artifacts/` | 4+ folders | ~2,700+ |
+| **Total** | **37+** | **~11,200+** |
 
 ### Core Architecture (`memory_transformer/`)
 
@@ -91,10 +91,11 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | File | Purpose |
 |------|---------|
 | `README.md` | Complete config reference (~300 lines) |
-| `base_small.yaml` | From-scratch small model (768d, 12L) |
+| `base_small.yaml` | From-scratch memory model (current sample: 576d, 30L) |
 | `adapter_qwen2.5_1.5b.yaml` | Qwen adapter with dataset suggestions |
 | `vanilla_control.yaml` | Control experiment (no memory) |
 | `memory_lora_combined.yaml` | Memory + LoRA combined |
+| `reference_all_options.yaml` | Full configuration surface/reference template |
 
 ### Documentation (`docs/`)
 
@@ -117,8 +118,8 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 - **Alternative rejected**: Unsloth (too opinionated, limited custom attention)
 
 ### Decision 2: Block Variant
-- **Default**: Variant A (SA → Mem → MLP)
-- **Configurable**: Variant B (SA → MLP → Mem → MLP)
+- **Default**: Variant A (SA â†’ Mem â†’ MLP)
+- **Configurable**: Variant B (SA â†’ MLP â†’ Mem â†’ MLP)
 - **Rationale**: A is simpler, matches cross-attention patterns
 
 ### Decision 3: Routing Strategy
@@ -159,6 +160,8 @@ use_memory_adapter: bool = true      # Enable memory cross-attention
 # Memory bank
 num_memory_tokens: int = 1024        # Memory size
 memory_dim: int = null               # Default: hidden_dim
+memory_num_heads: int = null         # Optional memory-attn heads (null => model.num_heads)
+memory_num_kv_heads: int = null      # Optional memory-attn KV heads (null => model.num_kv_heads)
 
 # Placement
 memory_layer_placement: str = "all"  # all/first_k/last_k/every_n/custom
@@ -222,20 +225,27 @@ use_both_memory_and_lora: bool = false
 ```yaml
 hidden_dim: int = 768
 num_heads: int = 12
+num_kv_heads: int = null          # GQA KV heads (null => use num_heads)
 num_layers: int = 12
 intermediate_dim: int = 3072
 vocab_size: int = 32000
 max_seq_len: int = 8192
+max_position_embeddings: int = null
 tokenizer_name: str = null          # Optional override; used for from-scratch too
+bos_token_id: int = null
+eos_token_id: int = null
+pad_token_id: int = null
 use_rope: bool = true
 rope_theta: float = 10000.0
 dropout: float = 0.0
 attention_dropout: float = 0.0
+hidden_activation: str = "swiglu"
 norm_eps: float = 1e-6
 use_rms_norm: bool = true
 base_model_name: str = null          # For adapter mode
 freeze_base_model: bool = true
 use_flash_attention: bool = true
+tie_embeddings: bool = true
 ```
 
 ### Training Configuration (`training:`)
@@ -264,17 +274,26 @@ fsdp_sharding_strategy: str = "FULL_SHARD"
 # Hyperparameters
 batch_size: int = 4
 gradient_accumulation_steps: int = 4
+num_epochs: int = null
 max_steps: int = 10000
 warmup_steps: int = 100
+warmup_ratio: float = null
 
 # Optimizer
 optimizer: str = "adamw"
 weight_decay: float = 0.01
+adam_beta1: float = 0.9
+adam_beta2: float = 0.95
+adam_epsilon: float = 1e-8
 max_grad_norm: float = 1.0
 
 # Scheduler
 scheduler: str = "cosine"
 min_lr_ratio: float = 0.1
+decay_start_step: int = null
+decay_start_ratio: float = null
+wsd_stable_steps: int = null
+wsd_stable_ratio: float = 0.0
 
 # Mixed precision
 mixed_precision: str = "bf16"
@@ -295,6 +314,7 @@ early_stopping_threshold: float = 0.0
 # Logging
 logging_steps: int = 10
 log_to_wandb: bool = false
+wandb_project: str = "memory-transformer"
 wandb_run_name: str = null
 
 # Output
@@ -308,30 +328,30 @@ resume_from_checkpoint: str = null
 
 ```
 memory_transformer/
-├── config.py              ← No internal deps
-├── memory_bank.py         ← No internal deps
-├── memory_attention.py    ← No internal deps
-├── router.py              ← No internal deps
-├── lora.py                ← No internal deps
-├── quantization.py        ← No internal deps
-├── memory_block.py        ← memory_attention
-├── model.py               ← config, memory_bank, memory_block, router
-├── adapter.py             ← config, memory_bank, memory_attention, router, lora
-└── utils.py               ← No internal deps
+â”œâ”€â”€ config.py              â† No internal deps
+â”œâ”€â”€ memory_bank.py         â† No internal deps
+â”œâ”€â”€ memory_attention.py    â† No internal deps
+â”œâ”€â”€ router.py              â† No internal deps
+â”œâ”€â”€ lora.py                â† No internal deps
+â”œâ”€â”€ quantization.py        â† No internal deps
+â”œâ”€â”€ memory_block.py        â† memory_attention
+â”œâ”€â”€ model.py               â† config, memory_bank, memory_block, router
+â”œâ”€â”€ adapter.py             â† config, memory_bank, memory_attention, router, lora
+â””â”€â”€ utils.py               â† No internal deps
 
 training/
-├── data.py                ← No internal deps
-├── losses.py              ← No internal deps
-└── trainer.py             ← config, model, adapter, utils, data
+â”œâ”€â”€ data.py                â† No internal deps
+â”œâ”€â”€ losses.py              â† No internal deps
+â””â”€â”€ trainer.py             â† config, model, adapter, utils, data
 
 inference/
-├── generate.py            ← No internal deps
-└── routing_strategies.py  ← No internal deps
+â”œâ”€â”€ generate.py            â† No internal deps
+â””â”€â”€ routing_strategies.py  â† No internal deps
 
 scripts/
-├── train.py               ← config, trainer
-├── eval.py                ← config, model, adapter, data
-└── inference.py           ← config, model, adapter, generate
+â”œâ”€â”€ train.py               â† config, trainer
+â”œâ”€â”€ eval.py                â† config, model, adapter, data
+â””â”€â”€ inference.py           â† config, model, adapter, generate
 ```
 
 ---
@@ -388,7 +408,7 @@ Run these 4 configs to compare approaches:
 
 ## Session History
 
-See `docs/meta_artifacts/session_summary.md` for session summaries and `docs/meta_artifacts/session1/session.md` for detailed development logs including:
+See `docs/meta_artifacts/session_summary.md` for session summaries, `docs/meta_artifacts/session9/session.md` for the latest detailed log, and `docs/meta_artifacts/session1/session.md` for earlier historical details, including:
 - All decisions made and rationale
 - Every file created with descriptions
 - Issues encountered and resolutions
@@ -406,3 +426,4 @@ See `docs/meta_artifacts/session_summary.md` for session summaries and `docs/met
 | `docs/design.md` | Design decisions and limitations |
 | `docs/philosophy.md` | Development philosophy and style |
 | `docs/meta_artifacts/session_summary.md` | Session summaries |
+

@@ -10,6 +10,7 @@ This directory contains example configuration files for training memory-augmente
 | `adapter_qwen2.5_1.5b.yaml` | Memory adapter on Qwen | MemoryAdapter |
 | `vanilla_control.yaml` | Control experiment (no memory) | MemoryTransformer |
 | `memory_lora_combined.yaml` | Memory + LoRA combined | MemoryAdapter |
+| `reference_all_options.yaml` | Full option surface (documentation template) | Reference |
 
 ---
 
@@ -34,17 +35,22 @@ model:
   # === Architecture (for from-scratch) ===
   hidden_dim: 768              # Hidden dimension
   num_heads: 12                # Number of attention heads
+  num_kv_heads: null           # GQA KV heads (null => use num_heads; e.g., 8 with num_heads=32)
   num_layers: 12               # Number of transformer layers
   intermediate_dim: 3072       # MLP intermediate dimension
   vocab_size: 32000            # Vocabulary size
   max_seq_len: 8192            # Maximum sequence length
+  max_position_embeddings: null # Optional alias; overrides max_seq_len when set
 
   # Tokenizer to use (must match vocab_size for from-scratch).
   # If null:
   # - adapter mode defaults to base_model_name
   # - from-scratch defaults to a Llama-style 32k tokenizer
   tokenizer_name: null         # e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-  
+  bos_token_id: null           # Optional override
+  eos_token_id: null           # Optional override
+  pad_token_id: null           # Optional override
+
   # === Positional Encoding ===
   use_rope: true               # Use Rotary Position Embedding
   rope_theta: 10000.0          # RoPE theta parameter
@@ -52,7 +58,8 @@ model:
   # === Regularization ===
   dropout: 0.0                 # Dropout rate
   attention_dropout: 0.0       # Attention dropout
-  
+  hidden_activation: swiglu    # swiglu/silu/relu/gelu/sigmoid/tanh
+
   # === Normalization ===
   norm_eps: 1e-6               # Normalization epsilon
   use_rms_norm: true           # RMSNorm vs LayerNorm
@@ -63,6 +70,7 @@ model:
   
   # === Performance ===
   use_flash_attention: true    # Use Flash Attention if available
+  tie_embeddings: true         # Tie input embedding and LM head
 ```
 
 ---
@@ -77,6 +85,8 @@ memory:
   # === Memory Bank Settings ===
   num_memory_tokens: 1024      # Number of memory tokens (N_m)
   memory_dim: null             # Memory dimension (null = use hidden_dim)
+  memory_num_heads: null       # Optional memory-attn query heads (null => model.num_heads)
+  memory_num_kv_heads: null    # Optional memory-attn KV heads (null => model.num_kv_heads)
   
   # === Layer Placement ===
   memory_layer_placement: all  # Where to put memory layers
@@ -189,8 +199,12 @@ training:
   max_grad_norm: 1.0           # Gradient clipping
   
   # === Scheduler ===
-  scheduler: cosine            # "cosine", "linear", "constant"
+  scheduler: cosine            # "cosine", "linear", "constant", "wsd"
   min_lr_ratio: 0.1            # Min LR as ratio of peak
+  decay_start_step: null       # Optional delayed decay start (absolute step)
+  decay_start_ratio: null      # Optional delayed decay start (fraction of total steps)
+  wsd_stable_steps: null       # WSD stable phase length (overrides ratio if set)
+  wsd_stable_ratio: 0.0        # WSD stable phase fraction after warmup
   
   # === Mixed Precision ===
   mixed_precision: bf16        # "no", "fp16", "bf16"

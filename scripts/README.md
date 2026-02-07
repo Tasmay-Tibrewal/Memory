@@ -86,6 +86,7 @@ outputs/
 
 Notes:
 - Uses tokenizer from `model.tokenizer_name` (fallback: `model.base_model_name`, then TinyLlama).
+- Applies optional `model.bos_token_id` / `model.eos_token_id` / `model.pad_token_id` overrides.
 - If `memory.quantize_memory: true`, quantizes the memory bank before evaluation.
 
 ### Usage
@@ -160,6 +161,7 @@ Avg Loss:    2.5123
 
 Notes:
 - Uses tokenizer from `model.tokenizer_name` (fallback: `model.base_model_name`, then TinyLlama).
+- Applies optional `model.bos_token_id` / `model.eos_token_id` / `model.pad_token_id` overrides.
 - If `memory.quantize_memory: true`, quantizes the memory bank before generation.
 
 ### Usage

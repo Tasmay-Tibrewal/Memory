@@ -1,4 +1,4 @@
-# Agent Onboarding Prompt
+﻿# Agent Onboarding Prompt
 
 > **Use this file as your starting prompt when beginning any new session on this codebase.**
 
@@ -32,7 +32,7 @@ We implement a **learnable external memory bank** that the model can attend to v
 
 ### Why This Approach
 
-- **Constant attention cost**: O(L × M) instead of O((L+M)²) if memory was in context
+- **Constant attention cost**: O(L Ã— M) instead of O((L+M)Â²) if memory was in context
 - **Learned compression**: Memory tokens learn to encode useful information
 - **Modular**: Can be added to any pretrained transformer
 - **Scalable**: Chapter routing enables 100K+ memory tokens efficiently
@@ -47,10 +47,10 @@ You MUST read these files before implementation. They contain critical design de
 
 | File | Purpose | Priority |
 |------|---------|----------|
-| **`docs/context.md`** | Exhaustive project summary, all files, all config flags, running commands. **Read this first for quick orientation.** | 🔴 Critical |
-| **`docs/architecture.md`** | Detailed technical architecture with diagrams. How components connect. | 🔴 Critical |
-| **`docs/design.md`** | Design decisions, trade-offs, known limitations. Why we made certain choices. | 🟡 Important |
-| **`docs/philosophy.md`** | Development philosophy and coding style. How to write code for this project. | 🟡 Important |
+| **`docs/context.md`** | Exhaustive project summary, all files, all config flags, running commands. **Read this first for quick orientation.** | ðŸ”´ Critical |
+| **`docs/architecture.md`** | Detailed technical architecture with diagrams. How components connect. | ðŸ”´ Critical |
+| **`docs/design.md`** | Design decisions, trade-offs, known limitations. Why we made certain choices. | ðŸŸ¡ Important |
+| **`docs/philosophy.md`** | Development philosophy and coding style. How to write code for this project. | ðŸŸ¡ Important |
 
 ### Package READMEs (in each subfolder)
 
@@ -67,7 +67,8 @@ You MUST read these files before implementation. They contain critical design de
 | File | Purpose |
 |------|---------|
 | `session_summary.md` | Summaries of all development sessions |
-| `session1/session.md` | Detailed log of Session 1 work |
+| `session9/session.md` | Detailed log of latest session work |
+| `session1/session.md` | Historical deep log from initial implementation |
 
 ---
 
@@ -75,40 +76,40 @@ You MUST read these files before implementation. They contain critical design de
 
 ```
 Memory/
-├── memory_transformer/     # Core implementation
-│   ├── config.py          # All configuration dataclasses (50+ options)
-│   ├── memory_bank.py     # Memory bank variants (standard, factorized, reduced-dim)
-│   ├── memory_attention.py # Cross-attention to memory
-│   ├── memory_block.py    # Transformer blocks (Variant A/B integration)
-│   ├── model.py           # Full model for from-scratch training
-│   ├── adapter.py         # Memory adapter for pretrained models
-│   ├── router.py          # Chapter routing (MoE-style)
-│   ├── lora.py            # LoRA implementation for comparison
-│   ├── quantization.py    # 4/8-bit memory quantization
-│   └── utils.py           # Utilities
-│
-├── training/              # Training infrastructure
-│   ├── data.py           # Dataset loading (any HF dataset)
-│   ├── losses.py         # Router auxiliary losses
-│   └── trainer.py        # Accelerate-based trainer
-│
-├── inference/            # Inference utilities
-│   ├── generate.py       # Text generation
-│   └── routing_strategies.py # Inference routing strategies
-│
-├── scripts/              # CLI entry points
-│   ├── train.py         # Training script
-│   ├── eval.py          # Evaluation script
-│   └── inference.py     # Inference script
-│
-├── configs/              # YAML configurations
-│   ├── base_small.yaml  # Small from-scratch config
-│   ├── adapter_qwen2.5_1.5b.yaml # Qwen adapter config
-│   └── ...
-│
-├── docs/                 # Documentation
-├── idea/                 # Original research idea files
-└── requirements.txt      # Dependencies
+â”œâ”€â”€ memory_transformer/     # Core implementation
+â”‚   â”œâ”€â”€ config.py          # All configuration dataclasses (50+ options)
+â”‚   â”œâ”€â”€ memory_bank.py     # Memory bank variants (standard, factorized, reduced-dim)
+â”‚   â”œâ”€â”€ memory_attention.py # Cross-attention to memory
+â”‚   â”œâ”€â”€ memory_block.py    # Transformer blocks (Variant A/B integration)
+â”‚   â”œâ”€â”€ model.py           # Full model for from-scratch training
+â”‚   â”œâ”€â”€ adapter.py         # Memory adapter for pretrained models
+â”‚   â”œâ”€â”€ router.py          # Chapter routing (MoE-style)
+â”‚   â”œâ”€â”€ lora.py            # LoRA implementation for comparison
+â”‚   â”œâ”€â”€ quantization.py    # 4/8-bit memory quantization
+â”‚   â””â”€â”€ utils.py           # Utilities
+â”‚
+â”œâ”€â”€ training/              # Training infrastructure
+â”‚   â”œâ”€â”€ data.py           # Dataset loading (any HF dataset)
+â”‚   â”œâ”€â”€ losses.py         # Router auxiliary losses
+â”‚   â””â”€â”€ trainer.py        # Accelerate-based trainer
+â”‚
+â”œâ”€â”€ inference/            # Inference utilities
+â”‚   â”œâ”€â”€ generate.py       # Text generation
+â”‚   â””â”€â”€ routing_strategies.py # Inference routing strategies
+â”‚
+â”œâ”€â”€ scripts/              # CLI entry points
+â”‚   â”œâ”€â”€ train.py         # Training script
+â”‚   â”œâ”€â”€ eval.py          # Evaluation script
+â”‚   â””â”€â”€ inference.py     # Inference script
+â”‚
+â”œâ”€â”€ configs/              # YAML configurations
+â”‚   â”œâ”€â”€ base_small.yaml  # Small from-scratch config
+â”‚   â”œâ”€â”€ adapter_qwen2.5_1.5b.yaml # Qwen adapter config
+â”‚   â””â”€â”€ ...
+â”‚
+â”œâ”€â”€ docs/                 # Documentation
+â”œâ”€â”€ idea/                 # Original research idea files
+â””â”€â”€ requirements.txt      # Dependencies
 ```
 
 ---
@@ -118,28 +119,28 @@ Memory/
 ### 1. Memory Bank
 
 ```
-StandardMemoryBank: M ∈ ℝ^(N_m × d)     # Full learnable parameters
+StandardMemoryBank: M âˆˆ â„^(N_m Ã— d)     # Full learnable parameters
 FactorizedMemoryBank: M = A @ B^T       # Low-rank factorization
-ReducedDimMemoryBank: M ∈ ℝ^(N_m × r)   # Attention in r-dim space
+ReducedDimMemoryBank: M âˆˆ â„^(N_m Ã— r)   # Attention in r-dim space
 ```
 
 ### 2. Memory Cross-Attention
 
 ```
-Input: Hidden states H ∈ ℝ^(B × L × d)
-Memory: M ∈ ℝ^(N_m × d)
+Input: Hidden states H âˆˆ â„^(B Ã— L Ã— d)
+Memory: M âˆˆ â„^(N_m Ã— d)
 
 Q = H @ W_q
 K = M @ W_k
 V = M @ W_v
-Output = softmax(Q @ K^T / √d_k) @ V @ W_o
+Output = softmax(Q @ K^T / âˆšd_k) @ V @ W_o
 ```
 
 ### 3. Block Integration Variants
 
 ```
-Variant A: Self-Attn → Memory Cross-Attn → MLP
-Variant B: Self-Attn → MLP → Memory Cross-Attn → MLP
+Variant A: Self-Attn â†’ Memory Cross-Attn â†’ MLP
+Variant B: Self-Attn â†’ MLP â†’ Memory Cross-Attn â†’ MLP
 ```
 
 ### 4. Chapter Routing
@@ -280,3 +281,4 @@ python -c "from memory_transformer.config import load_config; from memory_transf
 - When in doubt, **ask questions first**
 
 **Welcome to the project! Start by reading `docs/context.md`.**
+

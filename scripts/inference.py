@@ -19,6 +19,7 @@ sys.path.insert(0, str(project_root))
 from memory_transformer.config import load_config
 from memory_transformer.model import MemoryTransformer
 from memory_transformer.adapter import MemoryAdapter
+from memory_transformer.utils import configure_tokenizer_special_ids
 from transformers import AutoTokenizer
 
 
@@ -101,9 +102,7 @@ def main():
         tokenizer_name,
         trust_remote_code=True,
     )
-    
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    configure_tokenizer_special_ids(tokenizer, config.model)
     
     # Tokenize prompt
     inputs = tokenizer(args.prompt, return_tensors="pt").to(args.device)

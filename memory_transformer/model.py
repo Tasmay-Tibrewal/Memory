@@ -49,10 +49,18 @@ class MemoryTransformer(nn.Module):
         
         hidden_dim = config.model.hidden_dim
         num_heads = config.model.num_heads
+        num_kv_heads = config.model.num_kv_heads
         num_layers = config.model.num_layers
         intermediate_dim = config.model.intermediate_dim
         vocab_size = config.model.vocab_size
-        max_seq_len = config.model.max_seq_len
+        max_seq_len = (
+            config.model.max_position_embeddings
+            if config.model.max_position_embeddings is not None
+            else config.model.max_seq_len
+        )
+        # Keep both fields synchronized for checkpoint/config clarity.
+        config.model.max_seq_len = max_seq_len
+        config.model.max_position_embeddings = max_seq_len
         
         # Token embedding
         self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
@@ -73,6 +81,7 @@ class MemoryTransformer(nn.Module):
         self._routing_cache: Dict[str, torch.Tensor] = {}
         
         # Build transformer layers
+        mem_cfg = config.memory
         self.layers = nn.ModuleList()
         for layer_idx in range(num_layers):
             has_memory = layer_idx in self.memory_layer_indices
@@ -82,11 +91,13 @@ class MemoryTransformer(nn.Module):
                 layer = VanillaTransformerBlock(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
                     intermediate_dim=intermediate_dim,
                     max_seq_len=max_seq_len,
                     use_rope=config.model.use_rope,
                     rope_theta=config.model.rope_theta,
                     dropout=config.model.dropout,
+                    hidden_activation=config.model.hidden_activation,
                     attention_dropout=config.model.attention_dropout,
                     use_rms_norm=config.model.use_rms_norm,
                     norm_eps=config.model.norm_eps,
@@ -94,15 +105,18 @@ class MemoryTransformer(nn.Module):
                 )
             else:
                 # Memory-augmented block
-                mem_cfg = config.memory
                 layer = MemoryTransformerBlock(
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    memory_num_heads=mem_cfg.memory_num_heads,
+                    memory_num_kv_heads=mem_cfg.memory_num_kv_heads,
                     intermediate_dim=intermediate_dim,
                     max_seq_len=max_seq_len,
                     use_rope=config.model.use_rope,
                     rope_theta=config.model.rope_theta,
                     dropout=config.model.dropout,
+                    hidden_activation=config.model.hidden_activation,
                     memory_dropout=mem_cfg.memory_dropout,
                     attention_dropout=config.model.attention_dropout,
                     use_rms_norm=config.model.use_rms_norm,
@@ -128,12 +142,15 @@ class MemoryTransformer(nn.Module):
         norm_cls = RMSNorm if config.model.use_rms_norm else nn.LayerNorm
         self.norm = norm_cls(hidden_dim, eps=config.model.norm_eps)
         self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
-        
-        # Tie embeddings
-        self.lm_head.weight = self.embed_tokens.weight
+
+        self.tie_embeddings = bool(config.model.tie_embeddings)
         
         # Initialize
         self.apply(self._init_weights)
+
+        # Optionally tie input embedding and LM head weights.
+        if self.tie_embeddings:
+            self.lm_head.weight = self.embed_tokens.weight
         
         # Re-apply W_o zero init — apply() above clobbers it
         if self.memory_config.wo_init_zero:

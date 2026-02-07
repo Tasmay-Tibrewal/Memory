@@ -1,4 +1,4 @@
-# Memory-Augmented Transformer
+﻿# Memory-Augmented Transformer
 
 A PyTorch implementation of **memory-augmented transformers** with learnable cross-attention memory banks, designed for both from-scratch training and parameter-efficient fine-tuning of pretrained models.
 
@@ -145,67 +145,69 @@ python scripts/inference.py --checkpoint outputs/final_model --prompt "Explain m
 
 ```
 Memory/
-├── README.md                 # This file
-├── requirements.txt          # Python dependencies
-│
-├── memory_transformer/       # Core implementation (11 modules)
-│   ├── README.md            # Package documentation
-│   ├── __init__.py          # Package exports
-│   ├── config.py            # Configuration system (50+ options)
-│   ├── memory_bank.py       # Memory bank implementations
-│   ├── memory_attention.py  # Cross-attention for memory
-│   ├── memory_block.py      # Transformer blocks with memory
-│   ├── router.py            # Chapter routing (MoE-style)
-│   ├── lora.py              # Standard LoRA implementation
-│   ├── model.py             # Full MemoryTransformer model
-│   ├── adapter.py           # Memory adapter for pretrained models
-│   ├── quantization.py      # Memory bank quantization
-│   └── utils.py             # Utilities and helpers
-│
-├── training/                 # Training infrastructure
-│   ├── README.md            # Training documentation
-│   ├── __init__.py
-│   ├── trainer.py           # Training loop with Accelerate
-│   ├── data.py              # Dataset loading
-│   └── losses.py            # Router auxiliary losses
-│
-├── inference/                # Inference utilities
-│   ├── README.md            # Inference documentation
-│   ├── __init__.py
-│   ├── generate.py          # Text generation
-│   ├── merge.py             # Model merging and quantization
-│   └── routing_strategies.py # Inference routing (sequence/rolling/token)
-│
-├── scripts/                  # Entry point scripts
-│   ├── README.md            # Scripts documentation
-│   ├── train.py             # Training entry point
-│   ├── eval.py              # Evaluation (perplexity)
-│   └── inference.py         # Generation script
-│
-├── configs/                  # Example configurations
-│   ├── README.md            # Complete config reference
-│   ├── base_small.yaml      # From-scratch small model
-│   ├── adapter_qwen2.5_1.5b.yaml  # Qwen adapter
-│   ├── vanilla_control.yaml # Control experiment
-│   └── memory_lora_combined.yaml  # Memory + LoRA
-│
-├── docs/                     # Comprehensive documentation
-│   ├── README.md            # Documentation overview
-│   ├── architecture.md      # Detailed architecture
-│   ├── design.md            # Design decisions
-│   ├── context.md           # Handoff summary
-│   ├── philosophy.md        # Development philosophy and style guide
-│   ├── prompt.md            # Agent onboarding prompt
-│   └── meta_artifacts/      # Session artifacts for context management
-│       ├── README.md        # Meta artifacts overview
-│       ├── session_summary.md  # Consolidated session summaries
-│       └── session1/        # Session 1 detailed artifacts
-│
-└── idea/                     # Original research documents
-    ├── idea.txt             # Conceptual explanation
-    ├── main.tex             # LaTeX paper draft
-    ├── proposal.md          # Project proposal
-    └── Memory_Layer_in_Transformers.pdf  # Reference PDF
+â”œâ”€â”€ README.md                 # This file
+â”œâ”€â”€ requirements.txt          # Python dependencies
+â”‚
+â”œâ”€â”€ memory_transformer/       # Core implementation (11 modules)
+â”‚   â”œâ”€â”€ README.md            # Package documentation
+â”‚   â”œâ”€â”€ __init__.py          # Package exports
+â”‚   â”œâ”€â”€ config.py            # Configuration system (50+ options)
+â”‚   â”œâ”€â”€ memory_bank.py       # Memory bank implementations
+â”‚   â”œâ”€â”€ memory_attention.py  # Cross-attention for memory
+â”‚   â”œâ”€â”€ memory_block.py      # Transformer blocks with memory
+â”‚   â”œâ”€â”€ router.py            # Chapter routing (MoE-style)
+â”‚   â”œâ”€â”€ lora.py              # Standard LoRA implementation
+â”‚   â”œâ”€â”€ model.py             # Full MemoryTransformer model
+â”‚   â”œâ”€â”€ adapter.py           # Memory adapter for pretrained models
+â”‚   â”œâ”€â”€ quantization.py      # Memory bank quantization
+â”‚   â””â”€â”€ utils.py             # Utilities and helpers
+â”‚
+â”œâ”€â”€ training/                 # Training infrastructure
+â”‚   â”œâ”€â”€ README.md            # Training documentation
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â”œâ”€â”€ trainer.py           # Training loop with Accelerate
+â”‚   â”œâ”€â”€ data.py              # Dataset loading
+â”‚   â””â”€â”€ losses.py            # Router auxiliary losses
+â”‚
+â”œâ”€â”€ inference/                # Inference utilities
+â”‚   â”œâ”€â”€ README.md            # Inference documentation
+â”‚   â”œâ”€â”€ __init__.py
+â”‚   â”œâ”€â”€ generate.py          # Text generation
+â”‚   â”œâ”€â”€ merge.py             # Model merging and quantization
+â”‚   â””â”€â”€ routing_strategies.py # Inference routing (sequence/rolling/token)
+â”‚
+â”œâ”€â”€ scripts/                  # Entry point scripts
+â”‚   â”œâ”€â”€ README.md            # Scripts documentation
+â”‚   â”œâ”€â”€ train.py             # Training entry point
+â”‚   â”œâ”€â”€ eval.py              # Evaluation (perplexity)
+â”‚   â””â”€â”€ inference.py         # Generation script
+â”‚
+â”œâ”€â”€ configs/                  # Example configurations
+â”‚   â”œâ”€â”€ README.md            # Complete config reference
+â”‚   â”œâ”€â”€ base_small.yaml      # From-scratch small model
+â”‚   â”œâ”€â”€ adapter_qwen2.5_1.5b.yaml  # Qwen adapter
+â”‚   â”œâ”€â”€ vanilla_control.yaml # Control experiment
+â”‚   â””â”€â”€ memory_lora_combined.yaml  # Memory + LoRA
+│   └── reference_all_options.yaml # Full config reference
+â”‚
+â”œâ”€â”€ docs/                     # Comprehensive documentation
+â”‚   â”œâ”€â”€ README.md            # Documentation overview
+â”‚   â”œâ”€â”€ architecture.md      # Detailed architecture
+â”‚   â”œâ”€â”€ design.md            # Design decisions
+â”‚   â”œâ”€â”€ context.md           # Handoff summary
+â”‚   â”œâ”€â”€ philosophy.md        # Development philosophy and style guide
+â”‚   â”œâ”€â”€ prompt.md            # Agent onboarding prompt
+â”‚   â””â”€â”€ meta_artifacts/      # Session artifacts for context management
+â”‚       â”œâ”€â”€ README.md        # Meta artifacts overview
+â”‚       â”œâ”€â”€ session_summary.md  # Consolidated session summaries
+â”‚       â””â”€â”€ session1/        # Session 1 historical artifacts
+│       └── session9/        # Latest detailed session artifacts
+â”‚
+â””â”€â”€ idea/                     # Original research documents
+    â”œâ”€â”€ idea.txt             # Conceptual explanation
+    â”œâ”€â”€ main.tex             # LaTeX paper draft
+    â”œâ”€â”€ proposal.md          # Project proposal
+    â””â”€â”€ Memory_Layer_in_Transformers.pdf  # Reference PDF
 ```
 
 ---
@@ -226,9 +228,19 @@ training:   # Training hyperparameters
 #### Model Settings
 ```yaml
 model:
+  # Attention heads (set num_kv_heads < num_heads to enable GQA)
+  num_heads: 12
+  num_kv_heads: null
+  max_position_embeddings: null
+  hidden_activation: swiglu
+  tie_embeddings: true
+
   # Tokenizer to use (must match vocab_size for from-scratch)
   tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
   vocab_size: 32000
+  bos_token_id: null
+  eos_token_id: null
+  pad_token_id: null
 
   # Positional encoding + attention regularization
   use_rope: true
@@ -244,9 +256,11 @@ memory:
   
   # Memory bank
   num_memory_tokens: 2048      # Number of memory tokens
+  memory_num_heads: null       # Optional memory-attn heads (null => model/base heads)
+  memory_num_kv_heads: null    # Optional memory-attn KV heads (null => model/base KV heads)
   memory_layer_placement: all  # all/first_k/last_k/every_n/custom
   memory_sharing: shared       # shared/per_layer/every_k_layers
-  memory_block_variant: A      # A: SA→Mem→MLP, B: SA→MLP→Mem→MLP
+  memory_block_variant: A      # A: SAâ†’Memâ†’MLP, B: SAâ†’MLPâ†’Memâ†’MLP
   memory_dropout: null         # Memory cross-attn dropout (null => model.dropout)
   
   # Chapter routing
@@ -285,6 +299,9 @@ training:
   distributed_strategy: ddp    # ddp or fsdp
   fsdp_sharding_strategy: FULL_SHARD
   mixed_precision: bf16
+  scheduler: wsd               # cosine/linear/constant/wsd
+  wsd_stable_ratio: 0.3
+  decay_start_ratio: null
 ```
 
 ### Example Configurations
@@ -295,6 +312,7 @@ training:
 | `adapter_qwen2.5_1.5b.yaml` | Memory adapter on Qwen2.5-1.5B |
 | `vanilla_control.yaml` | Control experiment (no memory) |
 | `memory_lora_combined.yaml` | Memory + LoRA combined |
+| `reference_all_options.yaml` | Full config surface (documentation template) |
 
 ---
 
@@ -374,7 +392,7 @@ side effects are suppressed via `_fwd_processed_layers`. One limitation: assumes
 per backward per micro-step. See `docs/design.md` for details.
 
 ### Model Not Learning
-- Check `wo_init_zero: true` (critical for stable training — adapter and from-scratch)
+- Check `wo_init_zero: true` (critical for stable training â€” adapter and from-scratch)
 - Enable `use_load_balance_loss: true` if router collapses
 - Increase `memory_lr` relative to `base_model_lr`
 
@@ -395,8 +413,8 @@ The following features are planned for future development:
 - Memory usage tracking during training/inference
 
 ### Export & Deployment
-- ✅ **Implemented**: Full model quantization (int8/4-bit) via `inference/merge.py`
-- ✅ **Implemented**: Model merging and weight extraction
+- âœ… **Implemented**: Full model quantization (int8/4-bit) via `inference/merge.py`
+- âœ… **Implemented**: Model merging and weight extraction
 - ONNX export for production deployment
 - TensorRT optimization
 
@@ -423,3 +441,4 @@ If you use this code, please cite:
 ## License
 
 MIT License
+

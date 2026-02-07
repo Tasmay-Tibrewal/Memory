@@ -11,15 +11,22 @@ model:
   # Same architecture as memory model
   hidden_dim: 768
   num_heads: 12
+  num_kv_heads: null # GQA KV heads (null => use num_heads)
   num_layers: 12
   intermediate_dim: 3072
   vocab_size: 32000
   max_seq_len: 8192
+  max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
 
   # Tokenizer (must match vocab_size for from-scratch)
   tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  bos_token_id: null
+  eos_token_id: null
+  pad_token_id: null
 
   use_rope: true
+  hidden_activation: swiglu
+  tie_embeddings: true
   use_rms_norm: true
   use_flash_attention: true
 
@@ -36,6 +43,8 @@ memory:
   # These are ignored when vanilla_mode=true
   # but listed for documentation
   num_memory_tokens: 4096
+  memory_num_heads: null
+  memory_num_kv_heads: null
   memory_dropout: null
   use_chapters: false
   use_lora: false
@@ -65,11 +74,14 @@ training:
   weight_decay: 0.1
   max_grad_norm: 1.0
   scheduler: cosine
+  decay_start_ratio: null
+  decay_start_step: null
 
   mixed_precision: bf16
   gradient_checkpointing: true
 
   save_steps: 2000
   logging_steps: 10
+  log_to_wandb: false
 
   output_dir: ./outputs/vanilla_control

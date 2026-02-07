@@ -37,6 +37,12 @@ memory_transformer/
 
 **Notable Fields**:
 - `model.tokenizer_name`: Ensures tokenizer/vocab alignment for from-scratch training.
+- `model.num_kv_heads`: Enables GQA in from-scratch self-attention/memory attention (`null` => no grouping).
+- `memory.{memory_num_heads,memory_num_kv_heads}`: Optional overrides for memory cross-attention heads (`null` => reuse model/base heads).
+- `model.hidden_activation`: Selects MLP activation (`swiglu`, `silu`, `relu`, `gelu`, `sigmoid`, `tanh`).
+- `model.tie_embeddings`: Tie or untie token embeddings and LM head.
+- `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
+- `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
 
 **Key Functions**:

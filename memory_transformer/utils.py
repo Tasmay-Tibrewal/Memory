@@ -38,6 +38,75 @@ def format_params(num_params: int) -> str:
     return str(num_params)
 
 
+def estimate_bf16_size_mb(num_params: int) -> float:
+    """Estimate parameter memory in MB if stored in bf16 (2 bytes/param)."""
+    return (num_params * 2) / 1024 / 1024
+
+
+def _is_memory_layer_parameter(name: str) -> bool:
+    """Return True if parameter belongs to memory-layer logic (excluding banks)."""
+    memory_layer_markers = (
+        "memory_adapters.",          # Adapter mode memory layers
+        ".memory_attn.",             # From-scratch memory attention
+        ".memory_layernorm.",        # From-scratch memory norm
+        ".post_memory_layernorm.",   # Variant B extra norm
+        ".post_memory_mlp.",         # Variant B extra MLP
+        "routers.",                  # Chapter router params
+    )
+    return any(marker in name for marker in memory_layer_markers)
+
+
+def compute_parameter_breakdown(model: nn.Module) -> Dict[str, int]:
+    """
+    Compute parameter-count breakdown for training logs.
+
+    Returns counts for:
+    - total model
+    - vanilla transformer part (no memory/adapters/LoRA)
+    - LoRA parameters
+    - memory bank parameters
+    - memory-layer parameters without bank
+    - memory-layer parameters with bank
+    """
+    total_params = 0
+    lora_params = 0
+    memory_bank_params = 0
+    memory_layers_no_bank_params = 0
+
+    for name, param in model.named_parameters():
+        n = param.numel()
+        total_params += n
+
+        if "lora_A" in name or "lora_B" in name:
+            lora_params += n
+            continue
+
+        if "memory_banks." in name or "memory_bank." in name:
+            memory_bank_params += n
+            continue
+
+        if _is_memory_layer_parameter(name):
+            memory_layers_no_bank_params += n
+            continue
+
+    memory_layers_with_bank_params = memory_layers_no_bank_params + memory_bank_params
+    vanilla_transformer_params = (
+        total_params
+        - lora_params
+        - memory_bank_params
+        - memory_layers_no_bank_params
+    )
+
+    return {
+        "total_params": total_params,
+        "vanilla_transformer_params": max(vanilla_transformer_params, 0),
+        "lora_params": lora_params,
+        "memory_bank_params": memory_bank_params,
+        "memory_layers_no_bank_params": memory_layers_no_bank_params,
+        "memory_layers_with_bank_params": memory_layers_with_bank_params,
+    }
+
+
 def get_model_size_mb(model: nn.Module) -> float:
     """Get model size in MB."""
     param_size = 0
@@ -91,18 +160,26 @@ def get_cosine_schedule_with_warmup(
     num_warmup_steps: int,
     num_training_steps: int,
     min_lr_ratio: float = 0.1,
+    decay_start_step: Optional[int] = None,
 ) -> torch.optim.lr_scheduler.LambdaLR:
     """
     Create cosine annealing schedule with warmup.
     """
+    if decay_start_step is None:
+        decay_start_step = num_warmup_steps
+    decay_start_step = max(num_warmup_steps, min(int(decay_start_step), int(num_training_steps)))
+
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
-        
-        progress = float(current_step - num_warmup_steps) / float(
-            max(1, num_training_steps - num_warmup_steps)
+        if current_step < decay_start_step:
+            return 1.0
+
+        progress = float(current_step - decay_start_step) / float(
+            max(1, num_training_steps - decay_start_step)
         )
-        return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
     
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -111,22 +188,76 @@ def get_linear_schedule_with_warmup(
     optimizer: torch.optim.Optimizer,
     num_warmup_steps: int,
     num_training_steps: int,
+    decay_start_step: Optional[int] = None,
 ) -> torch.optim.lr_scheduler.LambdaLR:
     """
     Create linear schedule with warmup.
     """
+    if decay_start_step is None:
+        decay_start_step = num_warmup_steps
+    decay_start_step = max(num_warmup_steps, min(int(decay_start_step), int(num_training_steps)))
+
     def lr_lambda(current_step: int):
         if current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
-        
+        if current_step < decay_start_step:
+            return 1.0
+
         return max(
             0.0,
             float(num_training_steps - current_step) / float(
-                max(1, num_training_steps - num_warmup_steps)
+                max(1, num_training_steps - decay_start_step)
             ),
         )
     
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def get_wsd_schedule_with_warmup(
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_stable_steps: int = 0,
+    min_lr_ratio: float = 0.1,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """
+    Create Warmup-Stable-Decay schedule.
+
+    - Warmup: linear to peak LR
+    - Stable: hold at peak LR
+    - Decay: cosine decay from peak to min_lr_ratio
+    """
+    decay_start_step = max(
+        num_warmup_steps,
+        min(num_training_steps, num_warmup_steps + max(int(num_stable_steps), 0)),
+    )
+    return get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        min_lr_ratio=min_lr_ratio,
+        decay_start_step=decay_start_step,
+    )
+
+
+def configure_tokenizer_special_ids(tokenizer: Any, model_config: Any) -> None:
+    """
+    Apply optional tokenizer special-token IDs from config.
+
+    If pad_token_id is not specified and tokenizer has no pad token, fallback to eos.
+    """
+    for attr in ("bos_token_id", "eos_token_id", "pad_token_id"):
+        value = getattr(model_config, attr, None)
+        if value is not None:
+            setattr(tokenizer, attr, int(value))
+
+    if getattr(tokenizer, "pad_token", None) is None and getattr(tokenizer, "pad_token_id", None) is None:
+        eos_token = getattr(tokenizer, "eos_token", None)
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token is not None:
+            tokenizer.pad_token = eos_token
+        elif eos_id is not None:
+            tokenizer.pad_token_id = eos_id
 
 
 def print_model_info(model: nn.Module, config: Optional[Any] = None):
@@ -134,6 +265,7 @@ def print_model_info(model: nn.Module, config: Optional[Any] = None):
     total_params = count_parameters(model, trainable_only=False)
     trainable_params = count_parameters(model, trainable_only=True)
     model_size = get_model_size_mb(model)
+    breakdown = compute_parameter_breakdown(model)
     
     print("=" * 60)
     print("Model Information")
@@ -142,6 +274,39 @@ def print_model_info(model: nn.Module, config: Optional[Any] = None):
     print(f"Trainable Parameters: {format_params(trainable_params)}")
     print(f"Trainable %:          {100 * trainable_params / total_params:.2f}%")
     print(f"Model Size:           {model_size:.2f} MB")
+    print("-" * 60)
+    print("Parameter Breakdown (params, bf16 estimate)")
+    print("-" * 60)
+    print(
+        f"{'Total model':<33} "
+        f"{breakdown['total_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['total_params']):.2f} MB)"
+    )
+    print(
+        f"{'Vanilla transformer (no adapters/memory)':<33} "
+        f"{breakdown['vanilla_transformer_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['vanilla_transformer_params']):.2f} MB)"
+    )
+    print(
+        f"{'LoRA':<33} "
+        f"{breakdown['lora_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['lora_params']):.2f} MB)"
+    )
+    print(
+        f"{'Memory bank':<33} "
+        f"{breakdown['memory_bank_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['memory_bank_params']):.2f} MB)"
+    )
+    print(
+        f"{'Memory layers (without bank)':<33} "
+        f"{breakdown['memory_layers_no_bank_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['memory_layers_no_bank_params']):.2f} MB)"
+    )
+    print(
+        f"{'Memory layers (with bank)':<33} "
+        f"{breakdown['memory_layers_with_bank_params']:,} "
+        f"({estimate_bf16_size_mb(breakdown['memory_layers_with_bank_params']):.2f} MB)"
+    )
     
     if config is not None:
         mem_cfg = config.memory

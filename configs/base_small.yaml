@@ -9,23 +9,30 @@
 
 model:
   # Architecture
-  hidden_dim: 768
-  num_heads: 12
-  num_layers: 12
-  intermediate_dim: 3072
-  vocab_size: 32000
+  hidden_dim: 576
+  num_heads: 9
+  num_kv_heads: 3 # GQA KV heads (null => use num_heads)
+  num_layers: 30
+  intermediate_dim: 1536
+  vocab_size: 49152
   max_seq_len: 8192
+  max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
 
   # Tokenizer (must match vocab_size for from-scratch)
-  tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+  tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
+  bos_token_id: null
+  eos_token_id: null
+  pad_token_id: null
 
   # Standard settings
   use_rope: true
-  rope_theta: 10000.0
+  rope_theta: 100000.0
   dropout: 0.0
   attention_dropout: 0.0
+  hidden_activation: swiglu
+  tie_embeddings: true
   use_rms_norm: true
-  norm_eps: 1e-6
+  norm_eps: 1e-5
   use_flash_attention: true
 
   # Not using pretrained base (from-scratch)
@@ -37,8 +44,10 @@ memory:
   vanilla_mode: false
 
   # Memory bank settings
-  num_memory_tokens: 4096
+  num_memory_tokens: 16384
   memory_dim: null # Uses hidden_dim
+  memory_num_heads: null # null => fallback to model.num_heads for memory cross-attn
+  memory_num_kv_heads: null # null => fallback to model.num_kv_heads (or model.num_heads if null)
 
   # Memory placement: all layers get memory
   memory_layer_placement: all
@@ -48,8 +57,8 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 16
-  top_k_chapters: 4
+  num_chapters: 64
+  top_k_chapters: 8
   routing_strategy_train: sequence
   routing_strategy_inference: sequence
 
@@ -75,9 +84,9 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 1e-4
-  lora_lr: 1e-4
-  base_model_lr: 1e-4 # Same for from-scratch
+  memory_lr: 3e-4
+  lora_lr: 3e-4
+  base_model_lr: 3e-4 # Same for from-scratch
 
   # Training mode
   training_mode: pretraining
@@ -127,8 +136,11 @@ training:
   max_grad_norm: 1.0
 
   # Scheduler
-  scheduler: cosine
+  scheduler: WSD
   min_lr_ratio: 0.1
+  wsd_stable_ratio: 0.3  # Warmup -> 30% stable -> decay
+  decay_start_ratio: null # Optional global override for decay start
+  decay_start_step: null
 
   # Mixed precision
   mixed_precision: bf16
@@ -136,12 +148,12 @@ training:
   # Checkpointing
   gradient_checkpointing: true
   save_steps: 2000
-  eval_steps: 1000
+  eval_steps: 100
   save_total_limit: 3
 
   # Logging
   logging_steps: 10
-  log_to_wandb: false
+  log_to_wandb: true
   wandb_project: memory-transformer
 
   # Output

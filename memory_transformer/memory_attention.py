@@ -51,6 +51,7 @@ class MemoryCrossAttention(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
+        num_kv_heads: Optional[int] = None,
         memory_dim: Optional[int] = None,
         use_low_rank_projections: bool = False,
         projection_rank: Optional[int] = None,
@@ -80,12 +81,23 @@ class MemoryCrossAttention(nn.Module):
         self.hidden_dim = hidden_dim
         self.memory_dim = memory_dim if memory_dim is not None else hidden_dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         # Bug 42 fix: Validate attention head sizing to avoid silent shape mismatches later.
+        if self.num_heads <= 0:
+            raise ValueError(f"num_heads must be > 0, got {self.num_heads}")
         if hidden_dim % num_heads != 0:
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads})"
             )
+        if self.num_kv_heads <= 0:
+            raise ValueError(f"num_kv_heads must be > 0, got {self.num_kv_heads}")
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads ({self.num_heads}) must be divisible by num_kv_heads ({self.num_kv_heads})"
+            )
         self.head_dim = hidden_dim // num_heads
+        self.kv_hidden_dim = self.num_kv_heads * self.head_dim
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.scale = self.head_dim ** -0.5
         self.dropout = dropout
         self.use_flash_attention = use_flash_attention and FLASH_ATTN_AVAILABLE
@@ -116,8 +128,8 @@ class MemoryCrossAttention(nn.Module):
     def _init_full_projections(self, wo_init_zero: bool):
         """Initialize full-rank projection matrices."""
         self.q_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
-        self.k_proj = nn.Linear(self.memory_dim, self.hidden_dim, bias=False)
-        self.v_proj = nn.Linear(self.memory_dim, self.hidden_dim, bias=False)
+        self.k_proj = nn.Linear(self.memory_dim, self.kv_hidden_dim, bias=False)
+        self.v_proj = nn.Linear(self.memory_dim, self.kv_hidden_dim, bias=False)
         self.o_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=False)
         
         if wo_init_zero:
@@ -139,11 +151,11 @@ class MemoryCrossAttention(nn.Module):
         
         # K projection: memory_dim -> hidden_dim via rank  
         self.k_down = nn.Linear(self.memory_dim, rank, bias=False)
-        self.k_up = nn.Linear(rank, self.hidden_dim, bias=False)
+        self.k_up = nn.Linear(rank, self.kv_hidden_dim, bias=False)
         
         # V projection: memory_dim -> hidden_dim via rank
         self.v_down = nn.Linear(self.memory_dim, rank, bias=False)
-        self.v_up = nn.Linear(rank, self.hidden_dim, bias=False)
+        self.v_up = nn.Linear(rank, self.kv_hidden_dim, bias=False)
         
         # O projection: hidden_dim -> hidden_dim via rank
         self.o_down = nn.Linear(self.hidden_dim, rank, bias=False)
@@ -171,11 +183,12 @@ class MemoryCrossAttention(nn.Module):
         
         # Recalculate head_dim for reduced space
         self.reduced_head_dim = r // self.num_heads
+        self.reduced_kv_dim = self.num_kv_heads * self.reduced_head_dim
         self.reduced_scale = self.reduced_head_dim ** -0.5
         
         self.q_proj = nn.Linear(self.hidden_dim, r, bias=False)
-        self.k_proj = nn.Linear(r, r, bias=False)
-        self.v_proj = nn.Linear(r, r, bias=False)
+        self.k_proj = nn.Linear(r, self.reduced_kv_dim, bias=False)
+        self.v_proj = nn.Linear(r, self.reduced_kv_dim, bias=False)
         self.o_proj = nn.Linear(r, self.hidden_dim, bias=False)
         
         if wo_init_zero:
@@ -222,20 +235,26 @@ class MemoryCrossAttention(nn.Module):
         # Determine dimensions for reshaping
         if self.reduced_dim_mode:
             head_dim = self.reduced_head_dim
-            q_dim = self.reduced_dim
+            kv_heads = self.num_kv_heads
         else:
             head_dim = self.head_dim
-            q_dim = self.hidden_dim
+            kv_heads = self.num_kv_heads
         
         # Reshape for multi-head attention
         # Q: (batch, seq_len, num_heads, head_dim)
         q = q.view(batch_size, seq_len, self.num_heads, head_dim)
         
         # K, V: (batch, num_mem_tokens, num_heads, head_dim)
-        k = k.view(batch_size, num_mem_tokens, self.num_heads, head_dim)
-        v = v.view(batch_size, num_mem_tokens, self.num_heads, head_dim)
+        k = k.view(batch_size, num_mem_tokens, kv_heads, head_dim)
+        v = v.view(batch_size, num_mem_tokens, kv_heads, head_dim)
         
         return q, k, v
+
+    def _expand_kv_heads(self, kv: torch.Tensor) -> torch.Tensor:
+        """Expand grouped KV heads to query-head count for attention compute."""
+        if self.num_kv_heads == self.num_heads:
+            return kv
+        return kv.repeat_interleave(self.num_kv_groups, dim=2)
     
     def _attention(
         self,
@@ -254,6 +273,10 @@ class MemoryCrossAttention(nn.Module):
         Returns:
             Attention output: (batch, seq_len, num_heads, head_dim)
         """
+        # Expand grouped KV heads to full head count for compute.
+        k = self._expand_kv_heads(k)
+        v = self._expand_kv_heads(v)
+
         if self.use_flash_attention:
             # Flash attention expects (batch, seq_len, num_heads, head_dim)
             # Cross-attention: use flash_attn_func with separate K, V
@@ -344,6 +367,7 @@ class MemoryCrossAttention(nn.Module):
         if return_attn_weights and not self.use_flash_attention:
             # Recompute weights for returning
             q, k, v = self._compute_qkv(hidden_states, memory)
+            k = self._expand_kv_heads(k)
             q_t = q.transpose(1, 2)
             k_t = k.transpose(1, 2)
             scale = self.reduced_scale if self.reduced_dim_mode else self.scale
@@ -393,6 +417,7 @@ class MemoryCrossAttentionWithRouting(nn.Module):
         num_chapters: int,
         tokens_per_chapter: int,
         top_k: int,
+        num_kv_heads: Optional[int] = None,
         memory_dim: Optional[int] = None,
         use_low_rank_projections: bool = False,
         projection_rank: Optional[int] = None,
@@ -412,6 +437,7 @@ class MemoryCrossAttentionWithRouting(nn.Module):
         self.attention = MemoryCrossAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             memory_dim=memory_dim,
             use_low_rank_projections=use_low_rank_projections,
             projection_rank=projection_rank,

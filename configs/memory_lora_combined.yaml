@@ -15,7 +15,14 @@
 
 model:
   base_model_name: Qwen/Qwen2.5-1.5B
+  num_kv_heads: null # Auto-detected from base model config (num_key_value_heads)
   num_layers: 28 # Bug 24 fix: Qwen2.5-1.5B has 28 layers
+  hidden_activation: swiglu
+  tie_embeddings: true
+  max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
+  bos_token_id: null
+  eos_token_id: null
+  pad_token_id: null
   freeze_base_model: true
   use_flash_attention: true
 
@@ -24,6 +31,8 @@ memory:
 
   # Memory bank settings
   num_memory_tokens: 1024 # Smaller since combined with LoRA
+  memory_num_heads: null # null => fallback to base model attention heads
+  memory_num_kv_heads: null # null => fallback to base model KV heads
   memory_layer_placement: every_n
   memory_layer_n: 4 # Every 4th layer: [0, 4, 8, 12, 16, 20, 24]
   memory_sharing: shared
@@ -85,11 +94,14 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   scheduler: cosine
+  decay_start_ratio: null
+  decay_start_step: null
 
   mixed_precision: bf16
   gradient_checkpointing: true
 
   save_steps: 500
   logging_steps: 10
+  log_to_wandb: false
 
   output_dir: ./outputs/memory_lora_combined

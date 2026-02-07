@@ -35,6 +35,7 @@ class MemoryAdapterLayer(nn.Module):
         self,
         hidden_dim: int,
         num_heads: int,
+        num_kv_heads: Optional[int] = None,
         memory_dim: Optional[int] = None,
         use_low_rank_projections: bool = False,
         projection_rank: Optional[int] = None,
@@ -56,6 +57,7 @@ class MemoryAdapterLayer(nn.Module):
         self.memory_attn = MemoryCrossAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
             memory_dim=memory_dim,
             use_low_rank_projections=use_low_rank_projections,
             projection_rank=projection_rank,
@@ -201,18 +203,21 @@ class MemoryAdapter(nn.Module):
             self.architecture = "qwen"
             self.hidden_dim = self.base_model.config.hidden_size
             self.num_heads = self.base_model.config.num_attention_heads
+            self.num_kv_heads = getattr(self.base_model.config, "num_key_value_heads", self.num_heads)
             self.num_layers = self.base_model.config.num_hidden_layers
             self._get_layers_fn = lambda: self.base_model.model.layers
         elif "llama" in model_type:
             self.architecture = "llama"
             self.hidden_dim = self.base_model.config.hidden_size
             self.num_heads = self.base_model.config.num_attention_heads
+            self.num_kv_heads = getattr(self.base_model.config, "num_key_value_heads", self.num_heads)
             self.num_layers = self.base_model.config.num_hidden_layers
             self._get_layers_fn = lambda: self.base_model.model.layers
         elif "mistral" in model_type:
             self.architecture = "mistral"
             self.hidden_dim = self.base_model.config.hidden_size
             self.num_heads = self.base_model.config.num_attention_heads
+            self.num_kv_heads = getattr(self.base_model.config, "num_key_value_heads", self.num_heads)
             self.num_layers = self.base_model.config.num_hidden_layers
             self._get_layers_fn = lambda: self.base_model.model.layers
         else:
@@ -222,6 +227,11 @@ class MemoryAdapter(nn.Module):
                                      getattr(self.base_model.config, 'd_model', 768))
             self.num_heads = getattr(self.base_model.config, 'num_attention_heads',
                                     getattr(self.base_model.config, 'n_head', 12))
+            self.num_kv_heads = getattr(
+                self.base_model.config,
+                "num_key_value_heads",
+                self.num_heads,
+            )
             self.num_layers = getattr(self.base_model.config, 'num_hidden_layers',
                                      getattr(self.base_model.config, 'n_layer', 12))
             self._get_layers_fn = lambda: self._find_layers()
@@ -302,11 +312,20 @@ class MemoryAdapter(nn.Module):
             if mem_cfg.memory_dropout is None
             else mem_cfg.memory_dropout
         )
+        effective_memory_heads = (
+            self.num_heads if mem_cfg.memory_num_heads is None else mem_cfg.memory_num_heads
+        )
+        effective_memory_kv_heads = (
+            self.num_kv_heads
+            if mem_cfg.memory_num_kv_heads is None
+            else mem_cfg.memory_num_kv_heads
+        )
         
         for layer_idx in self.memory_layer_indices:
             adapter = MemoryAdapterLayer(
                 hidden_dim=self.hidden_dim,
-                num_heads=self.num_heads,
+                num_heads=effective_memory_heads,
+                num_kv_heads=effective_memory_kv_heads,
                 memory_dim=self._get_memory_dim(),
                 use_low_rank_projections=mem_cfg.use_low_rank_projections,
                 projection_rank=mem_cfg.projection_rank,
