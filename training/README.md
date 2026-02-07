@@ -272,7 +272,7 @@ training:
   gradient_checkpointing: true
   save_steps: 500              # Save checkpoint every N steps
   eval_steps: 500              # Evaluate every N steps
-  save_total_limit: 3          # Keep only N recent checkpoints
+  save_total_limit: 3          # Keep only N recent checkpoints (null => keep all)
   save_best_model: true        # Save model with best eval loss
 
   # === Early Stopping ===
@@ -286,6 +286,13 @@ training:
 
   # Output
   output_dir: ./outputs
+```
+
+Model-side initialization control (used for from-scratch models):
+
+```yaml
+model:
+  initializer_range: 0.02      # Std for nn.Linear/nn.Embedding initialization
 ```
 
 ---

@@ -135,6 +135,7 @@ class ModelConfig:
     dropout: float = 0.0
     attention_dropout: float = 0.0
     hidden_activation: str = "swiglu"  # swiglu/silu/relu/gelu/sigmoid/tanh
+    initializer_range: float = 0.02  # Std for from-scratch Linear/Embedding init
     
     # === Normalization ===
     norm_eps: float = 1e-6
@@ -217,7 +218,7 @@ class TrainingConfig:
     gradient_checkpointing: bool = True
     save_steps: int = 500
     eval_steps: int = 500
-    save_total_limit: int = 3
+    save_total_limit: Optional[int] = 3  # null => keep all checkpoints
     save_best_model: bool = True
     
     # === Early stopping ===

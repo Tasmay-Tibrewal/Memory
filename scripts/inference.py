@@ -71,12 +71,21 @@ def main():
     parser.add_argument("--prompt", type=str, required=True, help="Input prompt")
     parser.add_argument("--max_new_tokens", type=int, default=256, help="Max tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    parser.add_argument("--top_k", type=int, default=50, help="Top-k sampling (0 to disable)")
     parser.add_argument("--top_p", type=float, default=0.9, help="Top-p sampling")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     args = parser.parse_args()
     
     if not args.config and not args.checkpoint:
         parser.error("Either --config or --checkpoint must be provided")
+    if args.max_new_tokens < 0:
+        parser.error("--max_new_tokens must be >= 0")
+    if args.temperature <= 0:
+        parser.error("--temperature must be > 0")
+    if not (0.0 < args.top_p <= 1.0):
+        parser.error("--top_p must be in (0, 1]")
+    if args.top_k < 0:
+        parser.error("--top_k must be >= 0")
     
     # Load model
     print("Loading model...")
@@ -143,6 +152,13 @@ def main():
             
             # Apply temperature
             next_token_logits = next_token_logits / args.temperature
+
+            # Apply top-k filtering
+            if args.top_k > 0:
+                k = min(int(args.top_k), int(next_token_logits.shape[-1]))
+                topk_threshold = torch.topk(next_token_logits, k)[0][..., -1, None]
+                indices_to_remove = next_token_logits < topk_threshold
+                next_token_logits[indices_to_remove] = float("-inf")
             
             # Apply top-p (nucleus) filtering - Bug 15 fix: actually use args.top_p
             if args.top_p < 1.0:

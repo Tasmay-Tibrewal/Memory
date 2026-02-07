@@ -40,8 +40,10 @@ memory_transformer/
 - `model.num_kv_heads`: Enables GQA in from-scratch self-attention/memory attention (`null` => no grouping).
 - `memory.{memory_num_heads,memory_num_kv_heads}`: Optional overrides for memory cross-attention heads (`null` => reuse model/base heads).
 - `model.hidden_activation`: Selects MLP activation (`swiglu`, `silu`, `relu`, `gelu`, `sigmoid`, `tanh`).
+- `model.initializer_range`: Std used for from-scratch `nn.Linear`/`nn.Embedding` initialization.
 - `model.tie_embeddings`: Tie or untie token embeddings and LM head.
 - `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
+- `training.save_total_limit`: Checkpoint retention limit (`null` => disable cleanup / keep all).
 - `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
 

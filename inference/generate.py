@@ -37,6 +37,15 @@ def generate(
     Returns:
         Generated text string
     """
+    if max_new_tokens < 0:
+        raise ValueError(f"max_new_tokens must be >= 0, got {max_new_tokens}")
+    if temperature <= 0:
+        raise ValueError(f"temperature must be > 0, got {temperature}")
+    if not (0.0 < top_p <= 1.0):
+        raise ValueError(f"top_p must be in (0, 1], got {top_p}")
+    if top_k < 0:
+        raise ValueError(f"top_k must be >= 0, got {top_k}")
+
     model.eval()
     
     # Tokenize
@@ -81,7 +90,8 @@ def generate(
             
             # Apply top-k filtering
             if top_k > 0:
-                indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                k = min(int(top_k), int(next_token_logits.shape[-1]))
+                indices_to_remove = next_token_logits < torch.topk(next_token_logits, k)[0][..., -1, None]
                 next_token_logits[indices_to_remove] = float("-inf")
             
             # Apply top-p (nucleus) filtering
@@ -142,6 +152,15 @@ def generate_batch(
     Note: For simplicity, this pads all prompts to same length.
     For production, consider using dynamic batching.
     """
+    if max_new_tokens < 0:
+        raise ValueError(f"max_new_tokens must be >= 0, got {max_new_tokens}")
+    if temperature <= 0:
+        raise ValueError(f"temperature must be > 0, got {temperature}")
+    if not (0.0 < top_p <= 1.0):
+        raise ValueError(f"top_p must be in (0, 1], got {top_p}")
+    if top_k < 0:
+        raise ValueError(f"top_k must be >= 0, got {top_k}")
+
     model.eval()
     
     # Tokenize all prompts
@@ -210,7 +229,8 @@ def generate_batch(
             
             # Apply top-k filtering
             if top_k > 0:
-                indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                k = min(int(top_k), int(next_token_logits.shape[-1]))
+                indices_to_remove = next_token_logits < torch.topk(next_token_logits, k)[0][..., -1, None]
                 next_token_logits[indices_to_remove] = float("-inf")
             
             # Apply top-p (nucleus) filtering

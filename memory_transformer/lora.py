@@ -40,6 +40,8 @@ class LoRALinear(nn.Module):
             merge_weights: Whether to merge LoRA into base weights
         """
         super().__init__()
+        if rank <= 0:
+            raise ValueError(f"rank must be > 0, got {rank}")
         
         self.in_features = in_features
         self.out_features = out_features

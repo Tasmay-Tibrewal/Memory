@@ -233,6 +233,7 @@ model:
   num_kv_heads: null
   max_position_embeddings: null
   hidden_activation: swiglu
+  initializer_range: 0.02
   tie_embeddings: true
 
   # Tokenizer to use (must match vocab_size for from-scratch)
@@ -302,6 +303,7 @@ training:
   scheduler: wsd               # cosine/linear/constant/wsd
   wsd_stable_ratio: 0.3
   decay_start_ratio: null
+  save_total_limit: 3          # null => keep all checkpoints
 ```
 
 ### Example Configurations

@@ -59,6 +59,7 @@ model:
   dropout: 0.0                 # Dropout rate
   attention_dropout: 0.0       # Attention dropout
   hidden_activation: swiglu    # swiglu/silu/relu/gelu/sigmoid/tanh
+  initializer_range: 0.02      # Std for from-scratch Linear/Embedding initialization
 
   # === Normalization ===
   norm_eps: 1e-6               # Normalization epsilon
@@ -103,8 +104,9 @@ memory:
   # === Block Integration ===
   memory_block_variant: A      # Block structure
   memory_dropout: null         # Dropout only for memory cross-attention (null => model.dropout)
-                               # "A": Self-Attn → Memory → MLP
-                               # "B": Self-Attn → MLP → Memory → MLP
+  memory_gradient_checkpointing: true  # Checkpoint memory attention when flash-attn path is unavailable
+                               # "A": Self-Attn -> Memory -> MLP
+                               # "B": Self-Attn -> MLP -> Memory -> MLP
   
   # === Low-Rank Memory ===
   use_low_rank_memory: false   # Enable low-rank memory bank
@@ -214,7 +216,7 @@ training:
   gradient_checkpointing: true # Reduce memory usage
   save_steps: 500              # Save checkpoint every N steps
   eval_steps: 500              # Evaluate every N steps
-  save_total_limit: 3          # Keep only N recent checkpoints
+  save_total_limit: 3          # Keep only N recent checkpoints (null => keep all)
   save_best_model: true        # Save model with best eval loss
   
   # === Early Stopping ===

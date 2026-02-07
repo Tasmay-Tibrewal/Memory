@@ -240,6 +240,7 @@ rope_theta: float = 10000.0
 dropout: float = 0.0
 attention_dropout: float = 0.0
 hidden_activation: str = "swiglu"
+initializer_range: float = 0.02
 norm_eps: float = 1e-6
 use_rms_norm: bool = true
 base_model_name: str = null          # For adapter mode
@@ -303,7 +304,7 @@ save_precision: str = null       # Optional: fp32/fp16/bf16
 gradient_checkpointing: bool = true
 save_steps: int = 500
 eval_steps: int = 500
-save_total_limit: int = 3
+save_total_limit: Optional[int] = 3  # null => keep all checkpoints
 save_best_model: bool = true
 
 # Early stopping

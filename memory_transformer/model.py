@@ -46,6 +46,11 @@ class MemoryTransformer(nn.Module):
         self.config = config
         self.model_config = config.model
         self.memory_config = config.memory
+        self.initializer_range = float(config.model.initializer_range)
+        if self.initializer_range <= 0:
+            raise ValueError(
+                f"model.initializer_range must be > 0, got {config.model.initializer_range}"
+            )
         
         hidden_dim = config.model.hidden_dim
         num_heads = config.model.num_heads
@@ -177,11 +182,11 @@ class MemoryTransformer(nn.Module):
     def _init_weights(self, module):
         """Initialize weights."""
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=self.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=self.initializer_range)
     
     def _get_memory_dim(self) -> int:
         """Get dimension of memory tokens."""

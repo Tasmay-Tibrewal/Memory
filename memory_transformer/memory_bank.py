@@ -98,6 +98,8 @@ class FactorizedMemoryBank(MemoryBank):
         init_std: float = 0.02,
     ):
         super().__init__(num_tokens, dim, init_std)
+        if rank <= 0:
+            raise ValueError(f"rank must be > 0, got {rank}")
         self.rank = rank
         
         # Factorized components
@@ -147,6 +149,8 @@ class ReducedDimMemoryBank(MemoryBank):
         reduced_dim: int,
         init_std: float = 0.02,
     ):
+        if reduced_dim <= 0:
+            raise ValueError(f"reduced_dim must be > 0, got {reduced_dim}")
         # Note: dim here is the reduced dimension
         super().__init__(num_tokens, reduced_dim, init_std)
         self.reduced_dim = reduced_dim
@@ -183,6 +187,8 @@ class ChapteredMemoryBank(nn.Module):
         num_chapters: int,
     ):
         super().__init__()
+        if num_chapters <= 0:
+            raise ValueError(f"num_chapters must be > 0, got {num_chapters}")
         self.base_bank = base_bank
         self.num_chapters = num_chapters
         
@@ -309,6 +315,13 @@ def create_memory_bank(
     Returns:
         MemoryBank instance
     """
+    if num_tokens <= 0:
+        raise ValueError(f"num_tokens must be > 0, got {num_tokens}")
+    if dim <= 0:
+        raise ValueError(f"dim must be > 0, got {dim}")
+    if use_low_rank and rank <= 0:
+        raise ValueError(f"rank must be > 0 when use_low_rank=True, got {rank}")
+
     if not use_low_rank:
         return StandardMemoryBank(num_tokens, dim, init_std)
     

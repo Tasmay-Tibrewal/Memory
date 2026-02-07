@@ -13,6 +13,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _infer_num_chapters(router: nn.Module):
+    """Best-effort extraction of router output size for top-k validation."""
+    if hasattr(router, "num_chapters"):
+        return int(getattr(router, "num_chapters"))
+    if hasattr(router, "router") and hasattr(router.router, "out_features"):
+        return int(router.router.out_features)
+    return None
+
+
 class SequenceLevelRouter:
     """
     Sequence-level routing strategy.
@@ -26,6 +35,11 @@ class SequenceLevelRouter:
         router: nn.Module,  # The trained router network
         top_k: int,
     ):
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        num_chapters = _infer_num_chapters(router)
+        if num_chapters is not None and top_k > num_chapters:
+            raise ValueError(f"top_k ({top_k}) must be <= num_chapters ({num_chapters})")
         self.router = router
         self.top_k = top_k
     
@@ -72,6 +86,13 @@ class RollingWindowRouter:
         top_k: int,
         window_size: int = 128,
     ):
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if window_size <= 0:
+            raise ValueError(f"window_size must be > 0, got {window_size}")
+        num_chapters = _infer_num_chapters(router)
+        if num_chapters is not None and top_k > num_chapters:
+            raise ValueError(f"top_k ({top_k}) must be <= num_chapters ({num_chapters})")
         self.router = router
         self.top_k = top_k
         self.window_size = window_size
@@ -141,6 +162,11 @@ class TokenLevelRouter:
         router: nn.Module,
         top_k: int,
     ):
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        num_chapters = _infer_num_chapters(router)
+        if num_chapters is not None and top_k > num_chapters:
+            raise ValueError(f"top_k ({top_k}) must be <= num_chapters ({num_chapters})")
         self.router = router
         self.top_k = top_k
     
@@ -182,6 +208,10 @@ class HybridRouter:
         top_k: int,
         window_size: int = 128,
     ):
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if window_size <= 0:
+            raise ValueError(f"window_size must be > 0, got {window_size}")
         self.sequence_router = SequenceLevelRouter(router, top_k)
         self.rolling_router = RollingWindowRouter(router, top_k, window_size)
         self.is_generating = False

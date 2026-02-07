@@ -33,6 +33,7 @@ model:
   dropout: 0.0
   attention_dropout: 0.0
   hidden_activation: swiglu       # swiglu/silu/relu/gelu/sigmoid/tanh
+  initializer_range: 0.02         # Std for from-scratch Linear/Embedding initialization
 
   # Norm + output head
   norm_eps: 1e-6
@@ -167,7 +168,7 @@ training:
   gradient_checkpointing: true
   save_steps: 500
   eval_steps: 500
-  save_total_limit: 3
+  save_total_limit: 3             # null => keep all checkpoints (no cleanup)
   save_best_model: true
 
   # Early stopping

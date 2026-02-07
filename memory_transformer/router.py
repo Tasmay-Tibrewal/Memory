@@ -189,6 +189,14 @@ class TokenLevelRouter(nn.Module):
         top_k: int = 1,
     ):
         super().__init__()
+        if num_chapters <= 0:
+            raise ValueError(f"num_chapters must be > 0, got {num_chapters}")
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if top_k > num_chapters:
+            raise ValueError(
+                f"top_k ({top_k}) must be <= num_chapters ({num_chapters})"
+            )
         
         self.hidden_dim = hidden_dim
         self.num_chapters = num_chapters
@@ -246,6 +254,16 @@ class RollingRouter(nn.Module):
         window_size: int = 64,
     ):
         super().__init__()
+        if num_chapters <= 0:
+            raise ValueError(f"num_chapters must be > 0, got {num_chapters}")
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if top_k > num_chapters:
+            raise ValueError(
+                f"top_k ({top_k}) must be <= num_chapters ({num_chapters})"
+            )
+        if window_size <= 0:
+            raise ValueError(f"window_size must be > 0, got {window_size}")
         
         self.hidden_dim = hidden_dim
         self.num_chapters = num_chapters

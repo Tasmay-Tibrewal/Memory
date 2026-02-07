@@ -26,6 +26,7 @@ model:
 
   use_rope: true
   hidden_activation: swiglu
+  initializer_range: 0.02
   tie_embeddings: true
   use_rms_norm: true
   use_flash_attention: true
@@ -81,6 +82,7 @@ training:
   gradient_checkpointing: true
 
   save_steps: 2000
+  save_total_limit: 3 # Set null to keep all checkpoints
   logging_steps: 10
   log_to_wandb: false
 

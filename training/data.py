@@ -58,7 +58,15 @@ class TextDataset(Dataset):
         
         # Ensure tokenizer has pad token
         if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            elif getattr(tokenizer, "eos_token_id", None) is not None:
+                tokenizer.pad_token_id = int(tokenizer.eos_token_id)
+            else:
+                raise ValueError(
+                    "Tokenizer has no pad_token and no eos_token/eos_token_id fallback. "
+                    "Set model.pad_token_id in config or use a tokenizer with EOS."
+                )
     
     def __len__(self) -> int:
         return len(self.dataset)

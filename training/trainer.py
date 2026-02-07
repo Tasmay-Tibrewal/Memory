@@ -129,6 +129,7 @@ class Trainer:
         
         # Set seed
         set_seed(42)
+        self._validate_training_config()
 
         # Load tokenizer early (from-scratch vocab_size depends on tokenizer)
         self.tokenizer = self._load_tokenizer()
@@ -203,6 +204,40 @@ class Trainer:
             config=self._config_to_dict(),
             init_kwargs={"wandb": wandb_init},
         )
+
+    def _validate_training_config(self) -> None:
+        """Validate training config values early for clearer errors."""
+        cfg = self.train_config
+        if cfg.batch_size <= 0:
+            raise ValueError(f"batch_size must be > 0, got {cfg.batch_size}")
+        if cfg.gradient_accumulation_steps <= 0:
+            raise ValueError(
+                f"gradient_accumulation_steps must be > 0, got {cfg.gradient_accumulation_steps}"
+            )
+        if cfg.num_epochs is None and cfg.max_steps <= 0:
+            raise ValueError(f"max_steps must be > 0 when num_epochs is not set, got {cfg.max_steps}")
+        if cfg.num_epochs is not None and cfg.num_epochs <= 0:
+            raise ValueError(f"num_epochs must be > 0 when set, got {cfg.num_epochs}")
+        if cfg.warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0, got {cfg.warmup_steps}")
+        if cfg.eval_steps <= 0:
+            raise ValueError(f"eval_steps must be > 0, got {cfg.eval_steps}")
+        if cfg.save_steps <= 0:
+            raise ValueError(f"save_steps must be > 0, got {cfg.save_steps}")
+        if cfg.logging_steps <= 0:
+            raise ValueError(f"logging_steps must be > 0, got {cfg.logging_steps}")
+        if cfg.save_total_limit is not None and cfg.save_total_limit <= 0:
+            raise ValueError(
+                f"save_total_limit must be > 0 or null, got {cfg.save_total_limit}"
+            )
+        if cfg.max_grad_norm < 0:
+            raise ValueError(f"max_grad_norm must be >= 0, got {cfg.max_grad_norm}")
+        if cfg.num_gpus <= 0:
+            raise ValueError(f"num_gpus must be > 0, got {cfg.num_gpus}")
+        if cfg.early_stopping and cfg.early_stopping_patience <= 0:
+            raise ValueError(
+                f"early_stopping_patience must be > 0 when early_stopping=true, got {cfg.early_stopping_patience}"
+            )
     
     def _create_model(self) -> nn.Module:
         """Create model based on config."""
@@ -580,8 +615,10 @@ class Trainer:
         return False
     
     def _cleanup_checkpoints(self):
-        """Remove old checkpoints keeping only save_total_limit."""
+        """Remove old checkpoints keeping only save_total_limit (or keep all if null)."""
         train_cfg = self.train_config
+        if train_cfg.save_total_limit is None:
+            return
         output_dir = Path(train_cfg.output_dir)
         
         # Find all checkpoint directories
@@ -591,7 +628,7 @@ class Trainer:
         )
         
         # Remove oldest if over limit
-        while len(checkpoints) > train_cfg.save_total_limit:
+        while len(checkpoints) > int(train_cfg.save_total_limit):
             oldest = checkpoints.pop(0)
             if self.accelerator.is_main_process:
                 shutil.rmtree(oldest)

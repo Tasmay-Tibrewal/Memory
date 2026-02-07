@@ -20,9 +20,9 @@ model:
 
   # Tokenizer (must match vocab_size for from-scratch)
   tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
-  bos_token_id: null
-  eos_token_id: null
-  pad_token_id: null
+  bos_token_id: 0
+  eos_token_id: 0
+  pad_token_id: 0
 
   # Standard settings
   use_rope: true
@@ -30,6 +30,7 @@ model:
   dropout: 0.0
   attention_dropout: 0.0
   hidden_activation: swiglu
+  initializer_range: 0.02
   tie_embeddings: true
   use_rms_norm: true
   norm_eps: 1e-5
@@ -140,7 +141,7 @@ training:
   min_lr_ratio: 0.1
   wsd_stable_ratio: 0.3  # Warmup -> 30% stable -> decay
   decay_start_ratio: null # Optional global override for decay start
-  decay_start_step: null
+  decay_start_step: 2000
 
   # Mixed precision
   mixed_precision: bf16
@@ -149,7 +150,7 @@ training:
   gradient_checkpointing: true
   save_steps: 2000
   eval_steps: 100
-  save_total_limit: 3
+  save_total_limit: 3 # Set null to keep all checkpoints
 
   # Logging
   logging_steps: 10
