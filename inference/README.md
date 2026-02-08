@@ -92,12 +92,13 @@ During training, we have the full sequence and can use sequence-level routing. D
 | Strategy | Description | Best For |
 |----------|-------------|----------|
 | `SequenceLevelRouter` | Mean-pool full context | Prefill, short sequences |
+| `SequenceRollingRouter` | Rolling-window pooled sequence summary | Sequence-level routing with local smoothing |
 | `RollingWindowRouter` | Use recent N tokens | Long generation |
 | `TokenLevelRouter` | Per-token routing | Single token generation |
 | `HybridRouter` | Sequence for prefill, rolling for generation | General use |
 
 **Padding caveat**:
-- `SequenceLevelRouter` and `RollingWindowRouter` use unmasked mean pooling.
+- `SequenceLevelRouter`, `SequenceRollingRouter`, and `RollingWindowRouter` use unmasked pooling.
 - If hidden states include padded positions, routing can be biased.
 - Use non-padded hidden states for routing, or apply masked pooling before routing.
 
@@ -127,6 +128,17 @@ chapter_indices, weights = router.route(new_hidden_states, use_cache=True)
 - Maintains a cache of recent hidden states
 - Only considers last `window_size` tokens
 - Avoids computing over entire (potentially very long) context
+
+#### `SequenceRollingRouter`
+```python
+from inference.routing_strategies import SequenceRollingRouter
+
+router = SequenceRollingRouter(trained_router, top_k=4, window_size=128)
+chapter_indices, weights = router.route(hidden_states)
+```
+- Computes per-position rolling means, then averages those means across sequence
+- Produces one chapter set for the full sequence (like sequence routing)
+- Useful when you want sequence-level routing with local-context smoothing
 
 #### `TokenLevelRouter`
 ```python
@@ -168,7 +180,7 @@ from inference.routing_strategies import create_inference_router
 
 router = create_inference_router(
     router=trained_router,
-    strategy="hybrid",  # "sequence", "rolling", "token", "hybrid"
+    strategy="hybrid",  # "sequence", "sequence-rolling", "rolling", "token", "hybrid"
     top_k=4,
     window_size=128,
 )
@@ -235,12 +247,12 @@ Routing strategy can be set in config:
 
 ```yaml
 memory:
-  # Training routing (always sequence-level)
+  # Training routing
   routing_strategy_train: sequence
   
   # Inference routing
-  routing_strategy_inference: sequence  # "sequence", "rolling", "token", "hybrid"
-  routing_window_size: 128             # Affects rolling/hybrid router
+  routing_strategy_inference: sequence  # "sequence", "sequence-rolling", "rolling", "token", "hybrid"
+  routing_window_size: 128             # Affects sequence-rolling/rolling/hybrid router
 ```
 
 ---

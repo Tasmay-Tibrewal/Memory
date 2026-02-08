@@ -76,7 +76,7 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | `__init__.py` | 9 | Package init |
 | `generate.py` | 218 | Text generation utilities |
 | `merge.py` | 377 | Model merging and quantization |
-| `routing_strategies.py` | 234 | Inference routing (sequence/rolling/token/hybrid) |
+| `routing_strategies.py` | 234 | Inference routing (sequence/sequence-rolling/rolling/token/hybrid) |
 
 ### Scripts (`scripts/`)
 
@@ -191,8 +191,11 @@ num_chapters: int = 100
 top_k_chapters: int = 20
 num_shared_chapters: int = 0          # Always include first N chapters in selection
 routed_scaling_factor: float = 1.0    # Scale routed chapter weights vs shared chapter weights
-routing_strategy_train: str = "sequence"
-routing_strategy_inference: str = "sequence"  # sequence/rolling/token/hybrid
+normalize_shared_routed_before_mixing: bool = false  # Normalize shared/routed vectors separately before weighted mixing
+shared_routed_norm_type: str = "rms"  # rms/layernorm
+shared_routed_norm_eps: float = 1e-6
+routing_strategy_train: str = "sequence"       # sequence/sequence-rolling/token
+routing_strategy_inference: str = "sequence"   # sequence/sequence-rolling/rolling/token/hybrid
 routing_window_size: int = 128                # For rolling/hybrid inference
 
 # Router losses

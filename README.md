@@ -174,7 +174,7 @@ Memory/
 â”‚   â”œâ”€â”€ __init__.py
 â”‚   â”œâ”€â”€ generate.py          # Text generation
 â”‚   â”œâ”€â”€ merge.py             # Model merging and quantization
-â”‚   â””â”€â”€ routing_strategies.py # Inference routing (sequence/rolling/token)
+â”‚   â””â”€â”€ routing_strategies.py # Inference routing (sequence/sequence-rolling/rolling/token/hybrid)
 â”‚
 â”œâ”€â”€ scripts/                  # Entry point scripts
 â”‚   â”œâ”€â”€ README.md            # Scripts documentation
@@ -271,7 +271,10 @@ memory:
   top_k_chapters: 4            # Chapters to select
   num_shared_chapters: 0       # Always include first N chapters for every sample
   routed_scaling_factor: 1.0   # Scale routed chapter weights vs shared chapters
-  routing_strategy_inference: hybrid  # sequence/rolling/token/hybrid
+  normalize_shared_routed_before_mixing: false  # Normalize shared/routed vectors separately before weighted mixing
+  shared_routed_norm_type: rms # rms/layernorm
+  shared_routed_norm_eps: 1e-6
+  routing_strategy_inference: hybrid  # sequence/sequence-rolling/rolling/token/hybrid
   routing_window_size: 128            # Rolling/hybrid window size (tokens)
   
   # Low-rank options

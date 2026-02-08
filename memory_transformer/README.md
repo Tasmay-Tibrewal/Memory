@@ -45,9 +45,13 @@ memory_transformer/
 - `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
 - `memory.num_shared_chapters`: Always include first N chapters in chaptered memory routing.
 - `memory.routed_scaling_factor`: Scale routed chapter weights relative to shared chapter weights.
+- `memory.normalize_shared_routed_before_mixing`: Normalize shared/routed memory vectors separately before weighted mixing.
+- `memory.shared_routed_norm_type`: Branch-vector normalization type (`rms` or `layernorm`).
+- `memory.shared_routed_norm_eps`: Epsilon for shared/routed vector normalization.
 - `training.save_total_limit`: Checkpoint retention limit (`null` => disable cleanup / keep all).
 - `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
+- `memory.routing_strategy_{train,inference}`: Supports `sequence`, `sequence-rolling`, and `token` (plus `rolling`/`hybrid` inference modes).
 
 **Key Functions**:
 ```python

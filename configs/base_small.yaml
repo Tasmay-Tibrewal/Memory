@@ -56,12 +56,21 @@ memory:
   memory_block_variant: A # SA -> Mem -> MLP
   memory_dropout: null # null => fallback to model.dropout for memory cross-attention
 
+  memory_gradient_checkpointing: true
+
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 256
+  num_chapters: 260 # 256 (to be routed) + 4 (shared)
   top_k_chapters: 16
   num_shared_chapters: 4 # First N chapters are always included for every sample
-  routed_scaling_factor: 4 # Scales routed chapter weights relative to shared chapters
+  routed_scaling_factor: 10 # Scales routed chapter weights relative to shared chapters
+  normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
+  shared_routed_norm_type: rms # rms/layernorm
+  shared_routed_norm_eps: 1e-6
+  # scaled to 10, because 4 shared chapters weighed as 4, and 16 routed chapter as 1
+  # so to compensate, we need 4x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
+  # 4 * 2.5 = 10, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
+  # giving more imp. to routed tokens and lesser to shared common ones.
   routing_strategy_train: sequence
   routing_strategy_inference: sequence
 
@@ -124,26 +133,31 @@ training:
 
   # Distributed
   distributed_strategy: ddp
+  # num_gpus: 1
 
   # Training hyperparameters
-  batch_size: 8
+  batch_size: 32
   gradient_accumulation_steps: 8
+  # num_epochs: null
   max_steps: 50000
-  warmup_steps: 1000
+  warmup_steps: 2000
 
   # Optimizer
   optimizer: adamw
   weight_decay: 0.1
   adam_beta1: 0.9
   adam_beta2: 0.95
+  adam_epsilon: 1e-8
   max_grad_norm: 1.0
 
   # Scheduler
   scheduler: WSD
   min_lr_ratio: 0.1
-  wsd_stable_ratio: 0.3  # Warmup -> 30% stable -> decay
-  decay_start_ratio: null # Optional global override for decay start
-  decay_start_step: 2000
+  # wsd_stable_ratio is over-riden by decay_start_ratio and warmup_steps
+  wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
+  decay_start_ratio: 0.8 # Optional global override for decay start (ratio of steps till decay start)
+  # resolved decay start overrides stable, stable = total - (warmup + decay steps)
+  # decay_start_step: 2000
 
   # Mixed precision
   mixed_precision: bf16
@@ -158,6 +172,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
+  wandb_run_name: run-full-pretrain
 
   # Output
   output_dir: ./outputs/base_small
+  resume_from_checkpoint: null

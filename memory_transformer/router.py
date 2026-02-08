@@ -16,7 +16,9 @@ class ChapterRouter(nn.Module):
     """
     Router for selecting top-k chapters from memory bank.
     
-    Uses sequence-level routing: mean-pools the input sequence,
+    Uses configurable sequence-level routing:
+    - mean-pooled sequence ("sequence")
+    - average of rolling-window means ("sequence-rolling")
     then computes chapter importance scores.
     
     Inspired by MoE routing (Switch Transformer, GShard).
@@ -27,14 +29,17 @@ class ChapterRouter(nn.Module):
         hidden_dim: int,
         num_chapters: int,
         top_k: int = 1,
-        routing_strategy: str = "sequence",  # "sequence" or "token"
+        routing_strategy: str = "sequence",  # "sequence", "sequence-rolling", or "token"
     ):
         """
         Args:
             hidden_dim: Input hidden dimension
             num_chapters: Number of chapters to route to
             top_k: Number of chapters to select
-            routing_strategy: "sequence" (mean-pool) or "token" (per-token)
+            routing_strategy:
+                - "sequence": mean-pool over sequence
+                - "sequence-rolling" (or "sequence_rolling"): average of per-position rolling means
+                - "token": per-token router logits, then sequence-aggregated selection
         """
         super().__init__()
         
@@ -65,6 +70,7 @@ class ChapterRouter(nn.Module):
         hidden_states: torch.Tensor,
         return_losses: bool = True,
         exclude_prefix_chapters: int = 0,
+        rolling_window_size: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute chapter routing.
@@ -74,6 +80,8 @@ class ChapterRouter(nn.Module):
             return_losses: Whether to compute and return auxiliary losses
             exclude_prefix_chapters: Exclude first N chapters from top-k selection
                 (useful when those chapters are always included as shared chapters).
+            rolling_window_size: Window size for "sequence-rolling" strategy.
+                If None, defaults to full sequence length.
             
         Returns:
             Tuple of:
@@ -86,6 +94,12 @@ class ChapterRouter(nn.Module):
         if self.routing_strategy == "sequence":
             # Mean-pool over sequence
             pooled = hidden_states.mean(dim=1)  # (batch_size, hidden_dim)
+            router_logits = self.router(pooled)  # (batch_size, num_chapters)
+        elif self.routing_strategy in {"sequence-rolling", "sequence_rolling"}:
+            pooled = self._sequence_rolling_pool(
+                hidden_states,
+                rolling_window_size=rolling_window_size,
+            )  # (batch_size, hidden_dim)
             router_logits = self.router(pooled)  # (batch_size, num_chapters)
         elif self.routing_strategy == "token":
             # Per-token routing (more expensive, primarily for generation)
@@ -138,6 +152,45 @@ class ChapterRouter(nn.Module):
             losses = self._compute_losses(router_logits, router_probs, top_k_indices)
         
         return top_k_indices, top_k_weights, losses
+
+    @staticmethod
+    def _sequence_rolling_pool(
+        hidden_states: torch.Tensor,
+        rolling_window_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Pool hidden states by averaging rolling-window means across the sequence.
+
+        For each position t, compute:
+            mean(hidden_states[:, max(0, t-w+1):t+1, :])
+        Then average these rolling means over t.
+        """
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be 3D (B, T, D), got shape {tuple(hidden_states.shape)}"
+            )
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        if seq_len <= 0:
+            raise ValueError("sequence length must be > 0")
+
+        window = seq_len if rolling_window_size is None else int(rolling_window_size)
+        if window <= 0:
+            raise ValueError(f"rolling_window_size must be > 0, got {rolling_window_size}")
+        window = min(window, seq_len)
+
+        # Prefix sums for O(B*T*D) rolling-window means.
+        cumsum = hidden_states.cumsum(dim=1)  # (B, T, D)
+        zeros = hidden_states.new_zeros((batch_size, 1, hidden_dim))
+        cumsum = torch.cat([zeros, cumsum], dim=1)  # (B, T+1, D), prefix with 0
+
+        idx = torch.arange(seq_len, device=hidden_states.device)
+        end = idx + 1
+        start = torch.clamp(end - window, min=0)
+
+        window_sums = cumsum[:, end, :] - cumsum[:, start, :]  # (B, T, D)
+        lengths = (end - start).to(dtype=hidden_states.dtype).view(1, seq_len, 1)
+        rolling_means = window_sums / lengths
+        return rolling_means.mean(dim=1)  # (B, D)
     
     def _compute_losses(
         self,

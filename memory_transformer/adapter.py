@@ -124,6 +124,15 @@ class MemoryAdapter(nn.Module):
             raise ValueError(
                 f"memory.routed_scaling_factor must be >= 0, got {self.memory_config.routed_scaling_factor}"
             )
+        if self.memory_config.shared_routed_norm_type not in {"rms", "layernorm"}:
+            raise ValueError(
+                "memory.shared_routed_norm_type must be one of {'rms', 'layernorm'}, "
+                f"got {self.memory_config.shared_routed_norm_type}"
+            )
+        if self.memory_config.shared_routed_norm_eps <= 0:
+            raise ValueError(
+                f"memory.shared_routed_norm_eps must be > 0, got {self.memory_config.shared_routed_norm_eps}"
+            )
         
         # Load pretrained model
         if config.model.base_model_name is None:
@@ -461,6 +470,46 @@ class MemoryAdapter(nn.Module):
         combined_weights = combined_weights / combined_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         return combined_indices, combined_weights
 
+    @staticmethod
+    def _normalize_shared_routed_memory_vectors(
+        memory: torch.Tensor,
+        *,
+        num_shared_chapters: int,
+        tokens_per_chapter: int,
+        norm_type: str,
+        eps: float,
+    ) -> torch.Tensor:
+        """
+        Normalize shared and routed memory-token vectors separately before mixing.
+
+        Expected memory layout is [shared chapters..., routed chapters...].
+        """
+        if memory.dim() != 3:
+            raise ValueError(
+                f"memory must be 3D (B, T, D), got shape {tuple(memory.shape)}"
+            )
+        if tokens_per_chapter <= 0:
+            return memory
+
+        shared_tokens = max(0, int(num_shared_chapters)) * int(tokens_per_chapter)
+        shared_tokens = min(shared_tokens, int(memory.shape[1]))
+        if shared_tokens <= 0 or shared_tokens >= int(memory.shape[1]):
+            return memory
+
+        shared = memory[:, :shared_tokens, :]
+        routed = memory[:, shared_tokens:, :]
+
+        if norm_type == "rms":
+            shared = shared / shared.pow(2).mean(dim=-1, keepdim=True).add(eps).sqrt()
+            routed = routed / routed.pow(2).mean(dim=-1, keepdim=True).add(eps).sqrt()
+        elif norm_type == "layernorm":
+            shared = F.layer_norm(shared, (shared.shape[-1],), eps=eps)
+            routed = F.layer_norm(routed, (routed.shape[-1],), eps=eps)
+        else:
+            raise ValueError(f"Unsupported norm_type: {norm_type}")
+
+        return torch.cat([shared, routed], dim=1)
+
     def _register_memory_hooks(self):
         """
         Register persistent forward hooks on each decoder layer.
@@ -535,12 +584,13 @@ class MemoryAdapter(nn.Module):
                         attention_mask = self._fwd_attention_mask
                         strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
 
-                        if self.training or (not use_cache) or strategy in {"sequence", "token"}:
+                        if self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling", "token"}:
                             router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
                                 return_losses=self.training,
                                 exclude_prefix_chapters=mem_cfg.num_shared_chapters,
+                                rolling_window_size=mem_cfg.routing_window_size,
                             )
                         elif strategy in {"rolling", "hybrid"}:
                             cache_key = str(layer_idx)
@@ -597,6 +647,14 @@ class MemoryAdapter(nn.Module):
 
                         # Bug 14 fix: Weight memory tokens by routing probabilities
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
+                        if mem_cfg.normalize_shared_routed_before_mixing:
+                            memory = self._normalize_shared_routed_memory_vectors(
+                                memory,
+                                num_shared_chapters=mem_cfg.num_shared_chapters,
+                                tokens_per_chapter=tokens_per_chapter,
+                                norm_type=mem_cfg.shared_routed_norm_type,
+                                eps=float(mem_cfg.shared_routed_norm_eps),
+                            )
                         w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
                         w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
                         w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)

@@ -46,6 +46,9 @@ memory:
   top_k_chapters: 1
   num_shared_chapters: 0 # First N chapters are always included for every sample
   routed_scaling_factor: 1.0 # Scales routed chapter weights relative to shared chapters
+  normalize_shared_routed_before_mixing: true # Active when num_shared_chapters > 0 and routed chapters exist
+  shared_routed_norm_type: rms # rms/layernorm
+  shared_routed_norm_eps: 1e-6
 
   # Router losses
   use_load_balance_loss: true

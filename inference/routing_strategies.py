@@ -3,6 +3,7 @@ Routing strategies for inference.
 
 Different strategies for chapter selection during inference:
 - SequenceLevelRouter: Use full context to select chapters (same as training)
+- SequenceRollingRouter: Rolling-window pooled sequence routing (same chapter set for sequence)
 - RollingWindowRouter: Use rolling window of recent tokens
 - TokenLevelRouter: Per-token routing (for generation)
 """
@@ -68,6 +69,79 @@ class SequenceLevelRouter:
         weights, indices = torch.topk(probs, self.top_k, dim=-1)
         weights = weights / weights.sum(dim=-1, keepdim=True)
         
+        return indices, weights
+
+
+class SequenceRollingRouter:
+    """
+    Sequence-level rolling routing strategy.
+
+    Pools hidden states by:
+    1) computing per-position rolling means over a fixed window,
+    2) averaging those rolling means across the sequence,
+    then routes once for the full sequence.
+    """
+
+    def __init__(
+        self,
+        router: nn.Module,  # The trained router network
+        top_k: int,
+        window_size: int = 128,
+    ):
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if window_size <= 0:
+            raise ValueError(f"window_size must be > 0, got {window_size}")
+        num_chapters = _infer_num_chapters(router)
+        if num_chapters is not None and top_k > num_chapters:
+            raise ValueError(f"top_k ({top_k}) must be <= num_chapters ({num_chapters})")
+        self.router = router
+        self.top_k = top_k
+        self.window_size = int(window_size)
+
+    @staticmethod
+    def _sequence_rolling_pool(
+        hidden_states: torch.Tensor,
+        window_size: int,
+    ) -> torch.Tensor:
+        """
+        Compute average of per-position rolling means.
+
+        hidden_states: (B, T, D)
+        returns: (B, D)
+        """
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be 3D (B, T, D), got shape {tuple(hidden_states.shape)}"
+            )
+        batch_size, seq_len, hidden_dim = hidden_states.shape
+        if seq_len <= 0:
+            raise ValueError("sequence length must be > 0")
+
+        w = min(int(window_size), int(seq_len))
+
+        cumsum = hidden_states.cumsum(dim=1)  # (B, T, D)
+        zeros = hidden_states.new_zeros((batch_size, 1, hidden_dim))
+        cumsum = torch.cat([zeros, cumsum], dim=1)  # (B, T+1, D)
+
+        idx = torch.arange(seq_len, device=hidden_states.device)
+        end = idx + 1
+        start = torch.clamp(end - w, min=0)
+        window_sums = cumsum[:, end, :] - cumsum[:, start, :]  # (B, T, D)
+        lengths = (end - start).to(dtype=hidden_states.dtype).view(1, seq_len, 1)
+        rolling_means = window_sums / lengths
+        return rolling_means.mean(dim=1)
+
+    def route(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Select chapters based on sequence-rolling pooled representation."""
+        pooled = self._sequence_rolling_pool(hidden_states, self.window_size)
+        logits = self.router.router(pooled)
+        probs = F.softmax(logits, dim=-1)
+        weights, indices = torch.topk(probs, self.top_k, dim=-1)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
         return indices, weights
 
 
@@ -257,7 +331,7 @@ def create_inference_router(
     
     Args:
         router: Trained router module
-        strategy: "sequence", "rolling", "token", "hybrid"
+        strategy: "sequence", "sequence-rolling", "rolling", "token", "hybrid"
         top_k: Number of chapters to select
         window_size: Window size for rolling strategy
         
@@ -266,6 +340,8 @@ def create_inference_router(
     """
     if strategy == "sequence":
         return SequenceLevelRouter(router, top_k)
+    elif strategy in {"sequence-rolling", "sequence_rolling"}:
+        return SequenceRollingRouter(router, top_k, window_size)
     elif strategy == "rolling":
         return RollingWindowRouter(router, top_k, window_size)
     elif strategy == "token":

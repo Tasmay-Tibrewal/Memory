@@ -50,6 +50,9 @@ memory:
   use_chapters: false
   num_shared_chapters: 0
   routed_scaling_factor: 1.0
+  normalize_shared_routed_before_mixing: false
+  shared_routed_norm_type: rms
+  shared_routed_norm_eps: 1e-6
   use_lora: false
   use_memory_adapter: false
 

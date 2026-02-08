@@ -122,9 +122,12 @@ memory:
   top_k_chapters: 20           # Chapters to select per forward pass
   num_shared_chapters: 0       # Always include first N chapters for every sample
   routed_scaling_factor: 1.0   # Scale routed chapter weights relative to shared chapters
+  normalize_shared_routed_before_mixing: false  # Normalize shared/routed vectors separately before weighted mixing
+  shared_routed_norm_type: rms # "rms" or "layernorm"
+  shared_routed_norm_eps: 1e-6
   
-  routing_strategy_train: sequence      # Training: always sequence-level
-  routing_strategy_inference: sequence  # Inference: "sequence", "rolling", "token", "hybrid"
+  routing_strategy_train: sequence      # "sequence", "sequence-rolling", or "token"
+  routing_strategy_inference: sequence  # Inference: "sequence", "sequence-rolling", "rolling", "token", "hybrid"
   routing_window_size: 128              # Rolling/hybrid window size (tokens)
   
   # === Router Losses ===

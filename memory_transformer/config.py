@@ -66,10 +66,20 @@ class MemoryConfig:
     num_shared_chapters: int = 0
     # Scale routed chapter weights relative to shared-chapter weights.
     routed_scaling_factor: float = 1.0
+    # Normalize shared/routed memory token vectors before mixing.
+    # Helps keep one branch from dominating due to raw magnitude.
+    normalize_shared_routed_before_mixing: bool = False
+    # Vector normalization type for shared/routed branches.
+    # Options: "rms", "layernorm"
+    shared_routed_norm_type: str = "rms"
+    shared_routed_norm_eps: float = 1e-6
     
-    # Routing strategy: "sequence" (mean-pool), "token" (per-token, generation only)
+    # Routing strategy:
+    # - "sequence": mean-pool
+    # - "sequence-rolling": average of rolling-window means across sequence
+    # - "token": per-token router logits (sequence-aggregated selection)
     routing_strategy_train: str = "sequence"
-    routing_strategy_inference: str = "sequence"  # "sequence", "rolling", "token", "hybrid"
+    routing_strategy_inference: str = "sequence"  # "sequence", "sequence-rolling", "rolling", "token", "hybrid"
     routing_window_size: int = 128  # For rolling/hybrid routing during generation (inference)
     
     # === Router losses ===
