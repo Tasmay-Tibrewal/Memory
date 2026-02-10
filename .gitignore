@@ -2,4 +2,11 @@
 __pycache__
 .ruff_cache
 .claude
-native-sparse-attention
+# some kernel testing -> not required for the repo
+native-sparse-attention/
+Flash-Sparse-Attention/
+flash-sparse-attention-flash-algo/
+native-sparse-attention-triton/
+Relaxed-System-Lab/
+scattermoe/
+kernels/
