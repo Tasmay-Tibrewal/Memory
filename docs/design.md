@@ -31,11 +31,15 @@ This document records design choices, compromises, known issues, and areas for f
 
 **Rationale**:
 - Token-level routing is memory-prohibitive during training/prefill
-- Would require custom CUDA kernel for efficient implementation
+- Would require custom kernels (Triton/CUDA) for efficient implementation
 - Sequence-level still provides reasonable chapter selection
 - Token-level can be used during generation (seq_len=1)
 
-**Future**: Custom CUDA kernel could enable token-level routing.
+Kernel engineering notes:
+- Experimentation and benchmarks live in `kernels/`
+- Curated stable kernel set lives in `kernels-final/` (v1/v2/v3)
+
+**Future**: Integrate a stable token-level routing kernel path into the core model code when reliability and performance are proven across target workloads.
 
 ### 4. Zero-Initialized Output Projection
 

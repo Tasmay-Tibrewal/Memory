@@ -143,7 +143,7 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | Feature | Reason | Future Priority |
 |---------|--------|-----------------|
 | Dynamic context bank | Post-workshop (VAE, clustering needed) | Low |
-| Token-level routing (prefill) | Needs custom CUDA kernel | Medium |
+| Token-level routing (prefill) | Not in core `memory_transformer/` path yet; kernel experiments live in `kernels/` and stable candidates in `kernels-final/` | Medium |
 | Unit tests | User requested to skip | Low |
 | QAT for memory | Basic quantization only | Low |
 

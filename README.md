@@ -24,6 +24,7 @@ This project implements a novel memory-augmented transformer architecture where:
 
 ### Efficient Scaling
 - **Chapter-Based Routing**: MoE-style top-k selection for large memory banks (100k+ tokens)
+- **Token-Level Routing Kernels (Engineering)**: Experimental kernels to make token-level routing practical for train/prefill without per-token KV duplication or de-batching slowdowns
 - **Router Losses**: Load balancing, auxiliary, and z-loss from MoE literature
 - **Low-Rank Compression**: Factorized memory, low-rank projections
 
@@ -405,6 +406,15 @@ per backward per micro-step. See `docs/design.md` for details.
 - Check `wo_init_zero: true` (critical for stable training â€” adapter and from-scratch)
 - Enable `use_load_balance_loss: true` if router collapses
 - Increase `memory_lr` relative to `base_model_lr`
+
+## Kernels (Token-Level Routing)
+
+For token-level routing into very large memory banks during train/prefill, this repo includes an engineering workspace of custom kernels.
+
+- Detailed exploration, reports, and benchmarks: `kernels/`
+- Stable selected set used in practice: `kernels-final/` (v1/v2/v3, with v2 most stable overall)
+- Motivation: avoid per-token KV duplication or de-batched slow paths, and reduce look-ahead risk from sequence-level route choices
+- Note: NSA forward can be faster for `G>=16` in some configs, but backward is much slower and it does not support `G<16` as a general solution
 
 ---
 

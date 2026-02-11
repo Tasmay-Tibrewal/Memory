@@ -1,4 +1,4 @@
-# Memory-Augmented Transformer Architecture
+﻿# Memory-Augmented Transformer Architecture
 
 This document explains the architecture of the Memory-Augmented Transformer in detail.
 
@@ -216,10 +216,10 @@ W_up: r → d
 - Mean-pool sequence → route → same chapters for all tokens
 - Memory efficient: K is (batch, selected_tokens, d)
 
-**Token-level** (future work):
-- Each token routes independently
-- Memory prohibitive: K would be (batch × seq_len, selected_tokens, d)
-- Feasible during generation (seq_len = 1)
+**Token-level** (kernel engineering exists; not integrated into core model yet):
+- Each token routes independently (more granular; reduces look-ahead risk from route choices).
+- Naive dense form is memory prohibitive at train/prefill: K would be (batch × seq_len, selected_tokens, d).
+- Kernel experiments live in `kernels/` and stable versions in `kernels-final/` (see their READMEs).
 
 ## Summary
 

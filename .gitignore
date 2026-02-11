@@ -9,4 +9,4 @@ flash-sparse-attention-flash-algo/
 native-sparse-attention-triton/
 Relaxed-System-Lab/
 scattermoe/
-kernels/
+# kernels/
