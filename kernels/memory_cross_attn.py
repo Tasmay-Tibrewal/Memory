@@ -255,6 +255,128 @@ def mem_xattn_fwd_kernel(
         )
 
 
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS,
+    key=["BS", "BK", "BV", "G", "USE_DOT"],
+)
+@triton.jit
+def mem_xattn_fwd_kernel_weighted(
+    q, k, v,
+    o, lse,
+    scale,
+    block_indices,
+    block_weights,
+    TQ: tl.constexpr,          # query length (per batch)
+    TK: tl.constexpr,          # kv length (per batch)
+    H: tl.constexpr,
+    HQ: tl.constexpr,
+    G: tl.constexpr,
+    Kdim: tl.constexpr,
+    Vdim: tl.constexpr,
+    S: tl.constexpr,           # topk
+    BS: tl.constexpr,          # block size (chapter size)
+    BS_PAD: tl.constexpr,      # padded power-of-two tile size
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_DOT: tl.constexpr,
+):
+    """
+    Same as mem_xattn_fwd_kernel, but applies per-(query,head,topk) chapter weights.
+
+    Semantics:
+      u_i = w_s * exp(score_i)
+      p_i = u_i / sum_j u_j
+    """
+    i_t = tl.program_id(0)
+    i_v = tl.program_id(1)
+    i_bh = tl.program_id(2)
+
+    i_b = i_bh // H
+    i_h = i_bh % H
+
+    q_tok = (i_b * TQ + i_t)
+    k_head_base = (i_b * TK * H + i_h) * Kdim
+    v_head_base = (i_b * TK * H + i_h) * Vdim
+    bi_base = (i_b * TQ + i_t) * H * S + i_h * S
+
+    p_q = tl.make_block_ptr(
+        base=q + q_tok * HQ * Kdim,
+        shape=(HQ, Kdim),
+        strides=(Kdim, 1),
+        offsets=(i_h * G, 0),
+        block_shape=(G, BK),
+        order=(1, 0),
+    )
+    b_q = tl.load(p_q, boundary_check=(0, 1))
+    b_q = (b_q * scale).to(b_q.dtype)
+
+    b_o = tl.zeros([G, BV], dtype=tl.float32)
+    b_m = tl.full([G], float("-inf"), dtype=tl.float32)
+    b_acc = tl.zeros([G], dtype=tl.float32)
+
+    for s in range(S):
+        chap = tl.load(block_indices + bi_base + s).to(tl.int32)
+        tok0 = chap * BS
+        w = tl.load(block_weights + bi_base + s).to(tl.float32)
+        w = tl.maximum(w, 0.0)
+
+        if (tok0 >= 0) and (tok0 < TK) and (w > 0):
+            p_k = tl.make_block_ptr(
+                base=k + k_head_base + tok0 * H * Kdim,
+                shape=(Kdim, BS),
+                strides=(1, H * Kdim),
+                offsets=(0, 0),
+                block_shape=(BK, BS_PAD),
+                order=(0, 1),
+            )
+            p_v = tl.make_block_ptr(
+                base=v + v_head_base + tok0 * H * Vdim,
+                shape=(BS, Vdim),
+                strides=(H * Vdim, 1),
+                offsets=(0, i_v * BV),
+                block_shape=(BS_PAD, BV),
+                order=(1, 0),
+            )
+
+            b_k = tl.load(p_k, boundary_check=(0, 1))
+            b_v = tl.load(p_v, boundary_check=(0, 1))
+
+            b_s = mm_or_fallback(b_q, b_k, USE_DOT=USE_DOT)  # [G, BS]
+
+            offs_local = tl.arange(0, BS_PAD)
+            offs_global = tok0 + offs_local
+            valid = (offs_local < BS) & (offs_global < TK)
+            b_s = tl.where(valid[None, :], b_s, float("-inf"))
+
+            b_m_new = tl.maximum(b_m, tl.max(b_s, axis=1))
+            b_r = tl.exp(b_m - b_m_new)
+            b_p = tl.exp(b_s - b_m_new[:, None]) * w
+
+            b_acc = b_acc * b_r + tl.sum(b_p, axis=1)
+            b_o = b_o * b_r[:, None] + mm_or_fallback(b_p.to(b_q.dtype), b_v, USE_DOT=USE_DOT)  # [G, BV]
+
+            b_m = b_m_new
+
+    b_o = tl.where(b_acc[:, None] > 0, b_o / b_acc[:, None], 0.0)
+    b_lse = tl.where(b_acc > 0, b_m + tl.log(b_acc), 0.0)
+
+    p_o = tl.make_block_ptr(
+        base=o + q_tok * HQ * Vdim,
+        shape=(HQ, Vdim),
+        strides=(Vdim, 1),
+        offsets=(i_h * G, i_v * BV),
+        block_shape=(G, BV),
+        order=(1, 0),
+    )
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+
+    if i_v == 0:
+        tl.store(
+            lse + q_tok * HQ + i_h * G + tl.arange(0, G),
+            b_lse.to(lse.dtype.element_ty),
+        )
+
+
 # ---------------------------
 # Backward preprocess: delta = sum(o * do)
 # ---------------------------
@@ -1314,6 +1436,7 @@ def memory_cross_attn_forward(
     block_indices: torch.Tensor,    # [B, TQ, H, S]
     block_size: int,
     scale: Optional[float] = None,
+    block_weights: Optional[torch.Tensor] = None,  # [B, TQ, H, S]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     _check_cuda(q, "q"); _check_cuda(k, "k"); _check_cuda(v, "v"); _check_cuda(block_indices, "block_indices")
     _check_contiguous_lastdim(q, "q"); _check_contiguous_lastdim(k, "k"); _check_contiguous_lastdim(v, "v")
@@ -1330,6 +1453,15 @@ def memory_cross_attn_forward(
     S = block_indices.shape[-1]
     assert TK % block_size == 0, "TK must be divisible by block_size (chapter size) for clean chapter blocks."
     M = TK // block_size
+
+    if block_weights is not None:
+        _check_cuda(block_weights, "block_weights")
+        _check_contiguous_lastdim(block_weights, "block_weights")
+        if block_weights.shape != block_indices.shape:
+            raise ValueError(
+                f"block_weights must match block_indices shape [B,TQ,H,S], "
+                f"got weights={tuple(block_weights.shape)}, indices={tuple(block_indices.shape)}"
+            )
 
     if scale is None:
         scale = Kdim ** -0.5
@@ -1351,18 +1483,33 @@ def memory_cross_attn_forward(
     lse = torch.empty((B, TQ, HQ), device=q.device, dtype=torch.float32)
 
     grid = (TQ, NV, B * H)
-    mem_xattn_fwd_kernel[grid](
-        q=q, k=k, v=v,
-        o=o, lse=lse,
-        scale=scale,
-        block_indices=block_indices,
-        TQ=TQ, TK=TK,
-        H=H, HQ=HQ, G=G,
-        Kdim=Kdim, Vdim=Vdim,
-        S=S, BS=block_size, BS_PAD=BS_PAD,
-        BK=BK, BV=BV,
-        USE_DOT=USE_DOT,
-    )
+    if block_weights is None:
+        mem_xattn_fwd_kernel[grid](
+            q=q, k=k, v=v,
+            o=o, lse=lse,
+            scale=scale,
+            block_indices=block_indices,
+            TQ=TQ, TK=TK,
+            H=H, HQ=HQ, G=G,
+            Kdim=Kdim, Vdim=Vdim,
+            S=S, BS=block_size, BS_PAD=BS_PAD,
+            BK=BK, BV=BV,
+            USE_DOT=USE_DOT,
+        )
+    else:
+        mem_xattn_fwd_kernel_weighted[grid](
+            q=q, k=k, v=v,
+            o=o, lse=lse,
+            scale=scale,
+            block_indices=block_indices,
+            block_weights=block_weights.to(dtype=torch.float32),
+            TQ=TQ, TK=TK,
+            H=H, HQ=HQ, G=G,
+            Kdim=Kdim, Vdim=Vdim,
+            S=S, BS=block_size, BS_PAD=BS_PAD,
+            BK=BK, BV=BV,
+            USE_DOT=USE_DOT,
+        )
     return o, lse
 
 

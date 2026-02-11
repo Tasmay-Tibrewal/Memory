@@ -210,6 +210,8 @@ Current integration status in repository code:
 - Routed chapters are handled by sparse attention kernels loaded from `kernels-final/`.
 - Kernel choice is config-driven via `memory.token_routing_kernel_version` (`v1|v2|v3`, default `v2`).
 - If kernel execution is unsupported at runtime, the model uses an emulated sparse fallback path for correctness.
+- Per-token top-k router weights are applied as per-chapter weights (`u = w * exp(score)`) in the token-routing kernels (`v1|v2|v3`), including backward support for `dw`.
+- Optional native NSA forward (`FSA_LOCAL_USE_NSA_NATIVE_FWD=1`) does not support weights; weighted runs use the `memory_cross_attn` forward path.
 
 Decoding/inference note:
 

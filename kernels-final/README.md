@@ -71,6 +71,11 @@ Kernel selection is controlled by:
 
 - `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`).
 
+Per-token top-k router probabilities are applied as per-chapter weights in the routed branch (`u = w * exp(score)`):
+
+- Implemented in `kernel_v1.py`, `kernel_v2.py`, and `kernel_v3.py` (forward + backward, including gradients w.r.t. the weights).
+- Note: the optional native NSA forward (`FSA_LOCAL_USE_NSA_NATIVE_FWD=1`) does not support weights; weighted runs use the `memory_cross_attn` forward path for correctness.
+
 Current wiring uses:
 
 - v1 -> `kernels-final/kernel_v1.py`

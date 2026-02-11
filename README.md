@@ -443,6 +443,7 @@ For token-level routing into very large memory banks during train/prefill:
 - Implementation mixes:
   - dense shared-chapter attention (FlashAttention when available, otherwise PyTorch fallback)
   - sparse routed-chapter attention via selected `kernels-final` kernel (`v1/v2/v3`, default `v2`)
+- Per-token top-k router probabilities are applied as per-chapter weights in the routed branch (`u = w * exp(score)`); this is implemented in the `kernels-final` token-routing kernels (`v1|v2|v3`), including backward support for `dw`.
 - This repo also includes a broader kernel engineering workspace.
 
 - Detailed exploration, reports, and benchmarks: `kernels/`

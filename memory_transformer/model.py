@@ -541,7 +541,7 @@ class MemoryTransformer(nn.Module):
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
 
                         if strategy == "token":
-                            chapter_indices_global, _, router_losses = router.route_token_level(
+                            chapter_indices_global, chapter_weights_global, router_losses = router.route_token_level(
                                 hidden_states=hidden_states,
                                 return_losses=self.training,
                                 exclude_prefix_chapters=mem_cfg.num_shared_chapters,
@@ -593,6 +593,8 @@ class MemoryTransformer(nn.Module):
                                 "shared_memory": shared_memory,
                                 "routed_memory": routed_memory,
                                 "token_chapter_indices": chapter_indices_local.to(dtype=torch.int32),
+                                # Keep weights aligned to token_chapter_indices (same shape [B,T,topk]).
+                                "token_chapter_weights": chapter_weights_global.to(dtype=torch.float32),
                                 "tokens_per_chapter": int(tokens_per_chapter),
                                 "routed_scale": float(mem_cfg.routed_scaling_factor),
                                 "kernel_version": self.token_routing_kernel_version,

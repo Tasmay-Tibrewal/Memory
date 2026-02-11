@@ -172,24 +172,33 @@ def _ensure_dq_atomic_metadata(permute_results: dict, num_kv_heads: int, num_blo
 
     Fields created when missing:
       - valid_topk_idx_concat
+      - valid_topk_w_concat (only when weights are present)
       - valid_topk_idx_offsets
       - valid_lens_stack
       - valid_start_indices_stack
     """
-    if (
+    base_ok = (
         permute_results.get("valid_topk_idx_concat", None) is not None
         and permute_results.get("valid_topk_idx_offsets", None) is not None
         and permute_results.get("valid_lens_stack", None) is not None
         and permute_results.get("valid_start_indices_stack", None) is not None
-    ):
-        return permute_results
+    )
+    if base_ok:
+        has_w_list = permute_results.get("valid_topk_w_permuted_tile", None) is not None
+        if not has_w_list:
+            return permute_results
+        if permute_results.get("valid_topk_w_concat", None) is not None:
+            return permute_results
 
     valid_lens = permute_results.get("valid_lens", [])
     valid_start_indices = permute_results.get("valid_start_indices", [])
     valid_topk_idx_permuted_tile = permute_results.get("valid_topk_idx_permuted_tile", [])
+    valid_topk_w_permuted_tile = permute_results.get("valid_topk_w_permuted_tile", None)
 
     if len(valid_lens) == 0 or len(valid_start_indices) == 0 or len(valid_topk_idx_permuted_tile) == 0:
         permute_results["valid_topk_idx_concat"] = torch.empty((0,), dtype=torch.int32, device=device)
+        if valid_topk_w_permuted_tile is not None:
+            permute_results["valid_topk_w_concat"] = torch.empty((0,), dtype=torch.float32, device=device)
         permute_results["valid_topk_idx_offsets"] = torch.zeros((num_kv_heads,), dtype=torch.int32, device=device)
         permute_results["valid_lens_stack"] = torch.zeros((num_kv_heads, num_blocks), dtype=torch.int32, device=device)
         permute_results["valid_start_indices_stack"] = torch.zeros((num_kv_heads, num_blocks), dtype=torch.int32, device=device)
@@ -204,10 +213,17 @@ def _ensure_dq_atomic_metadata(permute_results: dict, num_kv_heads: int, num_blo
     total_sel = int(per_kh_counts.sum().item())
     if total_sel > 0:
         concat = torch.cat(valid_topk_idx_permuted_tile, dim=0).contiguous()
+        if valid_topk_w_permuted_tile is not None and all(x is not None for x in valid_topk_w_permuted_tile):
+            w_concat = torch.cat(valid_topk_w_permuted_tile, dim=0).to(dtype=torch.float32).contiguous()
+        else:
+            w_concat = None
     else:
         concat = torch.empty((0,), dtype=torch.int32, device=device)
+        w_concat = torch.empty((0,), dtype=torch.float32, device=device) if valid_topk_w_permuted_tile is not None else None
 
     permute_results["valid_topk_idx_concat"] = concat
+    if w_concat is not None:
+        permute_results["valid_topk_w_concat"] = w_concat
     permute_results["valid_topk_idx_offsets"] = offsets
     permute_results["valid_lens_stack"] = valid_lens_stack
     permute_results["valid_start_indices_stack"] = valid_start_indices_stack
@@ -1483,6 +1499,54 @@ def block_to_token_kernel(
     tl.store(result_ptrs, pid_j[None, :], mask=mask)
 
 
+@triton.jit
+def block_to_token_kernel_with_weights(
+    topk_idx_ptr,
+    topk_w_ptr,
+    result_idx_ptr,
+    result_w_ptr,
+    N_token,
+    K,
+    min_block_id,
+    max_block_id,
+    padding_value,
+    ts_h,
+    ts_b,
+    ts_n,
+    rs_h,
+    rs_b,
+    rs_n,
+    rws_h,
+    rws_b,
+    rws_n,
+    num_q_loops: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    pid_h = 0
+    offs = tl.arange(0, BLOCK_K)
+    offs_q = tl.arange(0, num_q_loops)
+    pid_j = pid * num_q_loops + offs_q
+
+    topk_idx_offset = pid_h * ts_h + pid_j[None, :] * K + offs[:, None]
+    block_ids = tl.load(
+        topk_idx_ptr + topk_idx_offset,
+        mask=(pid_j < N_token)[None, :] & (offs < K)[:, None],
+        other=padding_value,
+    )
+    w = tl.load(
+        topk_w_ptr + topk_idx_offset,
+        mask=(pid_j < N_token)[None, :] & (offs < K)[:, None],
+        other=0.0,
+    ).to(tl.float32)
+
+    result_idx_ptrs = result_idx_ptr + pid_h * rs_h + block_ids * N_token + pid_j[None, :]
+    result_w_ptrs = result_w_ptr + pid_h * rws_h + block_ids * N_token + pid_j[None, :]
+    mask = (block_ids >= 0) & (block_ids != padding_value) & (pid_j < N_token)[None, :]
+    tl.store(result_idx_ptrs, pid_j[None, :], mask=mask)
+    tl.store(result_w_ptrs, w, mask=mask)
+
+
 def build_block_to_token_triton(
     result: torch.Tensor, topk_idx: torch.Tensor, min_block_id: int, max_block_id: int, padding_value: int = -1
 ):
@@ -1531,6 +1595,57 @@ def build_block_to_token_triton(
     )
     return result
 
+
+def build_block_to_token_with_weights_triton(
+    result_idx: torch.Tensor,
+    result_w: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_w: torch.Tensor,
+    min_block_id: int,
+    max_block_id: int,
+    padding_value: int = -1,
+):
+    """
+    Weighted variant of build_block_to_token_triton.
+
+    Writes:
+      result_idx: [num_heads, num_blocks, N_token] with token indices (or -1)
+      result_w:   [num_heads, num_blocks, N_token] with per-(block,token) weights (0 for padding)
+    """
+    assert topk_idx.ndim == 3
+    assert topk_w.ndim == 3
+    assert topk_w.shape == topk_idx.shape
+    assert padding_value == -1
+    num_heads, N_token, TopK = topk_idx.shape
+
+    num_q_loops = 4
+    grid = (triton.cdiv(N_token, num_q_loops),)
+    BLOCK_K = triton.next_power_of_2(TopK)
+    block_to_token_kernel_with_weights[grid](
+        topk_idx,
+        topk_w,
+        result_idx,
+        result_w,
+        N_token,
+        TopK,
+        min_block_id,
+        max_block_id,
+        padding_value,
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        result_idx.stride(0),
+        result_idx.stride(1),
+        result_idx.stride(2),
+        result_w.stride(0),
+        result_w.stride(1),
+        result_w.stride(2),
+        num_q_loops,
+        BLOCK_K=BLOCK_K,
+        num_warps=2,
+        num_stages=3,
+    )
+    return result_idx, result_w
 
 @triton.jit
 def reduce_kernel(
@@ -1794,6 +1909,7 @@ def forward_kernel_opt(
     l_ij_ptr,  # h x b x n
     token_index_mapping_ptr,
     selected_tokens_ptr,  # selected_tokens: sum(valid_lens),
+    selected_weights_ptr,  # selected_weights: sum(valid_lens),
     valid_lens_ptr,  # valid_lens: (h x b),
     valid_start_indices_ptr,  # valid_start_indices: (h x b),
     min_block_id,
@@ -1838,6 +1954,7 @@ def forward_kernel_opt(
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
     BLOCK_SIZE_D: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     # get batch id and head id
     pid_block = tl.program_id(0) // num_heads  # block id
@@ -1932,6 +2049,10 @@ def forward_kernel_opt(
 
             # load m_ij and compute l_ij
             p = tl.exp2(qk - m_ij[:, None])
+            if HAS_WEIGHTS:
+                w = tl.load(selected_weights_ptr + st_offs, mask=st_mask, other=0.0).to(tl.float32)
+                w = tl.maximum(w, 0.0)
+                p = p * w[:, None]
             l_ij = tl.sum(p, axis=1)
 
             # load token index mapping
@@ -1975,6 +2096,7 @@ def _topk_sparse_attention_fwd_opt(
     k: torch.Tensor,  # [total_len, num_heads, head_dim]
     v: torch.Tensor,  # [total_len, num_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_heads, total_len, topk]
+    topk_w: Optional[torch.Tensor],  # [num_heads, total_len, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -2011,6 +2133,7 @@ def _topk_sparse_attention_fwd_opt(
             k[k_start:k_end],
             v[k_start:k_end],
             topk_idx[:, q_start:q_end],
+            topk_w[:, q_start:q_end] if topk_w is not None else None,
             block_size,
             cu_q_local,
             cu_k_local,
@@ -2034,6 +2157,7 @@ def _topk_sparse_attention_fwd_opt(
             k[k_start:k_end],
             v[k_start:k_end],
             topk_idx[:, q_start:q_end],
+            topk_w[:, q_start:q_end] if topk_w is not None else None,
             block_size,
             cu_q_local,
             cu_k_local,
@@ -2197,6 +2321,7 @@ def qkv_kernel(
     l_ij,
     token_index_mapping,
     valid_topk_idx_permuted_tile,
+    valid_topk_w_permuted_tile,
     valid_lens,
     valid_start_indices,
     compute_min_block_id,
@@ -2238,6 +2363,7 @@ def qkv_kernel(
         l_ij,
         token_index_mapping,
         valid_topk_idx_permuted_tile,
+        valid_topk_w_permuted_tile if valid_topk_w_permuted_tile is not None else valid_topk_idx_permuted_tile,
         valid_lens,
         valid_start_indices,
         compute_min_block_id,
@@ -2277,6 +2403,7 @@ def qkv_kernel(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
+        HAS_WEIGHTS=(valid_topk_w_permuted_tile is not None),
         num_stages=num_stages,
         num_warps=num_warps,
     )
@@ -2390,6 +2517,7 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
     k: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     v: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_len_q, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len_q, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -2436,6 +2564,11 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
     topk = topk_idx.shape[-1]
     real_num_blocks = math.ceil(total_len_k / block_size)
     topk_idx, _ = _sanitize_topk_block_indices(topk_idx, real_num_blocks=real_num_blocks)
+    if topk_w is not None:
+        if topk_w.shape != topk_idx.shape:
+            raise ValueError("topk_w must match topk_idx shape [H, N, S].")
+        topk_w = topk_w.to(dtype=torch.float32)
+        topk_w = torch.where(topk_idx >= 0, topk_w, torch.zeros_like(topk_w))
     num_blocks_full = max(real_num_blocks, topk)
 
     valid_lens_all_full = torch.zeros((num_kv_heads, num_blocks_full), dtype=torch.int32, device=q.device)
@@ -2477,26 +2610,51 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
     lse_full = torch.full((num_q_heads, total_len_q), float("-inf"), dtype=torch.float32, device=q.device)
 
     topk_idx_permuted_tile = torch.full((1, num_blocks, total_len_q), -1, dtype=torch.int32, device=q.device)
+    topk_w_permuted_tile = None
+    if topk_w is not None:
+        topk_w_permuted_tile = torch.zeros((1, num_blocks, total_len_q), dtype=torch.float32, device=q.device)
     permute_results = {
         "global_max_valid_tokens": global_max_valid_tokens,
         "num_blocks": num_blocks,
         "num_blocks_full": num_blocks_full,
         "real_num_blocks": real_num_blocks,
         "valid_topk_idx_permuted_tile": [],
+        "valid_topk_w_permuted_tile": [],
         "valid_lens_all": valid_lens_all_full,
         "valid_lens": [],
         "valid_start_indices": [],
     }
     for kh in range(num_kv_heads):
         topk_idx_tile = topk_idx[kh:kh + 1]
-        build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
-        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[topk_idx_permuted_tile != -1]
+        if topk_w is None:
+            build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
+        else:
+            assert topk_w_permuted_tile is not None
+            topk_w_tile = topk_w[kh:kh + 1].to(torch.float32).contiguous()
+            build_block_to_token_with_weights_triton(
+                topk_idx_permuted_tile,
+                topk_w_permuted_tile,
+                topk_idx_tile,
+                topk_w_tile,
+                0,
+                num_blocks,
+                padding_value=-1,
+            )
+        mask_valid = topk_idx_permuted_tile != -1
+        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[mask_valid]
+        valid_topk_w_permuted_tile = None
+        if topk_w is not None:
+            assert topk_w_permuted_tile is not None
+            valid_topk_w_permuted_tile = topk_w_permuted_tile[mask_valid].to(torch.float32)
         valid_lens = valid_lens_all[kh]
         valid_start_indices = torch.nn.functional.pad(valid_lens.cumsum(0)[:-1], (1, 0), value=0)
         permute_results["valid_topk_idx_permuted_tile"].append(valid_topk_idx_permuted_tile)
+        permute_results["valid_topk_w_permuted_tile"].append(valid_topk_w_permuted_tile)
         permute_results["valid_lens"].append(valid_lens)
         permute_results["valid_start_indices"].append(valid_start_indices)
         topk_idx_permuted_tile.fill_(-1)
+        if topk_w_permuted_tile is not None:
+            topk_w_permuted_tile.zero_()
 
     # Build one concatenated selected-token list; each query head uses offsets into this list.
     kh_offsets = torch.zeros((num_kv_heads,), dtype=torch.int32, device=q.device)
@@ -2509,6 +2667,9 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
         return o_full, lse_full, permute_results
 
     selected_tokens_all = torch.cat(permute_results["valid_topk_idx_permuted_tile"], dim=0).contiguous()
+    selected_weights_all = None
+    if topk_w is not None:
+        selected_weights_all = torch.cat(permute_results["valid_topk_w_permuted_tile"], dim=0).contiguous()
     valid_lens_stack = torch.stack(permute_results["valid_lens"], dim=0).contiguous()  # [HK, num_blocks]
     valid_start_stack = torch.stack(permute_results["valid_start_indices"], dim=0).contiguous()  # [HK, num_blocks]
 
@@ -2541,6 +2702,9 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
 
         for kh in range(num_kv_heads):
             valid_topk_idx_permuted_tile = permute_results["valid_topk_idx_permuted_tile"][kh]
+            valid_topk_w_permuted_tile = None
+            if "valid_topk_w_permuted_tile" in permute_results:
+                valid_topk_w_permuted_tile = permute_results["valid_topk_w_permuted_tile"][kh]
             valid_lens = permute_results["valid_lens"][kh]
             valid_start_indices = permute_results["valid_start_indices"][kh]
             if int(valid_topk_idx_permuted_tile.numel()) <= 0:
@@ -2653,6 +2817,7 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
                         l_ij,
                         token_index_mapping_tile,
                         valid_topk_idx_permuted_tile,
+                        valid_topk_w_permuted_tile,
                         cur_valid_lens,
                         cur_valid_start_indices,
                         compute_min_block_id,
@@ -2789,6 +2954,7 @@ def _topk_sparse_attention_fwd_opt_per_seq_all_heads(
                 l_ij,
                 token_index_mapping_qh,
                 selected_tokens_all,
+                selected_weights_all,
                 cur_valid_lens,
                 cur_valid_start_indices,
                 compute_min_block_id,
@@ -2839,6 +3005,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     k: torch.Tensor,  # [total_len, num_kv_heads, head_dim]
     v: torch.Tensor,  # [total_len, num_kv_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_heads, total_len, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -2917,6 +3084,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
             k=k,
             v=v,
             topk_idx=topk_idx,
+            topk_w=topk_w,
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
@@ -2934,6 +3102,11 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     TOPK = topk_idx.shape[-1]
     real_num_blocks = math.ceil(total_len_k / block_size)
     topk_idx, _ = _sanitize_topk_block_indices(topk_idx, real_num_blocks=real_num_blocks)
+    if topk_w is not None:
+        if topk_w.shape != topk_idx.shape:
+            raise ValueError("topk_w must match topk_idx shape [H, N, S].")
+        topk_w = topk_w.to(dtype=torch.float32)
+        topk_w = torch.where(topk_idx >= 0, topk_w, torch.zeros_like(topk_w))
     num_blocks_full = max(real_num_blocks, TOPK)
     valid_lens_all_full = torch.zeros((num_kv_heads, num_blocks_full), dtype=torch.int32, device=q.device)
     for kh in range(num_kv_heads):
@@ -2963,6 +3136,9 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     lse_full = torch.full((num_heads, total_len_q), float("-inf"), dtype=torch.float32, device=q.device)
 
     topk_idx_permuted_tile = torch.full((1, num_blocks, total_len_q), -1, dtype=torch.int32, device=q.device)
+    topk_w_permuted_tile = None
+    if topk_w is not None:
+        topk_w_permuted_tile = torch.zeros((1, num_blocks, total_len_q), dtype=torch.float32, device=q.device)
     token_index_mapping = torch.empty((1, num_blocks, total_len_q), dtype=torch.int32, device=q.device)
 
     o_tiles_first = torch.empty((head_tile, 1, total_len_q, head_dim), dtype=torch.bfloat16, device=q.device)
@@ -2986,6 +3162,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
         "num_blocks_full": num_blocks_full,
         "real_num_blocks": real_num_blocks,
         "valid_topk_idx_permuted_tile": [],
+        "valid_topk_w_permuted_tile": [],
         "valid_lens_all": valid_lens_all_full,
         "valid_lens": [],
         "valid_start_indices": [],
@@ -2993,13 +3170,32 @@ def _topk_sparse_attention_fwd_opt_per_seq(
 
     for kh in range(num_kv_heads):
         topk_idx_tile_base = topk_idx[kh:kh + 1]
-        build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile_base, 0, num_blocks, padding_value=-1)
-        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[topk_idx_permuted_tile != -1]
+        if topk_w is None:
+            build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile_base, 0, num_blocks, padding_value=-1)
+        else:
+            assert topk_w_permuted_tile is not None
+            topk_w_tile = topk_w[kh:kh + 1].to(torch.float32).contiguous()
+            build_block_to_token_with_weights_triton(
+                topk_idx_permuted_tile,
+                topk_w_permuted_tile,
+                topk_idx_tile_base,
+                topk_w_tile,
+                0,
+                num_blocks,
+                padding_value=-1,
+            )
+        mask_valid = topk_idx_permuted_tile != -1
+        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[mask_valid]
+        valid_topk_w_permuted_tile = None
+        if topk_w is not None:
+            assert topk_w_permuted_tile is not None
+            valid_topk_w_permuted_tile = topk_w_permuted_tile[mask_valid].to(torch.float32)
         valid_lens = valid_lens_all[kh]
         valid_start_indices = torch.nn.functional.pad(valid_lens.cumsum(0)[:-1], (1, 0), value=0)
         index_mapping(token_index_mapping, valid_topk_idx_permuted_tile, valid_lens, valid_start_indices, num_blocks)
 
         permute_results["valid_topk_idx_permuted_tile"].append(valid_topk_idx_permuted_tile)
+        permute_results["valid_topk_w_permuted_tile"].append(valid_topk_w_permuted_tile)
         permute_results["valid_lens"].append(valid_lens)
         permute_results["valid_start_indices"].append(valid_start_indices)
 
@@ -3007,6 +3203,8 @@ def _topk_sparse_attention_fwd_opt_per_seq(
         query_tokens_count = int(active_counts[kh].item())
         if query_tokens_count <= 0:
             fused_fill(topk_idx_permuted_tile, m_i_cur_tiles[:1])
+            if topk_w_permuted_tile is not None:
+                topk_w_permuted_tile.zero_()
             continue
 
         for sh0 in range(0, gqa_deg, head_tile):
@@ -3101,6 +3299,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
                     l_ij,
                     token_index_mapping_tile,
                     valid_topk_idx_permuted_tile,
+                    valid_topk_w_permuted_tile,
                     cur_valid_lens,
                     cur_valid_start_indices,
                     compute_min_block_id,
@@ -3140,12 +3339,15 @@ def _topk_sparse_attention_fwd_opt_per_seq(
             lse_full[qh_start:qh_end] = lse
 
         fused_fill(topk_idx_permuted_tile, m_i_cur_tiles[:1])
+        if topk_w_permuted_tile is not None:
+            topk_w_permuted_tile.zero_()
 
     return o_full, lse_full, permute_results
 
 
 def _build_permute_results_per_seq_for_bwd(
     topk_idx: torch.Tensor,  # [num_kv_heads, total_len_q, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len_q, topk] or None
     total_len_k: int,
     block_size: int,
 ):
@@ -3156,6 +3358,11 @@ def _build_permute_results_per_seq_for_bwd(
     num_kv_heads = topk_idx.shape[0]
     real_num_blocks = math.ceil(total_len_k / block_size)
     topk_idx, _ = _sanitize_topk_block_indices(topk_idx, real_num_blocks=real_num_blocks)
+    if topk_w is not None:
+        if topk_w.shape != topk_idx.shape:
+            raise ValueError("topk_w must match topk_idx shape [H, N, S].")
+        topk_w = topk_w.to(dtype=torch.float32)
+        topk_w = torch.where(topk_idx >= 0, topk_w, torch.zeros_like(topk_w))
     num_blocks_full = max(real_num_blocks, topk)
 
     valid_lens_all_full = torch.zeros((num_kv_heads, num_blocks_full), dtype=torch.int32, device=topk_idx.device)
@@ -3176,6 +3383,9 @@ def _build_permute_results_per_seq_for_bwd(
 
     global_max_valid_tokens = valid_lens_all[:, 1:].max() if num_blocks > 1 else valid_lens_all.max()
     topk_idx_permuted_tile = torch.full((1, num_blocks, total_len_q), -1, dtype=torch.int32, device=topk_idx.device)
+    topk_w_permuted_tile = None
+    if topk_w is not None:
+        topk_w_permuted_tile = torch.zeros((1, num_blocks, total_len_q), dtype=torch.float32, device=topk_idx.device)
 
     permute_results = {
         "global_max_valid_tokens": global_max_valid_tokens,
@@ -3183,6 +3393,7 @@ def _build_permute_results_per_seq_for_bwd(
         "num_blocks_full": num_blocks_full,
         "real_num_blocks": real_num_blocks,
         "valid_topk_idx_permuted_tile": [],
+        "valid_topk_w_permuted_tile": [],
         "valid_lens_all": valid_lens_all_full,
         "valid_lens": [],
         "valid_start_indices": [],
@@ -3190,16 +3401,37 @@ def _build_permute_results_per_seq_for_bwd(
 
     for kh in range(num_kv_heads):
         topk_idx_tile = topk_idx[kh:kh + 1]
-        build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
-        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[topk_idx_permuted_tile != -1]
+        if topk_w is None:
+            build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
+        else:
+            assert topk_w_permuted_tile is not None
+            topk_w_tile = topk_w[kh:kh + 1].to(torch.float32).contiguous()
+            build_block_to_token_with_weights_triton(
+                topk_idx_permuted_tile,
+                topk_w_permuted_tile,
+                topk_idx_tile,
+                topk_w_tile,
+                0,
+                num_blocks,
+                padding_value=-1,
+            )
+        mask_valid = topk_idx_permuted_tile != -1
+        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[mask_valid]
+        valid_topk_w_permuted_tile = None
+        if topk_w is not None:
+            assert topk_w_permuted_tile is not None
+            valid_topk_w_permuted_tile = topk_w_permuted_tile[mask_valid].to(torch.float32)
         valid_lens = valid_lens_all[kh]
         valid_start_indices = torch.nn.functional.pad(valid_lens.cumsum(0)[:-1], (1, 0), value=0)
 
         permute_results["valid_topk_idx_permuted_tile"].append(valid_topk_idx_permuted_tile)
+        permute_results["valid_topk_w_permuted_tile"].append(valid_topk_w_permuted_tile)
         permute_results["valid_lens"].append(valid_lens)
         permute_results["valid_start_indices"].append(valid_start_indices)
 
         topk_idx_permuted_tile.fill_(-1)
+        if topk_w_permuted_tile is not None:
+            topk_w_permuted_tile.zero_()
 
     # P0.3: precompute concatenated routed-token buffers and offsets for atomic dQ path.
     permute_results = _ensure_dq_atomic_metadata(
@@ -3217,6 +3449,7 @@ def _build_permute_results_for_bwd(
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    topk_w: Optional[torch.Tensor],
 ):
     """
     Varlen wrapper for backward permutation metadata.
@@ -3226,9 +3459,11 @@ def _build_permute_results_for_bwd(
     k_ranges = _cu_seqlens_to_ranges(cu_seqlens_k)
     for i, ((q_start, q_end), (k_start, k_end)) in enumerate(zip(q_ranges, k_ranges)):
         topk_idx_seq = topk_idx[:, q_start:q_end].contiguous()
+        topk_w_seq = topk_w[:, q_start:q_end].contiguous() if topk_w is not None else None
         results.append(
             _build_permute_results_per_seq_for_bwd(
                 topk_idx=topk_idx_seq,
+                topk_w=topk_w_seq,
                 total_len_k=(k_end - k_start),
                 block_size=block_size,
             )
@@ -3270,6 +3505,7 @@ def _topk_sparse_attention_fwd_nsa_style(
     k: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     v: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_len_q, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len_q, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -3307,7 +3543,9 @@ def _topk_sparse_attention_fwd_nsa_style(
         small_g_mode = "pad"
     if small_g_mode == "fma":
         pad_small_g_to_16 = False
-    native_nsa_fwd = _try_get_native_nsa_parallel_fwd() if use_native_nsa_fwd else None
+    # Native NSA selected-fwd currently does not support per-block weights. When weights are present,
+    # force the memory_cross_attn path for correctness.
+    native_nsa_fwd = _try_get_native_nsa_parallel_fwd() if (use_native_nsa_fwd and topk_w is None) else None
 
     max_tokens_env = os.getenv("FSA_LOCAL_FWD_MAX_TOKENS_PER_CALL", "auto").strip().lower()
     torch_chunk_env = os.getenv("FSA_LOCAL_TORCH_CHUNK_TOKENS", "512").strip().lower()
@@ -3317,6 +3555,7 @@ def _topk_sparse_attention_fwd_nsa_style(
         k_seq: torch.Tensor,       # [1, Tk, HK, D]
         v_seq: torch.Tensor,       # [1, Tk, HK, D]
         bi_chunk: torch.Tensor,    # [1, Tq, HK, S]
+        bw_chunk: Optional[torch.Tensor],  # [1, Tq, HK, S] or None
     ):
         """
         Experimental small-G forward implemented with PyTorch matmul/softmax.
@@ -3353,6 +3592,17 @@ def _topk_sparse_attention_fwd_nsa_style(
         scores = torch.matmul(qg, k_sel.transpose(-1, -2)) * float(sm_scale)     # [Tq, HK, G, Ksel]
         score_mask = valid_tok.unsqueeze(2)                                       # [Tq, HK, 1, Ksel]
         scores = scores.masked_fill(~score_mask, float("-inf"))
+        if bw_chunk is not None:
+            # Apply per-chapter weights uniformly across that chapter's tokens (equivalent to +log(w) on logits).
+            w = bw_chunk[0].to(dtype=torch.float32)  # [Tq, HK, S]
+            w = w.unsqueeze(-1).expand(tqa, hk, s, block_size).reshape(tqa, hk, ksel)  # [Tq, HK, Ksel]
+            logw = torch.where(
+                w > 0,
+                torch.log(w),
+                torch.full_like(w, float("-inf")),
+            )
+            scores = scores.to(dtype=torch.float32) + logw.unsqueeze(2)  # [Tq, HK, G, Ksel]
+            scores = scores.to(dtype=q_chunk.dtype)
 
         lse_chunk_e = torch.logsumexp(scores, dim=-1)                             # [Tq, HK, G]
         probs = torch.softmax(scores, dim=-1)
@@ -3378,10 +3628,15 @@ def _topk_sparse_attention_fwd_nsa_style(
         k_len_seq = k_end - k_start
         real_num_blocks_seq = math.ceil(max(0, k_len_seq) / block_size)
         topk_idx_seq = topk_idx[:, q_start:q_end, :].contiguous()   # [HK, Tq, S]
+        topk_w_seq = topk_w[:, q_start:q_end, :].contiguous() if topk_w is not None else None
         topk_idx_seq, _ = _sanitize_topk_block_indices(
             topk_idx_seq,
             real_num_blocks=real_num_blocks_seq,
         )
+        if topk_w_seq is not None:
+            if topk_w_seq.dtype != torch.float32:
+                topk_w_seq = topk_w_seq.to(dtype=torch.float32)
+            topk_w_seq = torch.where(topk_idx_seq >= 0, topk_w_seq, torch.zeros_like(topk_w_seq))
 
         if native_nsa_fwd is not None:
             # Native NSA selected-fwd requires q/k/v to share the same timeline length.
@@ -3464,6 +3719,14 @@ def _topk_sparse_attention_fwd_nsa_style(
             .contiguous()
             .unsqueeze(0)
         )                                                           # [1, Tq_active, HK, S]
+        bw_seq = None
+        if topk_w_seq is not None:
+            bw_seq = (
+                topk_w_seq[:, query_start_idx: query_start_idx + query_tokens_count, :]
+                .permute(1, 0, 2)
+                .contiguous()
+                .unsqueeze(0)
+            )                                                       # [1, Tq_active, HK, S]
 
         # P1.1: optional preprocess-compaction (compact selected chapters once per sequence).
         # This reduces forward-side random access in long sparse routes.
@@ -3525,6 +3788,7 @@ def _topk_sparse_attention_fwd_nsa_style(
             t1 = min(tqa_total, t0 + safe_tokens)
             q_chunk = q_seq[:, t0:t1].contiguous()
             bi_chunk = bi_seq[:, t0:t1].contiguous()
+            bw_chunk = bw_seq[:, t0:t1].contiguous() if bw_seq is not None else None
             used_legacy_pad_path = False
 
             if use_torch_small_g:
@@ -3533,6 +3797,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                     k_seq=k_seq,
                     v_seq=v_seq,
                     bi_chunk=bi_chunk,
+                    bw_chunk=bw_chunk,
                 )
             else:
                 if use_packed_nsa_chunk:
@@ -3543,6 +3808,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                     head_tile_packed = max(1, min(head_tile_packed, gqa_deg))
                     for kh_i in range(hk):
                         bi_base = bi_chunk[:, :, kh_i:kh_i + 1, :].contiguous()
+                        bw_base = bw_chunk[:, :, kh_i:kh_i + 1, :].contiguous() if bw_chunk is not None else None
                         k_base = k_seq[:, :, kh_i:kh_i + 1, :]
                         v_base = v_seq[:, :, kh_i:kh_i + 1, :]
                         for sh0 in range(0, gqa_deg, head_tile_packed):
@@ -3561,6 +3827,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                                 k=k_base,
                                 v=v_base,
                                 block_indices=bi_base,
+                                block_weights=bw_base,
                                 block_size=block_size,
                                 scale=sm_scale,
                             )
@@ -3590,6 +3857,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                         k=k_seq,
                         v=v_seq,
                         block_indices=bi_chunk,
+                        block_weights=bw_chunk,
                         block_size=block_size,
                         scale=sm_scale,
                     )
@@ -3622,6 +3890,7 @@ def dq_compute_kernel(
     dq_tiles_ptr,
     token_index_mapping_ptr,
     selected_tokens_ptr,
+    selected_weights_ptr,
     valid_lens_ptr,
     valid_start_indices_ptr,
     cur_max_valid_tokens,
@@ -3659,6 +3928,7 @@ def dq_compute_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     DISABLE_CAUSAL_MASK: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     pid_block_h = tl.program_id(0)
     pid_h = pid_block_h % head_tile
@@ -3733,6 +4003,10 @@ def dq_compute_kernel(
             if not DISABLE_CAUSAL_MASK:
                 qk += tl.where((st[:, None] >= c + off_k[None, :]), 0, float("-inf"))
             p = tl.exp2(qk - lse)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
+            if HAS_WEIGHTS:
+                w = tl.load(selected_weights_ptr + st_offs, mask=st_mask, other=0.0).to(tl.float32)
+                w = tl.maximum(w, 0.0)
+                p = p * w[:, None]
             dp = tl.dot(do, v)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
             ds = sm_scale * p * (dp - d)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
             ds = ds.to(q.dtype)
@@ -3762,6 +4036,7 @@ def dq_compute_atomic_kernel(
     do_ptr,
     dq_accum_ptr,           # float32 [N, H, D]
     selected_tokens_ptr,
+    selected_weights_ptr,
     valid_lens_ptr,
     valid_start_indices_ptr,
     cur_max_valid_tokens,
@@ -3795,6 +4070,7 @@ def dq_compute_atomic_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     DISABLE_CAUSAL_MASK: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     pid_block_h = tl.program_id(0)
     pid_h = pid_block_h % head_tile
@@ -3859,6 +4135,10 @@ def dq_compute_atomic_kernel(
                 qk += tl.where((st[:, None] >= c + off_k[None, :]), 0, float("-inf"))
 
             p = tl.exp2(qk - lse)
+            if HAS_WEIGHTS:
+                w = tl.load(selected_weights_ptr + st_offs, mask=st_mask, other=0.0).to(tl.float32)
+                w = tl.maximum(w, 0.0)
+                p = p * w[:, None]
             dp = tl.dot(do, v)
             ds = sm_scale * p * (dp - d)
             ds = ds.to(q.dtype)
@@ -3964,6 +4244,7 @@ def backward_dq_opt(
     k,  # [total_len, num_k_heads, head_dim]
     v,  # [total_len, num_k_heads, head_dim]
     topk_idx,  # [num_k_heads, total_len, topk]
+    topk_w,  # [num_k_heads, total_len, topk] or None
     lse,  # [num_heads, total_len]
     delta,  # [num_heads, total_len]
     do,  # [total_len, num_heads, head_dim]
@@ -3986,6 +4267,11 @@ def backward_dq_opt(
         Fast path avoids loop overhead when there is only one sequence.
     """
     expected_seqs = int(cu_seqlens_q.numel() - 1)
+    if topk_w is not None:
+        for item in (permute_results or []):
+            if not isinstance(item, dict) or "valid_topk_w_permuted_tile" not in item:
+                permute_results = None
+                break
     if _permute_results_need_rebuild(permute_results) or (
         not isinstance(permute_results, (list, tuple))
     ) or len(permute_results) != expected_seqs:
@@ -3994,6 +4280,7 @@ def backward_dq_opt(
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
+            topk_w=topk_w,
         )
 
     q_ranges = _cu_seqlens_to_ranges(cu_seqlens_q)
@@ -4019,6 +4306,7 @@ def backward_dq_opt(
             k[k_start:k_end],
             v[k_start:k_end],
             topk_idx[:, q_start:q_end],
+            topk_w[:, q_start:q_end] if topk_w is not None else None,
             lse[:, q_start:q_end],
             delta[:, q_start:q_end],
             do[q_start:q_end],
@@ -4049,6 +4337,7 @@ def backward_dq_opt(
             k[k_start:k_end],
             v[k_start:k_end],
             topk_idx[:, q_start:q_end],
+            topk_w[:, q_start:q_end] if topk_w is not None else None,
             lse[:, q_start:q_end],
             delta[:, q_start:q_end],
             do[q_start:q_end],
@@ -4075,6 +4364,7 @@ def backward_dq_opt_per_seq(
     k,  # [total_len_k, num_k_heads, head_dim]
     v,  # [total_len_k, num_k_heads, head_dim]
     topk_idx,  # [num_k_heads, total_len, topk]
+    topk_w,  # [num_k_heads, total_len, topk] or None
     lse,  # [num_heads, total_len]
     delta,  # [num_heads, total_len]
     do,  # [total_len, num_heads, head_dim]
@@ -4219,6 +4509,7 @@ def backward_dq_opt_per_seq(
         )
         # P0.3: consume prebuilt metadata to avoid host-side per-head orchestration.
         selected_tokens_all = permute_results["valid_topk_idx_concat"]
+        selected_weights_all = permute_results.get("valid_topk_w_concat", None)
         kh_offsets = permute_results["valid_topk_idx_offsets"]
         valid_lens_stack = permute_results["valid_lens_stack"]
         valid_start_stack = permute_results["valid_start_indices_stack"]
@@ -4317,6 +4608,7 @@ def backward_dq_opt_per_seq(
                 do_tile,
                 dq_accum_tile,
                 selected_tokens_all,
+                selected_weights_all if selected_weights_all is not None else selected_tokens_all,
                 valid_lens_tile,
                 valid_start_indices_tile,
                 cur_max_valid_tokens,
@@ -4350,6 +4642,7 @@ def backward_dq_opt_per_seq(
                 BLOCK_SIZE_K=BLOCK_SIZE_K,
                 BLOCK_SIZE_D=BLOCK_SIZE_D,
                 DISABLE_CAUSAL_MASK=disable_causal_mask,
+                HAS_WEIGHTS=(selected_weights_all is not None),
                 num_warps=num_warps,
                 num_stages=num_stages,
             )
@@ -4359,6 +4652,9 @@ def backward_dq_opt_per_seq(
 
     for kh in range(num_k_heads):
         valid_topk_idx_permuted_tile = permute_results["valid_topk_idx_permuted_tile"][kh]
+        valid_topk_w_permuted_tile = None
+        if "valid_topk_w_permuted_tile" in permute_results:
+            valid_topk_w_permuted_tile = permute_results["valid_topk_w_permuted_tile"][kh]
         valid_lens = permute_results["valid_lens"][kh]
         valid_start_indices = permute_results["valid_start_indices"][kh]
         # Build token->rank mapping for this KV head (shared across G query heads).
@@ -4460,6 +4756,7 @@ def backward_dq_opt_per_seq(
                         do_tile,
                         dq_accum_tile,
                         valid_topk_idx_permuted_tile,
+                        valid_topk_w_permuted_tile if valid_topk_w_permuted_tile is not None else valid_topk_idx_permuted_tile,
                         cur_valid_lens,
                         cur_valid_start_indices,
                         cur_max_valid_tokens,
@@ -4493,6 +4790,7 @@ def backward_dq_opt_per_seq(
                         BLOCK_SIZE_K=BLOCK_SIZE_K,
                         BLOCK_SIZE_D=BLOCK_SIZE_D,
                         DISABLE_CAUSAL_MASK=disable_causal_mask,
+                        HAS_WEIGHTS=(valid_topk_w_permuted_tile is not None),
                         num_warps=num_warps,
                         num_stages=num_stages,
                     )
@@ -4507,6 +4805,7 @@ def backward_dq_opt_per_seq(
                         dq_buffer,
                         token_index_mapping_tile,
                         valid_topk_idx_permuted_tile,
+                        valid_topk_w_permuted_tile if valid_topk_w_permuted_tile is not None else valid_topk_idx_permuted_tile,
                         cur_valid_lens,
                         cur_valid_start_indices,
                         cur_max_valid_tokens,
@@ -4544,6 +4843,7 @@ def backward_dq_opt_per_seq(
                         BLOCK_SIZE_K=BLOCK_SIZE_K,
                         BLOCK_SIZE_D=BLOCK_SIZE_D,
                         DISABLE_CAUSAL_MASK=disable_causal_mask,
+                        HAS_WEIGHTS=(valid_topk_w_permuted_tile is not None),
                         num_warps=num_warps,
                         num_stages=num_stages,
                     )
@@ -4610,11 +4910,14 @@ def backward_dkdv(
     k_ptr,  # K: n x kh x d
     v_ptr,  # V: n x kh x d
     tq_ptr,  # topk_q_idx: kh x N
+    tq_slot_ptr,  # topk_q_slot: kh x N
+    tq_w_ptr,  # topk_q_w: kh x N
     lse_ptr,  # LSE: qh x n
     d_ptr,  # Delta: qh x n
     do_ptr,
     dk_ptr,  # DK: sh x n x kh x d
     dv_ptr,  # DK: sh x n x kh x d
+    dw_ptr,  # DW: kh x n x TOPK (float32) or dummy when HAS_WEIGHTS=0
     # seqlens
     cu_seqlens_q,  # [batch_size + 1]
     cu_seqlens_k,  # [batch_size + 1]
@@ -4641,6 +4944,10 @@ def backward_dkdv(
     stride_vd,
     stride_tqh,
     stride_tqn,
+    stride_tqsh,
+    stride_tqsn,
+    stride_tqwh,
+    stride_tqwn,
     stride_ctqh,
     stride_ctqn,
     stride_abh,
@@ -4663,6 +4970,9 @@ def backward_dkdv(
     stride_dvn,
     stride_dvh,
     stride_dvd,
+    stride_dwh,
+    stride_dwn,
+    stride_dwk,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -4671,6 +4981,7 @@ def backward_dkdv(
     PIPELINE_CHUNKS: tl.constexpr,
     DISABLE_CAUSAL_MASK: tl.constexpr,
     USE_ACTIVE_BLOCK_MAP: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     qk_scale = sm_scale * 1.44269504
     # get batch id and head id
@@ -4705,6 +5016,9 @@ def backward_dkdv(
     if act_q_len <= 0:
         return
     tq_ptr = tq_ptr + pid_kh * stride_tqh + act_q_start * stride_tqn
+    if HAS_WEIGHTS:
+        tq_slot_ptr = tq_slot_ptr + pid_kh * stride_tqsh + act_q_start * stride_tqsn
+        tq_w_ptr = tq_w_ptr + pid_kh * stride_tqwh + act_q_start * stride_tqwn
     # init pointers
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -4760,25 +5074,30 @@ def backward_dkdv(
             i = ib + u * BLOCK_SIZE_Q
             if i < act_q_len:
                 # load
-                idx_q = tl.load(tq_ptr + i + off_q, mask=off_q < act_q_len - i, other=0).to(tl.int32)
+                q_mask = (off_q < act_q_len - i)
+                idx_q = tl.load(tq_ptr + i + off_q, mask=q_mask, other=0).to(tl.int32)
+                if HAS_WEIGHTS:
+                    slot = tl.load(tq_slot_ptr + i + off_q, mask=q_mask, other=-1).to(tl.int32)
+                    w = tl.load(tq_w_ptr + i + off_q, mask=q_mask, other=0.0).to(tl.float32)
+                    w = tl.maximum(w, 0.0)
                 q = tl.load(
                     q_ptrs + idx_q[:, None] * stride_qn,
-                    mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                    mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                     other=0,
                 )
                 do = tl.load(
                     do_ptrs + idx_q[:, None] * stride_don,
-                    mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                    mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                     other=0,
                 )
                 lse = tl.load(
                     lse_ptrs + idx_q[:, None] * stride_ln,
-                    mask=(off_q < act_q_len - i)[:, None],
+                    mask=q_mask[:, None],
                     other=0,
                 )
                 d = tl.load(
                     d_ptrs + idx_q[:, None] * stride_dn,
-                    mask=(off_q < act_q_len - i)[:, None],
+                    mask=q_mask[:, None],
                     other=0,
                 )
                 # compute qk
@@ -4787,14 +5106,23 @@ def backward_dkdv(
                     qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
                 # compute p, ds
                 p = tl.exp2(qk - lse)
+                if HAS_WEIGHTS:
+                    p = p * w[:, None]
                 dp = tl.dot(do, v.T)
-                ds = sm_scale * p * (dp - d)
+                ds_fp32 = sm_scale * p * (dp - d)
                 # cast dtype
                 p = p.to(do.dtype)
-                ds = ds.to(q.dtype)
+                ds = ds_fp32.to(q.dtype)
                 # update dk and dv
                 dk += tl.dot(ds.T, q)
                 dv += tl.dot(p.T, do)
+                if HAS_WEIGHTS:
+                    dlogw = tl.sum(ds_fp32, axis=1) / sm_scale
+                    dw = tl.where(w > 0, dlogw / w, 0.0).to(tl.float32)
+                    q_abs = q_start + idx_q
+                    m_dw = q_mask & (slot >= 0) & (slot < TOPK) & (w > 0)
+                    dw_ptrs = dw_ptr + pid_kh * stride_dwh + q_abs * stride_dwn + slot * stride_dwk
+                    tl.atomic_add(dw_ptrs, dw, mask=m_dw)
     # save dk dv
     tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))
@@ -4806,11 +5134,14 @@ def backward_dkdv_gqa_fused(
     k_ptr,  # K: n x kh x d
     v_ptr,  # V: n x kh x d
     tq_ptr,  # topk_q_idx: kh x N
+    tq_slot_ptr,  # topk_q_slot: kh x N
+    tq_w_ptr,  # topk_q_w: kh x N
     lse_ptr,  # LSE: qh x n
     d_ptr,  # Delta: qh x n
     do_ptr,
     dk_ptr,  # DK: n x kh x d
     dv_ptr,  # DV: n x kh x d
+    dw_ptr,  # DW: kh x n x TOPK (float32) or dummy when HAS_WEIGHTS=0
     # seqlens
     cu_seqlens_q,  # [batch_size + 1]
     cu_seqlens_k,  # [batch_size + 1]
@@ -4837,6 +5168,10 @@ def backward_dkdv_gqa_fused(
     stride_vd,
     stride_tqh,
     stride_tqn,
+    stride_tqsh,
+    stride_tqsn,
+    stride_tqwh,
+    stride_tqwn,
     stride_ctqh,
     stride_ctqn,
     stride_abh,
@@ -4857,6 +5192,9 @@ def backward_dkdv_gqa_fused(
     stride_dvn,
     stride_dvh,
     stride_dvd,
+    stride_dwh,
+    stride_dwn,
+    stride_dwk,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
@@ -4867,6 +5205,7 @@ def backward_dkdv_gqa_fused(
     USE_ACTIVE_BLOCK_MAP: tl.constexpr,
     COMPUTE_DK: tl.constexpr,
     COMPUTE_DV: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     qk_scale = sm_scale * 1.44269504
     pid_b = tl.program_id(0)
@@ -4900,6 +5239,9 @@ def backward_dkdv_gqa_fused(
         return
 
     tq_ptr = tq_ptr + pid_kh * stride_tqh + act_q_start * stride_tqn
+    if HAS_WEIGHTS:
+        tq_slot_ptr = tq_slot_ptr + pid_kh * stride_tqsh + act_q_start * stride_tqsn
+        tq_w_ptr = tq_w_ptr + pid_kh * stride_tqwh + act_q_start * stride_tqwn
 
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -4956,39 +5298,53 @@ def backward_dkdv_gqa_fused(
             for u in tl.static_range(0, PIPELINE_CHUNKS):
                 i = ib + u * BLOCK_SIZE_Q
                 if i < act_q_len:
-                    idx_q = tl.load(tq_ptr + i + off_q, mask=off_q < act_q_len - i, other=0).to(tl.int32)
+                    q_mask = (off_q < act_q_len - i)
+                    idx_q = tl.load(tq_ptr + i + off_q, mask=q_mask, other=0).to(tl.int32)
+                    if HAS_WEIGHTS:
+                        slot = tl.load(tq_slot_ptr + i + off_q, mask=q_mask, other=-1).to(tl.int32)
+                        w = tl.load(tq_w_ptr + i + off_q, mask=q_mask, other=0.0).to(tl.float32)
+                        w = tl.maximum(w, 0.0)
                     q = tl.load(
                         q_ptrs + idx_q[:, None] * stride_qn,
-                        mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                        mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                         other=0,
                     )
                     do = tl.load(
                         do_ptrs + idx_q[:, None] * stride_don,
-                        mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                        mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                         other=0,
                     )
                     lse = tl.load(
                         lse_ptrs + idx_q[:, None] * stride_ln,
-                        mask=(off_q < act_q_len - i)[:, None],
+                        mask=q_mask[:, None],
                         other=0,
                     )
                     d = tl.load(
                         d_ptrs + idx_q[:, None] * stride_dn,
-                        mask=(off_q < act_q_len - i)[:, None],
+                        mask=q_mask[:, None],
                         other=0,
                     )
                     qk = tl.dot(q, k_blk.T) * qk_scale
                     if not DISABLE_CAUSAL_MASK:
                         qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
                     p = tl.exp2(qk - lse)
+                    if HAS_WEIGHTS:
+                        p = p * w[:, None]
                     if COMPUTE_DV:
                         p_cast = p.to(do.dtype)
                         dv += tl.dot(p_cast.T, do)
                     if COMPUTE_DK:
                         dp = tl.dot(do, v_blk.T)
-                        ds = sm_scale * p * (dp - d)
-                        ds = ds.to(q.dtype)
+                        ds_fp32 = sm_scale * p * (dp - d)
+                        ds = ds_fp32.to(q.dtype)
                         dk += tl.dot(ds.T, q)
+                        if HAS_WEIGHTS:
+                            dlogw = tl.sum(ds_fp32, axis=1) / sm_scale
+                            dw = tl.where(w > 0, dlogw / w, 0.0).to(tl.float32)
+                            q_abs = q_start + idx_q
+                            m_dw = q_mask & (slot >= 0) & (slot < TOPK) & (w > 0)
+                            dw_ptrs = dw_ptr + pid_kh * stride_dwh + q_abs * stride_dwn + slot * stride_dwk
+                            tl.atomic_add(dw_ptrs, dw, mask=m_dw)
 
     if COMPUTE_DK:
         tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
@@ -5002,11 +5358,14 @@ def backward_dkdv_gqa_fused_worklist(
     k_ptr,  # K: n x kh x d
     v_ptr,  # V: n x kh x d
     tq_ptr,  # topk_q_idx: kh x N
+    tq_slot_ptr,  # topk_q_slot: kh x N
+    tq_w_ptr,  # topk_q_w: kh x N
     lse_ptr,  # LSE: qh x n
     d_ptr,  # Delta: qh x n
     do_ptr,
     dk_ptr,  # DK: n x kh x d
     dv_ptr,  # DV: n x kh x d
+    dw_ptr,  # DW: kh x n x TOPK (float32) or dummy when HAS_WEIGHTS=0
     # seqlens
     cu_seqlens_q,  # [batch_size + 1]
     cu_seqlens_k,  # [batch_size + 1]
@@ -5033,6 +5392,10 @@ def backward_dkdv_gqa_fused_worklist(
     stride_vd,
     stride_tqh,
     stride_tqn,
+    stride_tqsh,
+    stride_tqsn,
+    stride_tqwh,
+    stride_tqwn,
     stride_ctqh,
     stride_ctqn,
     stride_lh,
@@ -5048,6 +5411,9 @@ def backward_dkdv_gqa_fused_worklist(
     stride_dvn,
     stride_dvh,
     stride_dvd,
+    stride_dwh,
+    stride_dwn,
+    stride_dwk,
     stride_wln,
     stride_wlc,
     # META parameters
@@ -5059,6 +5425,7 @@ def backward_dkdv_gqa_fused_worklist(
     DISABLE_CAUSAL_MASK: tl.constexpr,
     COMPUTE_DK: tl.constexpr,
     COMPUTE_DV: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if pid >= num_work_items:
@@ -5084,6 +5451,9 @@ def backward_dkdv_gqa_fused_worklist(
         return
 
     tq_ptr = tq_ptr + pid_kh * stride_tqh + act_q_start * stride_tqn
+    if HAS_WEIGHTS:
+        tq_slot_ptr = tq_slot_ptr + pid_kh * stride_tqsh + act_q_start * stride_tqsn
+        tq_w_ptr = tq_w_ptr + pid_kh * stride_tqwh + act_q_start * stride_tqwn
 
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -5140,39 +5510,53 @@ def backward_dkdv_gqa_fused_worklist(
             for u in tl.static_range(0, PIPELINE_CHUNKS):
                 i = ib + u * BLOCK_SIZE_Q
                 if i < act_q_len:
-                    idx_q = tl.load(tq_ptr + i + off_q, mask=off_q < act_q_len - i, other=0).to(tl.int32)
+                    q_mask = (off_q < act_q_len - i)
+                    idx_q = tl.load(tq_ptr + i + off_q, mask=q_mask, other=0).to(tl.int32)
+                    if HAS_WEIGHTS:
+                        slot = tl.load(tq_slot_ptr + i + off_q, mask=q_mask, other=-1).to(tl.int32)
+                        w = tl.load(tq_w_ptr + i + off_q, mask=q_mask, other=0.0).to(tl.float32)
+                        w = tl.maximum(w, 0.0)
                     q = tl.load(
                         q_ptrs + idx_q[:, None] * stride_qn,
-                        mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                        mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                         other=0,
                     )
                     do = tl.load(
                         do_ptrs + idx_q[:, None] * stride_don,
-                        mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                        mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                         other=0,
                     )
                     lse = tl.load(
                         lse_ptrs + idx_q[:, None] * stride_ln,
-                        mask=(off_q < act_q_len - i)[:, None],
+                        mask=q_mask[:, None],
                         other=0,
                     )
                     d = tl.load(
                         d_ptrs + idx_q[:, None] * stride_dn,
-                        mask=(off_q < act_q_len - i)[:, None],
+                        mask=q_mask[:, None],
                         other=0,
                     )
                     qk = tl.dot(q, k_blk.T) * qk_scale
                     if not DISABLE_CAUSAL_MASK:
                         qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
                     p = tl.exp2(qk - lse)
+                    if HAS_WEIGHTS:
+                        p = p * w[:, None]
                     if COMPUTE_DV:
                         p_cast = p.to(do.dtype)
                         dv += tl.dot(p_cast.T, do)
                     if COMPUTE_DK:
                         dp = tl.dot(do, v_blk.T)
-                        ds = sm_scale * p * (dp - d)
-                        ds = ds.to(q.dtype)
+                        ds_fp32 = sm_scale * p * (dp - d)
+                        ds = ds_fp32.to(q.dtype)
                         dk += tl.dot(ds.T, q)
+                        if HAS_WEIGHTS:
+                            dlogw = tl.sum(ds_fp32, axis=1) / sm_scale
+                            dw = tl.where(w > 0, dlogw / w, 0.0).to(tl.float32)
+                            q_abs = q_start + idx_q
+                            m_dw = q_mask & (slot >= 0) & (slot < TOPK) & (w > 0)
+                            dw_ptrs = dw_ptr + pid_kh * stride_dwh + q_abs * stride_dwn + slot * stride_dwk
+                            tl.atomic_add(dw_ptrs, dw, mask=m_dw)
 
     if COMPUTE_DK:
         tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
@@ -5186,11 +5570,14 @@ def backward_dkdv_gqa_fused_persistent_queue(
     k_ptr,  # K: n x kh x d
     v_ptr,  # V: n x kh x d
     tq_ptr,  # topk_q_idx: kh x N
+    tq_slot_ptr,  # topk_q_slot: kh x N
+    tq_w_ptr,  # topk_q_w: kh x N
     lse_ptr,  # LSE: qh x n
     d_ptr,  # Delta: qh x n
     do_ptr,
     dk_ptr,  # DK: n x kh x d
     dv_ptr,  # DV: n x kh x d
+    dw_ptr,  # DW: kh x n x TOPK (float32) or dummy when HAS_WEIGHTS=0
     # seqlens
     cu_seqlens_q,  # [batch_size + 1]
     cu_seqlens_k,  # [batch_size + 1]
@@ -5218,6 +5605,10 @@ def backward_dkdv_gqa_fused_persistent_queue(
     stride_vd,
     stride_tqh,
     stride_tqn,
+    stride_tqsh,
+    stride_tqsn,
+    stride_tqwh,
+    stride_tqwn,
     stride_ctqh,
     stride_ctqn,
     stride_lh,
@@ -5233,6 +5624,9 @@ def backward_dkdv_gqa_fused_persistent_queue(
     stride_dvn,
     stride_dvh,
     stride_dvd,
+    stride_dwh,
+    stride_dwn,
+    stride_dwk,
     stride_wln,
     stride_wlc,
     # META parameters
@@ -5245,6 +5639,7 @@ def backward_dkdv_gqa_fused_persistent_queue(
     DISABLE_CAUSAL_MASK: tl.constexpr,
     COMPUTE_DK: tl.constexpr,
     COMPUTE_DV: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     qk_scale = sm_scale * 1.44269504
     wid = tl.atomic_add(queue_ptr, WORK_STEAL_CHUNK)
@@ -5267,6 +5662,9 @@ def backward_dkdv_gqa_fused_persistent_queue(
                     act_q_len = act_q_end - act_q_start
                     if act_q_len > 0:
                         tq_ptr_w = tq_ptr + pid_kh * stride_tqh + act_q_start * stride_tqn
+                        if HAS_WEIGHTS:
+                            tq_slot_ptr_w = tq_slot_ptr + pid_kh * stride_tqsh + act_q_start * stride_tqsn
+                            tq_w_ptr_w = tq_w_ptr + pid_kh * stride_tqwh + act_q_start * stride_tqwn
 
                         k_ptrs = tl.make_block_ptr(
                             base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -5323,39 +5721,53 @@ def backward_dkdv_gqa_fused_persistent_queue(
                                 for u in tl.static_range(0, PIPELINE_CHUNKS):
                                     i = ib + u * BLOCK_SIZE_Q
                                     if i < act_q_len:
-                                        idx_q = tl.load(tq_ptr_w + i + off_q, mask=off_q < act_q_len - i, other=0).to(tl.int32)
+                                        q_mask = (off_q < act_q_len - i)
+                                        idx_q = tl.load(tq_ptr_w + i + off_q, mask=q_mask, other=0).to(tl.int32)
+                                        if HAS_WEIGHTS:
+                                            slot = tl.load(tq_slot_ptr_w + i + off_q, mask=q_mask, other=-1).to(tl.int32)
+                                            w = tl.load(tq_w_ptr_w + i + off_q, mask=q_mask, other=0.0).to(tl.float32)
+                                            w = tl.maximum(w, 0.0)
                                         qv = tl.load(
                                             q_ptrs + idx_q[:, None] * stride_qn,
-                                            mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                                            mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                                             other=0,
                                         )
                                         do_v = tl.load(
                                             do_ptrs + idx_q[:, None] * stride_don,
-                                            mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+                                            mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
                                             other=0,
                                         )
                                         lse_v = tl.load(
                                             lse_ptrs + idx_q[:, None] * stride_ln,
-                                            mask=(off_q < act_q_len - i)[:, None],
+                                            mask=q_mask[:, None],
                                             other=0,
                                         )
                                         d_v = tl.load(
                                             d_ptrs + idx_q[:, None] * stride_dn,
-                                            mask=(off_q < act_q_len - i)[:, None],
+                                            mask=q_mask[:, None],
                                             other=0,
                                         )
                                         qk = tl.dot(qv, k_blk.T) * qk_scale
                                         if not DISABLE_CAUSAL_MASK:
                                             qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
                                         p = tl.exp2(qk - lse_v)
+                                        if HAS_WEIGHTS:
+                                            p = p * w[:, None]
                                         if COMPUTE_DV:
                                             p_cast = p.to(do_v.dtype)
                                             dv += tl.dot(p_cast.T, do_v)
                                         if COMPUTE_DK:
                                             dp = tl.dot(do_v, v_blk.T)
-                                            ds = sm_scale * p * (dp - d_v)
-                                            ds = ds.to(qv.dtype)
+                                            ds_fp32 = sm_scale * p * (dp - d_v)
+                                            ds = ds_fp32.to(qv.dtype)
                                             dk += tl.dot(ds.T, qv)
+                                            if HAS_WEIGHTS:
+                                                dlogw = tl.sum(ds_fp32, axis=1) / sm_scale
+                                                dw = tl.where(w > 0, dlogw / w, 0.0).to(tl.float32)
+                                                q_abs = q_start + idx_q
+                                                m_dw = q_mask & (slot >= 0) & (slot < TOPK) & (w > 0)
+                                                dw_ptrs = dw_ptr + pid_kh * stride_dwh + q_abs * stride_dwn + slot * stride_dwk
+                                                tl.atomic_add(dw_ptrs, dw, mask=m_dw)
 
                         if COMPUTE_DK:
                             tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
@@ -5373,6 +5785,7 @@ def _topk_sparse_attention_bwd_opt_core(
     k: torch.Tensor,
     v: torch.Tensor,
     topk_idx: torch.Tensor,
+    topk_w: Optional[torch.Tensor],
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -5387,12 +5800,18 @@ def _topk_sparse_attention_bwd_opt_core(
     if isinstance(permute_results, dict):
         permute_results = [permute_results]
     expected_seqs = int(cu_seqlens_q.numel() - 1)
+    if topk_w is not None:
+        for item in (permute_results or []):
+            if not isinstance(item, dict) or "valid_topk_w_permuted_tile" not in item:
+                permute_results = None
+                break
     if _permute_results_need_rebuild(permute_results) or (not isinstance(permute_results, (list, tuple))) or len(permute_results) != expected_seqs:
         permute_results = _build_permute_results_for_bwd(
             topk_idx=topk_idx,
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
+            topk_w=topk_w,
         )
 
     q_len, num_q_heads, head_dim = q.shape
@@ -5466,6 +5885,7 @@ def _topk_sparse_attention_bwd_opt_core(
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
+            topk_w=topk_w,
         )
         if len(permute_results) != expected_seqs:
             raise RuntimeError(
@@ -5509,12 +5929,36 @@ def _topk_sparse_attention_bwd_opt_core(
     total_active_q = int(cu_topk_q_count[:, -1].to(dtype=torch.int64).sum().item())
     if total_active_q == 0:
         # No routed queries for any KV block -> all attention grads are zero.
-        return torch.zeros_like(q), torch.zeros_like(k), torch.zeros_like(v)
+        if topk_w is None:
+            return torch.zeros_like(q), torch.zeros_like(k), torch.zeros_like(v), None
+        return torch.zeros_like(q), torch.zeros_like(k), torch.zeros_like(v), torch.zeros_like(topk_w, dtype=torch.float32)
 
     # active query idx for each key block
     # how to get active query idx for sequence b, head h, kv block i?
-    topk_q_idx = reorder_topk_idx(topk_idx_for_reorder, cu_topk_q_count, cu_seqlens_q, cu_seqblocks, block_size)
-    topk_q_idx = _maybe_sort_reordered_topk_q_idx(topk_q_idx, cu_topk_q_count)
+    has_weights = topk_w is not None
+    if has_weights:
+        if topk_w.dtype != torch.float32:
+            topk_w = topk_w.to(dtype=torch.float32)
+        topk_q_idx, topk_q_slot, topk_q_w = reorder_topk_idx(
+            topk_idx_for_reorder,
+            cu_topk_q_count,
+            cu_seqlens_q,
+            cu_seqblocks,
+            block_size,
+            topk_w=topk_w,
+            return_slot=True,
+            return_weights=True,
+        )
+        topk_q_idx, topk_q_slot, topk_q_w = _maybe_sort_reordered_topk_q_meta(
+            topk_q_idx, cu_topk_q_count, topk_q_slot, topk_q_w
+        )
+        dw = torch.zeros_like(topk_w, dtype=torch.float32, device=topk_w.device)
+    else:
+        topk_q_idx = reorder_topk_idx(topk_idx_for_reorder, cu_topk_q_count, cu_seqlens_q, cu_seqblocks, block_size)
+        topk_q_idx = _maybe_sort_reordered_topk_q_idx(topk_q_idx, cu_topk_q_count)
+        topk_q_slot = topk_q_idx  # dummy - never read when HAS_WEIGHTS=0
+        topk_q_w = delta[:1, :1]  # dummy - never read when HAS_WEIGHTS=0
+        dw = None
     # compute dk dv
     batch_size = cu_seqlens_q.shape[0] - 1
     BLOCK_SIZE_K = triton.next_power_of_2(block_size)
@@ -5623,7 +6067,7 @@ def _topk_sparse_attention_bwd_opt_core(
                     queue = torch.zeros((1,), dtype=torch.int32, device=q.device)
                     if dkdv_two_pass:
                         backward_dkdv_gqa_fused_persistent_queue[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, queue, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5631,22 +6075,28 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             WORK_STEAL_CHUNK=work_steal_chunk,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=False, COMPUTE_DV=True,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
                         queue.zero_()
                         backward_dkdv_gqa_fused_persistent_queue[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, queue, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5654,22 +6104,28 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             WORK_STEAL_CHUNK=work_steal_chunk,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=True, COMPUTE_DV=False,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
                     else:
                         backward_dkdv_gqa_fused_persistent_queue[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, queue, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5677,24 +6133,30 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             WORK_STEAL_CHUNK=work_steal_chunk,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=True, COMPUTE_DV=True,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
                 else:
                     grid_wl = (num_work_items,)
                     if dkdv_two_pass:
                         backward_dkdv_gqa_fused_worklist[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5702,20 +6164,26 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=False, COMPUTE_DV=True,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
                         backward_dkdv_gqa_fused_worklist[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5723,21 +6191,27 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=True, COMPUTE_DV=False,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
                     else:
                         backward_dkdv_gqa_fused_worklist[grid_wl](
-                            q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                            q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                             cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count,
                             worklist, num_work_items,
                             num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
@@ -5745,28 +6219,36 @@ def _topk_sparse_attention_bwd_opt_core(
                             k.stride(0), k.stride(1), k.stride(2),
                             v.stride(0), v.stride(1), v.stride(2),
                             topk_q_idx.stride(0), topk_q_idx.stride(1),
+                            topk_q_slot.stride(0), topk_q_slot.stride(1),
+                            topk_q_w.stride(0), topk_q_w.stride(1),
                             cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                             lse.stride(0), lse.stride(1),
                             delta.stride(0), delta.stride(1),
                             do.stride(0), do.stride(1), do.stride(2),
                             dk.stride(0), dk.stride(1), dk.stride(2),
                             dv.stride(0), dv.stride(1), dv.stride(2),
+                            (dw.stride(0) if dw is not None else 0),
+                            (dw.stride(1) if dw is not None else 0),
+                            (dw.stride(2) if dw is not None else 0),
                             worklist.stride(0), worklist.stride(1),
                             BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                             PIPELINE_CHUNKS=pipeline_chunks,
                             DISABLE_CAUSAL_MASK=disable_causal_mask, COMPUTE_DK=True, COMPUTE_DV=True,
+                            HAS_WEIGHTS=has_weights,
                             num_warps=num_warps, num_stages=num_stages,
                         )
         else:
             if dkdv_two_pass:
                 backward_dkdv_gqa_fused[grid](
-                    q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                    q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                     cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count, active_idx, active_count,
                     num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
                     q.stride(0), q.stride(1), q.stride(2),
                     k.stride(0), k.stride(1), k.stride(2),
                     v.stride(0), v.stride(1), v.stride(2),
                     topk_q_idx.stride(0), topk_q_idx.stride(1),
+                    topk_q_slot.stride(0), topk_q_slot.stride(1),
+                    topk_q_w.stride(0), topk_q_w.stride(1),
                     cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                     active_idx.stride(0), active_idx.stride(1), active_idx.stride(2),
                     active_count.stride(0), active_count.stride(1),
@@ -5774,20 +6256,26 @@ def _topk_sparse_attention_bwd_opt_core(
                     do.stride(0), do.stride(1), do.stride(2),
                     dk.stride(0), dk.stride(1), dk.stride(2),
                     dv.stride(0), dv.stride(1), dv.stride(2),
+                    (dw.stride(0) if dw is not None else 0),
+                    (dw.stride(1) if dw is not None else 0),
+                    (dw.stride(2) if dw is not None else 0),
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                     PIPELINE_CHUNKS=pipeline_chunks,
                     DISABLE_CAUSAL_MASK=disable_causal_mask, USE_ACTIVE_BLOCK_MAP=use_active_map,
                     COMPUTE_DK=False, COMPUTE_DV=True,
+                    HAS_WEIGHTS=has_weights,
                     num_warps=num_warps, num_stages=num_stages,
                 )
                 backward_dkdv_gqa_fused[grid](
-                    q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                    q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                     cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count, active_idx, active_count,
                     num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
                     q.stride(0), q.stride(1), q.stride(2),
                     k.stride(0), k.stride(1), k.stride(2),
                     v.stride(0), v.stride(1), v.stride(2),
                     topk_q_idx.stride(0), topk_q_idx.stride(1),
+                    topk_q_slot.stride(0), topk_q_slot.stride(1),
+                    topk_q_w.stride(0), topk_q_w.stride(1),
                     cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                     active_idx.stride(0), active_idx.stride(1), active_idx.stride(2),
                     active_count.stride(0), active_count.stride(1),
@@ -5795,21 +6283,27 @@ def _topk_sparse_attention_bwd_opt_core(
                     do.stride(0), do.stride(1), do.stride(2),
                     dk.stride(0), dk.stride(1), dk.stride(2),
                     dv.stride(0), dv.stride(1), dv.stride(2),
+                    (dw.stride(0) if dw is not None else 0),
+                    (dw.stride(1) if dw is not None else 0),
+                    (dw.stride(2) if dw is not None else 0),
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                     PIPELINE_CHUNKS=pipeline_chunks,
                     DISABLE_CAUSAL_MASK=disable_causal_mask, USE_ACTIVE_BLOCK_MAP=use_active_map,
                     COMPUTE_DK=True, COMPUTE_DV=False,
+                    HAS_WEIGHTS=has_weights,
                     num_warps=num_warps, num_stages=num_stages,
                 )
             else:
                 backward_dkdv_gqa_fused[grid](
-                    q, k, v, topk_q_idx, lse, delta, do, dk, dv,
+                    q, k, v, topk_q_idx, topk_q_slot, topk_q_w, lse, delta, do, dk, dv, dw if dw is not None else delta[:1, :1],
                     cu_seqlens_q, cu_seqlens_k, cu_seqblocks, cu_topk_q_count, active_idx, active_count,
                     num_k_heads, num_share_q_heads, head_dim, topk, sm_scale,
                     q.stride(0), q.stride(1), q.stride(2),
                     k.stride(0), k.stride(1), k.stride(2),
                     v.stride(0), v.stride(1), v.stride(2),
                     topk_q_idx.stride(0), topk_q_idx.stride(1),
+                    topk_q_slot.stride(0), topk_q_slot.stride(1),
+                    topk_q_w.stride(0), topk_q_w.stride(1),
                     cu_topk_q_count.stride(0), cu_topk_q_count.stride(1),
                     active_idx.stride(0), active_idx.stride(1), active_idx.stride(2),
                     active_count.stride(0), active_count.stride(1),
@@ -5817,10 +6311,14 @@ def _topk_sparse_attention_bwd_opt_core(
                     do.stride(0), do.stride(1), do.stride(2),
                     dk.stride(0), dk.stride(1), dk.stride(2),
                     dv.stride(0), dv.stride(1), dv.stride(2),
+                    (dw.stride(0) if dw is not None else 0),
+                    (dw.stride(1) if dw is not None else 0),
+                    (dw.stride(2) if dw is not None else 0),
                     BLOCK_SIZE_Q=BLOCK_SIZE_Q, BLOCK_SIZE_K=BLOCK_SIZE_K, BLOCK_SIZE_D=BLOCK_SIZE_D, LOOP_STAGES=loop_stages,
                     PIPELINE_CHUNKS=pipeline_chunks,
                     DISABLE_CAUSAL_MASK=disable_causal_mask, USE_ACTIVE_BLOCK_MAP=use_active_map,
                     COMPUTE_DK=True, COMPUTE_DV=True,
+                    HAS_WEIGHTS=has_weights,
                     num_warps=num_warps, num_stages=num_stages,
                 )
     else:
@@ -5829,11 +6327,14 @@ def _topk_sparse_attention_bwd_opt_core(
             k,
             v,
             topk_q_idx,
+            topk_q_slot,
+            topk_q_w,
             lse,
             delta,
             do,
             dk,
             dv,
+            dw if dw is not None else delta[:1, :1],
             cu_seqlens_q,
             cu_seqlens_k,
             cu_seqblocks,
@@ -5856,6 +6357,10 @@ def _topk_sparse_attention_bwd_opt_core(
             v.stride(2),
             topk_q_idx.stride(0),
             topk_q_idx.stride(1),
+            topk_q_slot.stride(0),
+            topk_q_slot.stride(1),
+            topk_q_w.stride(0),
+            topk_q_w.stride(1),
             cu_topk_q_count.stride(0),
             cu_topk_q_count.stride(1),
             active_idx.stride(0),
@@ -5878,6 +6383,9 @@ def _topk_sparse_attention_bwd_opt_core(
             dv.stride(1),
             dv.stride(2),
             dv.stride(3),
+            (dw.stride(0) if dw is not None else 0),
+            (dw.stride(1) if dw is not None else 0),
+            (dw.stride(2) if dw is not None else 0),
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             BLOCK_SIZE_D=BLOCK_SIZE_D,
@@ -5885,6 +6393,7 @@ def _topk_sparse_attention_bwd_opt_core(
             PIPELINE_CHUNKS=pipeline_chunks,
             DISABLE_CAUSAL_MASK=disable_causal_mask,
             USE_ACTIVE_BLOCK_MAP=use_active_map,
+            HAS_WEIGHTS=has_weights,
             num_warps=num_warps,
             num_stages=num_stages,
         )
@@ -5909,6 +6418,7 @@ def _topk_sparse_attention_bwd_opt_core(
         k,
         v,
         topk_idx,
+        topk_w,
         lse,
         delta,
         do,
@@ -5927,7 +6437,7 @@ def _topk_sparse_attention_bwd_opt_core(
         disable_causal_mask=disable_causal_mask,
     )
 
-    return dq, dk, dv
+    return dq, dk, dv, dw
 
 
 def _topk_sparse_attention_bwd_opt_seq_parallel(
@@ -5938,6 +6448,7 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
     k: torch.Tensor,
     v: torch.Tensor,
     topk_idx: torch.Tensor,
+    topk_w: Optional[torch.Tensor],
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -5967,6 +6478,7 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
             k=k,
             v=v,
             topk_idx=topk_idx,
+            topk_w=topk_w,
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
@@ -5987,6 +6499,7 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
     dq_out = torch.zeros_like(q)
     dk_out = torch.zeros_like(k)
     dv_out = torch.zeros_like(v)
+    dw_out = torch.zeros_like(topk_w, dtype=torch.float32) if topk_w is not None else None
 
     use_cuda_streams = bool(q.is_cuda and torch.cuda.is_available())
     num_streams = _resolve_bwd_sequence_parallel_streams(
@@ -6010,7 +6523,7 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
         stream = streams[seq_idx % len(streams)]
         ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
         with ctx:
-            dq_i, dk_i, dv_i = _topk_sparse_attention_bwd_opt_core(
+            dq_i, dk_i, dv_i, dw_i = _topk_sparse_attention_bwd_opt_core(
                 o=o[q_start:q_end].contiguous(),
                 do=do[q_start:q_end].contiguous(),
                 lse=lse[:, q_start:q_end].contiguous(),
@@ -6018,6 +6531,7 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
                 k=k[k_start:k_end].contiguous(),
                 v=v[k_start:k_end].contiguous(),
                 topk_idx=topk_idx[:, q_start:q_end].contiguous(),
+                topk_w=topk_w[:, q_start:q_end].contiguous() if topk_w is not None else None,
                 block_size=block_size,
                 cu_seqlens_q=cu_q_local,
                 cu_seqlens_k=cu_k_local,
@@ -6030,12 +6544,14 @@ def _topk_sparse_attention_bwd_opt_seq_parallel(
             dq_out[q_start:q_end].copy_(dq_i)
             dk_out[k_start:k_end].copy_(dk_i)
             dv_out[k_start:k_end].copy_(dv_i)
+            if dw_out is not None and dw_i is not None:
+                dw_out[:, q_start:q_end].copy_(dw_i)
 
     if use_cuda_streams and num_streams > 1:
         for s in streams:
             s.synchronize()
 
-    return dq_out, dk_out, dv_out
+    return dq_out, dk_out, dv_out, dw_out
 
 
 def _topk_sparse_attention_bwd_opt(
@@ -6046,6 +6562,7 @@ def _topk_sparse_attention_bwd_opt(
     k: torch.Tensor,
     v: torch.Tensor,
     topk_idx: torch.Tensor,
+    topk_w: Optional[torch.Tensor],
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -6072,6 +6589,7 @@ def _topk_sparse_attention_bwd_opt(
             k=k,
             v=v,
             topk_idx=topk_idx,
+            topk_w=topk_w,
             block_size=block_size,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
@@ -6089,6 +6607,7 @@ def _topk_sparse_attention_bwd_opt(
         k=k,
         v=v,
         topk_idx=topk_idx,
+        topk_w=topk_w,
         block_size=block_size,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
@@ -6159,6 +6678,7 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 k=k,
                 v=v,
                 topk_idx=topk_idx,
+                topk_w=None,
                 block_size=block_size,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
@@ -6173,6 +6693,7 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 k,
                 v,
                 topk_idx,
+                None,
                 block_size,
                 cu_seqlens_q,
                 cu_seqlens_k,
@@ -6210,9 +6731,10 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 block_size=block_size,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
+                topk_w=None,
             )
 
-        dq, dk, dv = _topk_sparse_attention_bwd_opt(
+        dq, dk, dv, _dw = _topk_sparse_attention_bwd_opt(
                 o,
                 do,
                 lse,
@@ -6220,6 +6742,7 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 k,
                 v,
                 topk_idx,
+                None,
                 block_size,
                 cu_seqlens_q,
                 cu_seqlens_k,
@@ -6229,7 +6752,136 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 permute_results,
                 disable_causal_mask=disable_causal_mask,
             )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None
+
+
+class FSATopkSparseAttentionWeighted(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_w: torch.Tensor,
+        block_size: int,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: torch.Tensor,
+        max_seqlen_k: torch.Tensor,
+        sm_scale=None,
+        disable_causal_mask: bool = False,
+    ):
+        assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
+        assert q.dtype == k.dtype and k.dtype == v.dtype
+        assert topk_idx.dtype == torch.int32
+        assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
+        assert topk_w.shape == topk_idx.shape
+        if sm_scale is None:
+            sm_scale = 1 / math.sqrt(q.shape[-1])
+
+        hq = int(q.shape[1])
+        hk = int(k.shape[1])
+        gqa_deg = (hq // hk) if (hk > 0 and hq % hk == 0) else -1
+        use_nsa_style_fwd = os.getenv("FSA_LOCAL_USE_NSA_STYLE_FWD", "1").strip().lower() not in (
+            "0", "false", "no", "off", ""
+        )
+        force_nsa_style_small_g = os.getenv("FSA_LOCAL_FORCE_NSA_STYLE_FWD_SMALL_G", "1").strip().lower() not in (
+            "0", "false", "no", "off", ""
+        )
+        small_g_mode = os.getenv("FSA_LOCAL_SMALL_G_MODE", "fallback").strip().lower()
+        if small_g_mode not in ("pad", "fma", "torch", "fallback"):
+            small_g_mode = "pad"
+        fwd_packed_gqa = _resolve_fwd_packed_gqa(
+            num_share_q_heads=max(1, gqa_deg),
+            head_dim=int(q.shape[-1]),
+            block_size=block_size,
+        )
+        if (
+            gqa_deg > 0
+            and gqa_deg < 16
+            and small_g_mode == "fallback"
+            and (not force_nsa_style_small_g)
+            and (not fwd_packed_gqa)
+        ):
+            use_nsa_style_fwd = False
+
+        if use_nsa_style_fwd:
+            o, lse = _topk_sparse_attention_fwd_nsa_style(
+                q=q,
+                k=k,
+                v=v,
+                topk_idx=topk_idx,
+                topk_w=topk_w,
+                block_size=block_size,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                sm_scale=sm_scale,
+            )
+            permute_results = None
+        else:
+            o, lse, permute_results = _topk_sparse_attention_fwd_opt(
+                q,
+                k,
+                v,
+                topk_idx,
+                topk_w,
+                block_size,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                sm_scale,
+            )
+
+        ctx.save_for_backward(q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k, topk_idx, topk_w)
+        ctx.permute_results = permute_results
+        ctx.sm_scale = sm_scale
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.block_size = block_size
+        ctx.disable_causal_mask = disable_causal_mask
+        return o
+
+    @staticmethod
+    def backward(ctx, do: torch.Tensor, *args) -> Any:
+        q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k, topk_idx, topk_w = ctx.saved_tensors
+        permute_results = ctx.permute_results
+
+        max_seqlen_q = ctx.max_seqlen_q
+        max_seqlen_k = ctx.max_seqlen_k
+        sm_scale = ctx.sm_scale
+        block_size = ctx.block_size
+        disable_causal_mask = ctx.disable_causal_mask
+        assert block_size in {32, 64, 128, 256, 512, 1024}
+        if _permute_results_need_rebuild(permute_results):
+            permute_results = _build_permute_results_for_bwd(
+                topk_idx=topk_idx,
+                block_size=block_size,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                topk_w=topk_w,
+            )
+
+        dq, dk, dv, dw = _topk_sparse_attention_bwd_opt(
+            o,
+            do,
+            lse,
+            q,
+            k,
+            v,
+            topk_idx,
+            topk_w,
+            block_size,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            sm_scale,
+            permute_results,
+            disable_causal_mask=disable_causal_mask,
+        )
+        return dq, dk, dv, None, dw, None, None, None, None, None, None, None
 
 
 def FSA_topk_sparse_attention(
@@ -6327,6 +6979,24 @@ def _expand_topk_for_internal_blocks(
     return expanded.reshape(topk_idx.shape[0], topk_idx.shape[1], topk_idx.shape[2] * ratio).contiguous()
 
 
+def _expand_topk_w_for_internal_blocks(
+    topk_w: torch.Tensor,
+    block_size: int,
+    internal_block_size: int,
+) -> torch.Tensor:
+    """
+    Match _expand_topk_for_internal_blocks expansion for per-topk weights.
+
+    For each original chapter weight w, replicate across sub-block ids created by the split.
+    """
+    ratio = block_size // internal_block_size
+    if ratio == 1:
+        return topk_w
+    w = topk_w.to(torch.float32)
+    expanded = w.unsqueeze(-1).expand(w.shape[0], w.shape[1], w.shape[2], ratio)
+    return expanded.reshape(w.shape[0], w.shape[1], w.shape[2] * ratio).contiguous()
+
+
 def _maybe_sort_reordered_topk_q_idx(
     topk_q_idx: torch.Tensor,
     cu_topk_q_count: torch.Tensor,
@@ -6411,6 +7081,98 @@ def _maybe_sort_reordered_topk_q_idx(
             ord_seg = torch.argsort(seg_by_val, stable=True)
             out[kh, :n_kh] = vals.index_select(0, ord_val.index_select(0, ord_seg))
         return out
+
+
+def _maybe_sort_reordered_topk_q_meta(
+    topk_q_idx: torch.Tensor,
+    cu_topk_q_count: torch.Tensor,
+    topk_q_slot: Optional[torch.Tensor] = None,
+    topk_q_w: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    Like _maybe_sort_reordered_topk_q_idx, but applies the exact same segmented-stable
+    permutation to optional metadata arrays (slot / weight).
+    """
+    mode = os.getenv("FSA_LOCAL_SORT_TOPK_Q_IDX", "auto").strip().lower()
+    if mode in ("", "0", "false", "no", "off"):
+        enabled = False
+    elif mode in ("1", "true", "yes", "on"):
+        enabled = True
+    else:
+        enabled = True
+    if not enabled or topk_q_idx.ndim != 2 or cu_topk_q_count.ndim != 2:
+        return topk_q_idx, topk_q_slot, topk_q_w
+
+    if mode not in ("1", "true", "yes", "on"):
+        total_active = int(cu_topk_q_count[:, -1].to(dtype=torch.int64).sum().item()) if cu_topk_q_count.numel() > 0 else 0
+        num_segments = int(cu_topk_q_count.shape[0]) * max(1, int(cu_topk_q_count.shape[1]) - 1)
+        avg_seg = (total_active / max(1, num_segments))
+        if total_active < 65536 or avg_seg < 2.0:
+            return topk_q_idx, topk_q_slot, topk_q_w
+
+    out_idx = topk_q_idx.clone()
+    out_slot = topk_q_slot.clone() if topk_q_slot is not None else None
+    out_w = topk_q_w.clone() if topk_q_w is not None else None
+
+    num_kh, max_active_slots = int(out_idx.shape[0]), int(out_idx.shape[1])
+    if num_kh <= 0 or max_active_slots <= 1:
+        return out_idx, out_slot, out_w
+
+    n_active = cu_topk_q_count[:, -1].to(dtype=torch.int64)
+    n_active = torch.clamp(n_active, min=0, max=max_active_slots)
+    if int(n_active.max().item()) <= 1:
+        return out_idx, out_slot, out_w
+
+    pos = torch.arange(max_active_slots, device=out_idx.device, dtype=torch.int64).view(1, max_active_slots)
+    pos = pos.expand(num_kh, max_active_slots).contiguous()
+    valid = pos < n_active.view(-1, 1)
+    if not bool(torch.any(valid)):
+        return out_idx, out_slot, out_w
+
+    num_segments = max(1, int(cu_topk_q_count.shape[1]) - 1)
+    head_id = torch.arange(num_kh, device=out_idx.device, dtype=torch.int64).view(-1, 1)
+    try:
+        seg = torch.searchsorted(cu_topk_q_count[:, 1:].to(dtype=torch.int64), pos, right=True)
+        group_id = head_id * num_segments + seg.to(dtype=torch.int64)
+
+        flat_vals = out_idx[valid]
+        flat_group = group_id[valid]
+        if int(flat_vals.numel()) <= 1:
+            return out_idx, out_slot, out_w
+
+        ord_val = torch.argsort(flat_vals, stable=True)
+        vals_by_val = flat_vals.index_select(0, ord_val)
+        grp_by_val = flat_group.index_select(0, ord_val)
+        ord_group = torch.argsort(grp_by_val, stable=True)
+        perm = ord_val.index_select(0, ord_group)
+
+        out_idx[valid] = flat_vals.index_select(0, perm)
+        if out_slot is not None:
+            flat_slot = out_slot[valid]
+            out_slot[valid] = flat_slot.index_select(0, perm)
+        if out_w is not None:
+            flat_w = out_w[valid]
+            out_w[valid] = flat_w.index_select(0, perm)
+        return out_idx, out_slot, out_w
+    except Exception:
+        for kh in range(num_kh):
+            offsets = cu_topk_q_count[kh].to(dtype=torch.int64)
+            n_kh = int(min(max_active_slots, int(offsets[-1].item())))
+            if n_kh <= 1:
+                continue
+            vals = out_idx[kh, :n_kh]
+            pos_kh = torch.arange(n_kh, device=out_idx.device, dtype=torch.int64)
+            seg_kh = torch.bucketize(pos_kh, offsets[1:], right=True)
+            ord_val = torch.argsort(vals, stable=True)
+            seg_by_val = seg_kh.index_select(0, ord_val)
+            ord_seg = torch.argsort(seg_by_val, stable=True)
+            perm = ord_val.index_select(0, ord_seg)
+            out_idx[kh, :n_kh] = vals.index_select(0, perm)
+            if out_slot is not None:
+                out_slot[kh, :n_kh] = out_slot[kh, :n_kh].index_select(0, perm)
+            if out_w is not None:
+                out_w[kh, :n_kh] = out_w[kh, :n_kh].index_select(0, perm)
+        return out_idx, out_slot, out_w
 
 
 def _build_active_kv_block_map(
@@ -6531,6 +7293,7 @@ def FSA_topk_sparse_attention_varlen_qk(
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    topk_w: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     softmax_scale: Optional[float] = None,
@@ -6542,16 +7305,36 @@ def FSA_topk_sparse_attention_varlen_qk(
     """
     internal_block_size = _resolve_internal_block_size(block_size)
     topk_idx_internal = _expand_topk_for_internal_blocks(topk_idx, block_size, internal_block_size)
+    topk_w_internal = (
+        _expand_topk_w_for_internal_blocks(topk_w, block_size, internal_block_size)
+        if topk_w is not None
+        else None
+    )
 
     if max_seqlen_q is None:
         max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).to(dtype=torch.int32).max().item())
     if max_seqlen_k is None:
         max_seqlen_k = int((cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(dtype=torch.int32).max().item())
-    return FSATopkSparseAttention.apply(
+    if topk_w_internal is None:
+        return FSATopkSparseAttention.apply(
+            q,
+            k,
+            v,
+            topk_idx_internal,
+            internal_block_size,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            softmax_scale,
+            disable_causal_mask,
+        )
+    return FSATopkSparseAttentionWeighted.apply(
         q,
         k,
         v,
         topk_idx_internal,
+        topk_w_internal,
         internal_block_size,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -6568,10 +7351,12 @@ def FSA_topk_sparse_attention_bthd(
     v_bthd: torch.Tensor,
     block_indices_bths: Optional[torch.Tensor],
     block_size: int,
+    block_weights_bths: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
     topk_idx_hns: Optional[torch.Tensor] = None,
+    topk_w_hns: Optional[torch.Tensor] = None,
     assume_sorted_topk: bool = False,
     disable_causal_mask: bool = False,
 ) -> torch.Tensor:
@@ -6609,6 +7394,7 @@ def FSA_topk_sparse_attention_bthd(
     k = k_bthd.reshape(B * Tk, HK, D).contiguous()
     v = v_bthd.reshape(B * Tk, HK, D).contiguous()
 
+    topk_w: Optional[torch.Tensor] = None
     if topk_idx_hns is not None:
         if topk_idx_hns.ndim != 3:
             raise ValueError("topk_idx_hns must be rank-3 [HK or HQ, B*Tq, topk].")
@@ -6618,11 +7404,20 @@ def FSA_topk_sparse_attention_bthd(
             )
         if topk_idx_hns.shape[0] == HK:
             topk_idx = topk_idx_hns
+            if topk_w_hns is not None:
+                if topk_w_hns.shape != topk_idx_hns.shape:
+                    raise ValueError("topk_w_hns must match topk_idx_hns shape.")
+                topk_w = topk_w_hns
         elif topk_idx_hns.shape[0] == HQ:
             # Convert per-query-head routes to per-kv-head routes by taking the first query-head
             # in each GQA group. In typical GQA use these are shared across the group.
             topk_idx_hns = topk_idx_hns.contiguous()
             topk_idx = _collapse_hq_routes_to_hk(topk_idx_hns, hk=HK, gqa_deg=gqa_deg)
+            if topk_w_hns is not None:
+                if topk_w_hns.shape != topk_idx_hns.shape:
+                    raise ValueError("topk_w_hns must match topk_idx_hns shape.")
+                topk_w_hns = topk_w_hns.contiguous()
+                topk_w = _collapse_hq_routes_to_hk(topk_w_hns, hk=HK, gqa_deg=gqa_deg)
         else:
             raise ValueError(
                 f"topk_idx_hns first dim must be HK={HK} or HQ={HQ}, got {topk_idx_hns.shape[0]}."
@@ -6636,9 +7431,18 @@ def FSA_topk_sparse_attention_bthd(
             raise ValueError("block_indices_bths must have prefix [B,Tq,...] matching q.")
         if block_indices_bths.shape[2] == HK:
             topk_idx = block_indices_bths.permute(0, 2, 1, 3).reshape(HK, B * Tq, -1)
+            if block_weights_bths is not None:
+                if block_weights_bths.shape != block_indices_bths.shape:
+                    raise ValueError("block_weights_bths must match block_indices_bths shape.")
+                topk_w = block_weights_bths.permute(0, 2, 1, 3).reshape(HK, B * Tq, -1)
         elif block_indices_bths.shape[2] == HQ:
             topk_idx_q = block_indices_bths.permute(0, 2, 1, 3).reshape(HQ, B * Tq, -1).contiguous()
             topk_idx = _collapse_hq_routes_to_hk(topk_idx_q, hk=HK, gqa_deg=gqa_deg)
+            if block_weights_bths is not None:
+                if block_weights_bths.shape != block_indices_bths.shape:
+                    raise ValueError("block_weights_bths must match block_indices_bths shape.")
+                topk_w_q = block_weights_bths.permute(0, 2, 1, 3).reshape(HQ, B * Tq, -1).contiguous()
+                topk_w = _collapse_hq_routes_to_hk(topk_w_q, hk=HK, gqa_deg=gqa_deg)
         else:
             raise ValueError(
                 f"block_indices_bths third dim must be HK={HK} or HQ={HQ}, got {block_indices_bths.shape[2]}."
@@ -6649,8 +7453,14 @@ def FSA_topk_sparse_attention_bthd(
     if not assume_sorted_topk:
         # FSA kernels expect per-query top-k entries to be ordered; unsorted entries
         # can mis-handle causal-valid counts vs traversal order.
-        topk_idx = topk_idx.sort(dim=-1).values
+        if topk_w is None:
+            topk_idx = topk_idx.sort(dim=-1).values
+        else:
+            topk_idx, order = topk_idx.sort(dim=-1)
+            topk_w = topk_w.to(torch.float32).gather(dim=-1, index=order)
     topk_idx = topk_idx.contiguous()
+    if topk_w is not None:
+        topk_w = topk_w.to(torch.float32).contiguous()
 
     if cu_seqlens_q is None:
         cu_seqlens_q = torch.arange(B + 1, device=device, dtype=torch.int32) * Tq
@@ -6662,6 +7472,7 @@ def FSA_topk_sparse_attention_bthd(
         k=k,
         v=v,
         topk_idx=topk_idx,
+        topk_w=topk_w,
         block_size=block_size,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,

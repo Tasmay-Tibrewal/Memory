@@ -491,6 +491,7 @@ class MemoryCrossAttention(nn.Module):
         shared_memory = token_routing_state.get("shared_memory")
         routed_memory = token_routing_state.get("routed_memory")
         token_chapter_indices = token_routing_state.get("token_chapter_indices", None)
+        token_chapter_weights = token_routing_state.get("token_chapter_weights", None)
         tokens_per_chapter = int(token_routing_state.get("tokens_per_chapter", 0))
         routed_scale = float(token_routing_state.get("routed_scale", 1.0))
         assume_sorted_topk = bool(token_routing_state.get("assume_sorted_topk", False))
@@ -512,6 +513,14 @@ class MemoryCrossAttention(nn.Module):
                 "token_chapter_indices shape prefix must match hidden_states [B, T, ...]. "
                 f"got hidden_states={tuple(hidden_states.shape)}, token_chapter_indices={tuple(token_chapter_indices.shape)}"
             )
+        if token_chapter_weights is not None:
+            if not torch.is_tensor(token_chapter_weights):
+                raise ValueError("token_chapter_weights must be a torch.Tensor when provided.")
+            if token_chapter_weights.shape != token_chapter_indices.shape:
+                raise ValueError(
+                    "token_chapter_weights must match token_chapter_indices shape [B,T,topk]. "
+                    f"got weights={tuple(token_chapter_weights.shape)}, indices={tuple(token_chapter_indices.shape)}"
+                )
 
         out_dim = self.reduced_dim if self.reduced_dim_mode else self.hidden_dim
         combined = hidden_states.new_zeros(
@@ -545,6 +554,7 @@ class MemoryCrossAttention(nn.Module):
                         k=k,
                         v=v,
                         token_chapter_indices=token_chapter_indices,
+                        token_chapter_weights=token_chapter_weights,
                         block_size=tokens_per_chapter,
                         scale=scale,
                         assume_sorted_topk=assume_sorted_topk,
@@ -567,6 +577,7 @@ class MemoryCrossAttention(nn.Module):
                     k=k,
                     v=v,
                     token_chapter_indices=token_chapter_indices,
+                    token_chapter_weights=token_chapter_weights,
                     block_size=tokens_per_chapter,
                     scale=scale,
                 )
@@ -586,12 +597,15 @@ class MemoryCrossAttention(nn.Module):
         k: torch.Tensor,  # [B, Tk, HK, D]
         v: torch.Tensor,  # [B, Tk, HK, D]
         token_chapter_indices: torch.Tensor,  # [B, Tq, topk]
+        token_chapter_weights: Optional[torch.Tensor],  # [B, Tq, topk]
         block_size: int,
         scale: float,
         assume_sorted_topk: bool,
         kernel_version: str,
     ) -> torch.Tensor:
         """Run kernel-backed sparse token-routing attention."""
+        ver = normalize_kernel_version(kernel_version)
+
         block_indices = token_chapter_indices.to(dtype=torch.int32, device=q.device)
         block_indices = block_indices.unsqueeze(2).expand(
             q.shape[0],
@@ -599,13 +613,23 @@ class MemoryCrossAttention(nn.Module):
             self.num_kv_heads,
             block_indices.shape[-1],
         ).contiguous()
+        block_weights = None
+        if token_chapter_weights is not None:
+            w = token_chapter_weights.to(device=q.device, dtype=torch.float32)
+            block_weights = w.unsqueeze(2).expand(
+                q.shape[0],
+                q.shape[1],
+                self.num_kv_heads,
+                w.shape[-1],
+            ).contiguous()
 
-        fn = get_token_routing_kernel_fn(kernel_version)
+        fn = get_token_routing_kernel_fn(ver)
         return fn(
             q_bthd=q.contiguous(),
             k_bthd=k.contiguous(),
             v_bthd=v.contiguous(),
             block_indices_bths=block_indices,
+            block_weights_bths=block_weights,
             block_size=int(block_size),
             softmax_scale=float(scale),
             assume_sorted_topk=bool(assume_sorted_topk),
@@ -618,6 +642,7 @@ class MemoryCrossAttention(nn.Module):
         k: torch.Tensor,  # [B, Tk, HK, D]
         v: torch.Tensor,  # [B, Tk, HK, D]
         token_chapter_indices: torch.Tensor,  # [B, Tq, topk]
+        token_chapter_weights: Optional[torch.Tensor],  # [B, Tq, topk]
         block_size: int,
         scale: float,
     ) -> torch.Tensor:
@@ -648,6 +673,17 @@ class MemoryCrossAttention(nn.Module):
                     qh = (kh * gqa_deg) + g
                     q_vec = q[b, :, qh, :].unsqueeze(1)  # [Tq, 1, D]
                     scores = (q_vec * gathered_k).sum(dim=-1) * scale  # [Tq, Lsel]
+                    if token_chapter_weights is not None:
+                        # Weight each selected chapter uniformly across its tokens (equivalent to +log(w) on logits).
+                        w = token_chapter_weights[b].to(dtype=torch.float32)  # [Tq, topk]
+                        w = w.unsqueeze(-1).expand(tq, w.shape[1], block_size).reshape(tq, -1)  # [Tq, Lsel]
+                        logw = torch.where(
+                            w > 0,
+                            torch.log(w),
+                            torch.full_like(w, float("-inf")),
+                        )
+                        scores = scores.to(dtype=torch.float32) + logw
+                        scores = scores.to(dtype=q.dtype)
                     attn = F.softmax(scores, dim=-1)
                     out[b, :, qh, :] = torch.sum(
                         attn.unsqueeze(-1) * gathered_v,

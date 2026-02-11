@@ -140,6 +140,7 @@ Output = softmax(QK^T / √d) @ V @ W_o
 - Triggered when model/adapter passes `token_routing_state` (used by `routing_strategy_*: token`).
 - Shared chapters: dense cross-attention branch (FlashAttention if available, else PyTorch attention).
 - Routed chapters: sparse top-k chapter branch via `kernels-final` (`v1/v2/v3`) with `FSA_topk_sparse_attention_bthd`.
+- Per-token router probabilities are applied as per-chapter weights in the routed branch (`u = w * exp(score)`), supported by the token-routing kernels (`v1|v2|v3`), including backward support for `dw`.
 - Combined output: `shared_output + routed_scaling_factor * routed_output`, then projected by `W_o`.
 
 ---

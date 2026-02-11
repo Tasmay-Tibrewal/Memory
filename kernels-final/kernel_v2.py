@@ -102,7 +102,10 @@ def _try_get_native_nsa_parallel_fwd():
             candidates = []
             here = _ROOT
             candidates.append(here / "native-sparse-attention" / "native_sparse_attention")
+            candidates.append(here.parent / "native-sparse-attention" / "native_sparse_attention")
+            candidates.append(here.parent / "native-sparse-attention-triton" / "native_sparse_attention")
             candidates.append(here / "native_sparse_attention")
+            candidates.append(here.parent / "native_sparse_attention")
             for p in sys.path:
                 candidates.append(Path(p) / "native_sparse_attention")
 
@@ -220,6 +223,54 @@ def block_to_token_kernel(
     tl.store(result_ptrs, pid_j[None, :], mask=mask)
 
 
+@triton.jit
+def block_to_token_kernel_with_weights(
+    topk_idx_ptr,
+    topk_w_ptr,
+    result_idx_ptr,
+    result_w_ptr,
+    N_token,
+    K,
+    min_block_id,
+    max_block_id,
+    padding_value,
+    ts_h,
+    ts_b,
+    ts_n,
+    rs_h,
+    rs_b,
+    rs_n,
+    rws_h,
+    rws_b,
+    rws_n,
+    num_q_loops: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)  # token index i
+    pid_h = 0
+    offs = tl.arange(0, BLOCK_K)
+    offs_q = tl.arange(0, num_q_loops)
+    pid_j = pid * num_q_loops + offs_q
+
+    topk_idx_offset = pid_h * ts_h + pid_j[None, :] * K + offs[:, None]
+    block_ids = tl.load(
+        topk_idx_ptr + topk_idx_offset,
+        mask=(pid_j < N_token)[None, :] & (offs < K)[:, None],
+        other=padding_value,
+    )
+    w = tl.load(
+        topk_w_ptr + topk_idx_offset,
+        mask=(pid_j < N_token)[None, :] & (offs < K)[:, None],
+        other=0.0,
+    ).to(tl.float32)
+
+    result_idx_ptrs = result_idx_ptr + pid_h * rs_h + block_ids * N_token + pid_j[None, :]
+    result_w_ptrs = result_w_ptr + pid_h * rws_h + block_ids * N_token + pid_j[None, :]
+    mask = (block_ids >= 0) & (block_ids != padding_value) & (pid_j < N_token)[None, :]
+    tl.store(result_idx_ptrs, pid_j[None, :], mask=mask)
+    tl.store(result_w_ptrs, w, mask=mask)
+
+
 def build_block_to_token_triton(
     result: torch.Tensor, topk_idx: torch.Tensor, min_block_id: int, max_block_id: int, padding_value: int = -1
 ):
@@ -260,6 +311,58 @@ def build_block_to_token_triton(
         num_stages=3,
     )
     return result
+
+
+def build_block_to_token_with_weights_triton(
+    result_idx: torch.Tensor,
+    result_w: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_w: torch.Tensor,
+    min_block_id: int,
+    max_block_id: int,
+    padding_value: int = -1,
+):
+    """
+    Weighted variant of build_block_to_token_triton.
+
+    Writes:
+      result_idx: [num_heads, num_blocks, N_token] with token indices (or -1)
+      result_w:   [num_heads, num_blocks, N_token] with per-(block,token) weights (0 for padding)
+    """
+    assert topk_idx.ndim == 3
+    assert topk_w.ndim == 3
+    assert topk_w.shape == topk_idx.shape
+    assert padding_value == -1
+    num_heads, N_token, TopK = topk_idx.shape
+
+    num_q_loops = 4
+    grid = (triton.cdiv(N_token, num_q_loops),)
+    BLOCK_K = triton.next_power_of_2(TopK)
+    block_to_token_kernel_with_weights[grid](
+        topk_idx,
+        topk_w,
+        result_idx,
+        result_w,
+        N_token,
+        TopK,
+        min_block_id,
+        max_block_id,
+        padding_value,
+        topk_idx.stride(0),
+        topk_idx.stride(1),
+        topk_idx.stride(2),
+        result_idx.stride(0),
+        result_idx.stride(1),
+        result_idx.stride(2),
+        result_w.stride(0),
+        result_w.stride(1),
+        result_w.stride(2),
+        num_q_loops,
+        BLOCK_K=BLOCK_K,
+        num_warps=2,
+        num_stages=3,
+    )
+    return result_idx, result_w
 
 
 @triton.jit
@@ -524,6 +627,7 @@ def forward_kernel_opt(
     l_ij_ptr,  # h x b x n
     token_index_mapping_ptr,
     selected_tokens_ptr,  # selected_tokens: sum(valid_lens),
+    selected_weights_ptr,  # selected_weights: sum(valid_lens),
     valid_lens_ptr,  # valid_lens: (h x b),
     valid_start_indices_ptr,  # valid_start_indices: (h x b),
     min_block_id,
@@ -568,6 +672,7 @@ def forward_kernel_opt(
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
     BLOCK_SIZE_D: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     # get batch id and head id
     pid_block = tl.program_id(0) // num_heads  # block id
@@ -662,6 +767,10 @@ def forward_kernel_opt(
 
             # load m_ij and compute l_ij
             p = tl.exp2(qk - m_ij[:, None])
+            if HAS_WEIGHTS:
+                w = tl.load(selected_weights_ptr + st_offs, mask=st_mask, other=0.0).to(tl.float32)
+                w = tl.maximum(w, 0.0)
+                p = p * w[:, None]
             l_ij = tl.sum(p, axis=1)
 
             # load token index mapping
@@ -705,6 +814,7 @@ def _topk_sparse_attention_fwd_opt(
     k: torch.Tensor,  # [total_len, num_heads, head_dim]
     v: torch.Tensor,  # [total_len, num_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_heads, total_len, topk]
+    topk_w: Optional[torch.Tensor],  # [num_heads, total_len, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -731,11 +841,13 @@ def _topk_sparse_attention_fwd_opt(
         k_ = k[cu_seqlens_k[i]: cu_seqlens_k[i + 1]]
         v_ = v[cu_seqlens_k[i]: cu_seqlens_k[i + 1]]
         topk_idx_ = topk_idx[:, cu_seqlens_q[i]: cu_seqlens_q[i + 1]]
+        topk_w_ = topk_w[:, cu_seqlens_q[i]: cu_seqlens_q[i + 1]] if topk_w is not None else None
         o_seq, lse_seq, permute_results_seq = _topk_sparse_attention_fwd_opt_per_seq(
             q_,
             k_,
             v_,
             topk_idx_,
+            topk_w_,
             block_size,
             cu_seqlens_q_,
             cu_seqlens_k_,
@@ -877,6 +989,7 @@ def qkv_kernel(
     l_ij,
     token_index_mapping,
     valid_topk_idx_permuted_tile,
+    valid_topk_w_permuted_tile,
     valid_lens,
     valid_start_indices,
     compute_min_block_id,
@@ -901,6 +1014,7 @@ def qkv_kernel(
         triton.cdiv(cur_max_valid_tokens, BLOCK_SIZE_Q * num_q_blocks),
     )
 
+    has_weights = valid_topk_w_permuted_tile is not None
     forward_kernel_opt[grid_fwd](
         q_tile,
         k_tile,
@@ -911,6 +1025,7 @@ def qkv_kernel(
         l_ij,
         token_index_mapping,
         valid_topk_idx_permuted_tile,
+        valid_topk_w_permuted_tile if has_weights else valid_topk_idx_permuted_tile,
         valid_lens,
         valid_start_indices,
         compute_min_block_id,
@@ -950,6 +1065,7 @@ def qkv_kernel(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
+        HAS_WEIGHTS=has_weights,
         num_stages=3,
         num_warps=4,
     )
@@ -1056,6 +1172,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     k: torch.Tensor,  # [total_len, num_kv_heads, head_dim]
     v: torch.Tensor,  # [total_len, num_kv_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_heads, total_len, topk]
+    topk_w: Optional[torch.Tensor],  # [num_heads, total_len, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -1105,6 +1222,9 @@ def _topk_sparse_attention_fwd_opt_per_seq(
 
     # New introduced buffers
     topk_idx_permuted_tile = torch.full((head_tile, num_blocks, total_len_q), -1, dtype=torch.int32, device=q.device)
+    topk_w_permuted_tile = None
+    if topk_w is not None:
+        topk_w_permuted_tile = torch.zeros((head_tile, num_blocks, total_len_q), dtype=torch.float32, device=q.device)
 
     token_index_mapping = torch.full((head_tile, num_blocks, total_len_q), 0, dtype=torch.int32, device=q.device)
     # first KV block is computed seaprately
@@ -1136,6 +1256,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
     permute_results['num_blocks'] = num_blocks
     permute_results['real_num_blocks'] = real_num_blocks
     permute_results['valid_topk_idx_permuted_tile'] = []
+    permute_results['valid_topk_w_permuted_tile'] = []
     permute_results['valid_lens_all'] = valid_lens_all
     permute_results['valid_lens'] = []
     permute_results['valid_start_indices'] = []
@@ -1153,11 +1274,28 @@ def _topk_sparse_attention_fwd_opt_per_seq(
         topk_idx_tile = topk_idx[(h // gqa_deg) * head_tile: ((h // gqa_deg + 1)) * head_tile]
 
         if h % gqa_deg == 0:
-            topk_idx_permuted_tile = build_block_to_token_triton(
-                topk_idx_permuted_tile, topk_idx_tile, permute_min_block_id, permute_max_block_id, padding_value=-1
-            )
+            if topk_w is None:
+                topk_idx_permuted_tile = build_block_to_token_triton(
+                    topk_idx_permuted_tile, topk_idx_tile, permute_min_block_id, permute_max_block_id, padding_value=-1
+                )
+            else:
+                assert topk_w_permuted_tile is not None
+                topk_w_tile = topk_w[(h // gqa_deg) * head_tile: ((h // gqa_deg + 1)) * head_tile]
+                topk_idx_permuted_tile, topk_w_permuted_tile = build_block_to_token_with_weights_triton(
+                    topk_idx_permuted_tile,
+                    topk_w_permuted_tile,
+                    topk_idx_tile,
+                    topk_w_tile,
+                    permute_min_block_id,
+                    permute_max_block_id,
+                    padding_value=-1,
+                )
 
-            valid_topk_idx_permuted_tile = topk_idx_permuted_tile[topk_idx_permuted_tile != -1]
+            mask_valid = topk_idx_permuted_tile != -1
+            valid_topk_idx_permuted_tile = topk_idx_permuted_tile[mask_valid]
+            valid_topk_w_permuted_tile = None
+            if topk_w is not None:
+                valid_topk_w_permuted_tile = topk_w_permuted_tile[mask_valid].to(torch.float32)
             valid_lens = valid_lens_all[(h // gqa_deg) * head_tile, :]
             valid_start_indices = torch.nn.functional.pad(valid_lens.cumsum(0)[:-1], (1, 0), value=0)
 
@@ -1166,6 +1304,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
             )
 
             permute_results['valid_topk_idx_permuted_tile'].append(valid_topk_idx_permuted_tile)
+            permute_results['valid_topk_w_permuted_tile'].append(valid_topk_w_permuted_tile)
             permute_results['valid_lens'].append(valid_lens)
             permute_results['valid_start_indices'].append(valid_start_indices)
 
@@ -1219,6 +1358,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
                 l_ij,
                 token_index_mapping,
                 valid_topk_idx_permuted_tile,
+                valid_topk_w_permuted_tile,
                 cur_valid_lens,
                 cur_valid_start_indices,
                 compute_min_block_id,
@@ -1266,6 +1406,7 @@ def _topk_sparse_attention_fwd_opt_per_seq(
 
 def _build_permute_results_per_seq_for_bwd(
     topk_idx: torch.Tensor,  # [num_kv_heads, total_len_q, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len_q, topk] or None
     total_len_k: int,
     block_size: int,
 ):
@@ -1286,12 +1427,16 @@ def _build_permute_results_per_seq_for_bwd(
 
     global_max_valid_tokens = valid_lens_all[:, 1:].max() if num_blocks > 1 else valid_lens_all.max()
     topk_idx_permuted_tile = torch.full((1, num_blocks, total_len_q), -1, dtype=torch.int32, device=topk_idx.device)
+    topk_w_permuted_tile = None
+    if topk_w is not None:
+        topk_w_permuted_tile = torch.zeros((1, num_blocks, total_len_q), dtype=torch.float32, device=topk_idx.device)
 
     permute_results = {
         "global_max_valid_tokens": global_max_valid_tokens,
         "num_blocks": num_blocks,
         "real_num_blocks": real_num_blocks,
         "valid_topk_idx_permuted_tile": [],
+        "valid_topk_w_permuted_tile": [],
         "valid_lens_all": valid_lens_all,
         "valid_lens": [],
         "valid_start_indices": [],
@@ -1299,16 +1444,34 @@ def _build_permute_results_per_seq_for_bwd(
 
     for kh in range(num_kv_heads):
         topk_idx_tile = topk_idx[kh:kh + 1]
-        build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
-        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[topk_idx_permuted_tile != -1]
+        if topk_w is None:
+            build_block_to_token_triton(topk_idx_permuted_tile, topk_idx_tile, 0, num_blocks, padding_value=-1)
+        else:
+            assert topk_w_permuted_tile is not None
+            topk_w_tile = topk_w[kh:kh + 1].to(torch.float32).contiguous()
+            build_block_to_token_with_weights_triton(
+                topk_idx_permuted_tile,
+                topk_w_permuted_tile,
+                topk_idx_tile,
+                topk_w_tile,
+                0,
+                num_blocks,
+                padding_value=-1,
+            )
+        mask_valid = topk_idx_permuted_tile != -1
+        valid_topk_idx_permuted_tile = topk_idx_permuted_tile[mask_valid]
         valid_lens = valid_lens_all[kh]
         valid_start_indices = torch.nn.functional.pad(valid_lens.cumsum(0)[:-1], (1, 0), value=0)
 
         permute_results["valid_topk_idx_permuted_tile"].append(valid_topk_idx_permuted_tile)
+        permute_results["valid_topk_w_permuted_tile"].append(
+            topk_w_permuted_tile[mask_valid] if topk_w is not None else None
+        )
         permute_results["valid_lens"].append(valid_lens)
         permute_results["valid_start_indices"].append(valid_start_indices)
 
         topk_idx_permuted_tile.fill_(-1)
+        # Weight tile is only consumed under mask_valid; no need to clear.
 
     return permute_results
 
@@ -1318,6 +1481,7 @@ def _build_permute_results_for_bwd(
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    topk_w: Optional[torch.Tensor] = None,
 ):
     """
     Varlen wrapper for backward permutation metadata.
@@ -1329,9 +1493,11 @@ def _build_permute_results_for_bwd(
         k_start = int(cu_seqlens_k[i].item())
         k_end = int(cu_seqlens_k[i + 1].item())
         topk_idx_seq = topk_idx[:, q_start:q_end].contiguous()
+        topk_w_seq = topk_w[:, q_start:q_end].contiguous() if topk_w is not None else None
         results.append(
             _build_permute_results_per_seq_for_bwd(
                 topk_idx=topk_idx_seq,
+                topk_w=topk_w_seq,
                 total_len_k=(k_end - k_start),
                 block_size=block_size,
             )
@@ -1344,6 +1510,7 @@ def _topk_sparse_attention_fwd_nsa_style(
     k: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     v: torch.Tensor,  # [total_len_k, num_kv_heads, head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_len_q, topk]
+    topk_w: Optional[torch.Tensor],  # [num_kv_heads, total_len_q, topk] or None
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -1391,6 +1558,7 @@ def _topk_sparse_attention_fwd_nsa_style(
         k_seq: torch.Tensor,       # [1, Tk, HK, D]
         v_seq: torch.Tensor,       # [1, Tk, HK, D]
         bi_chunk: torch.Tensor,    # [1, Tq, HK, S]
+        bw_chunk: Optional[torch.Tensor] = None,  # [1, Tq, HK, S]
     ):
         """
         Experimental small-G forward implemented with PyTorch matmul/softmax.
@@ -1427,6 +1595,11 @@ def _topk_sparse_attention_fwd_nsa_style(
         scores = torch.matmul(qg, k_sel.transpose(-1, -2)) * float(sm_scale)     # [Tq, HK, G, Ksel]
         score_mask = valid_tok.unsqueeze(2)                                       # [Tq, HK, 1, Ksel]
         scores = scores.masked_fill(~score_mask, float("-inf"))
+        if bw_chunk is not None:
+            w_ch = bw_chunk[0].to(torch.float32)                                  # [Tq, HK, S]
+            w_tok = w_ch.unsqueeze(-1).expand(tqa, hk, s, block_size).reshape(tqa, hk, ksel)
+            logw = torch.where(w_tok > 0, torch.log(w_tok), torch.full_like(w_tok, float("-inf")))
+            scores = scores + logw.unsqueeze(2)
 
         lse_chunk_e = torch.logsumexp(scores, dim=-1)                             # [Tq, HK, G]
         probs = torch.softmax(scores, dim=-1)
@@ -1463,6 +1636,14 @@ def _topk_sparse_attention_fwd_nsa_style(
                 .contiguous()
                 .unsqueeze(0)
             )                                                         # [1, Tfull, HK, S]
+            bw_seq_full = None
+            if topk_w is not None:
+                bw_seq_full = (
+                    topk_w[:, q_start:q_end, :]
+                    .permute(1, 0, 2)
+                    .contiguous()
+                    .unsqueeze(0)
+                )                                                     # [1, Tfull, HK, S]
 
             hq = int(q_seq_full.shape[2])
             hk = int(k_seq_mem.shape[2])
@@ -1477,6 +1658,7 @@ def _topk_sparse_attention_fwd_nsa_style(
             if nsa_shape_ok:
                 t_full = int(q_seq_full.shape[1])
                 t_mem = int(k_seq_mem.shape[1])
+            if nsa_shape_ok and (t_mem == t_full) and (topk_w is None):
                 # Avoid zero-fill of inactive tail; selected path only indexes memory blocks.
                 k_seq_full = torch.empty(
                     (1, t_full, hk, int(k_seq_mem.shape[-1])),
@@ -1536,6 +1718,14 @@ def _topk_sparse_attention_fwd_nsa_style(
             .contiguous()
             .unsqueeze(0)
         )                                                           # [1, Tq_active, HK, S]
+        bw_seq = None
+        if topk_w is not None:
+            bw_seq = (
+                topk_w[:, q_sub_start:q_sub_end, :]
+                .permute(1, 0, 2)
+                .contiguous()
+                .unsqueeze(0)
+            )                                                       # [1, Tq_active, HK, S]
 
         hq_real = int(q_seq.shape[2])
         hk = int(k_seq.shape[2])
@@ -1576,6 +1766,7 @@ def _topk_sparse_attention_fwd_nsa_style(
             t1 = min(tqa_total, t0 + safe_tokens)
             q_chunk = q_seq[:, t0:t1].contiguous()
             bi_chunk = bi_seq[:, t0:t1].contiguous()
+            bw_chunk = bw_seq[:, t0:t1].contiguous() if bw_seq is not None else None
 
             if use_torch_small_g:
                 o_chunk, lse_chunk_e = _torch_small_g_forward_chunk(
@@ -1583,6 +1774,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                     k_seq=k_seq,
                     v_seq=v_seq,
                     bi_chunk=bi_chunk,
+                    bw_chunk=bw_chunk,
                 )
             elif use_g16_pad:
                 g_target = 16
@@ -1604,6 +1796,7 @@ def _topk_sparse_attention_fwd_nsa_style(
                     k=k_seq,
                     v=v_seq,
                     block_indices=bi_chunk,
+                    block_weights=bw_chunk,
                     block_size=block_size,
                     scale=sm_scale,
                 )
@@ -1636,6 +1829,7 @@ def dq_compute_kernel(
     dq_tiles_ptr,
     token_index_mapping_ptr,
     selected_tokens_ptr,
+    selected_weights_ptr,
     valid_lens_ptr,
     valid_start_indices_ptr,
     cur_max_valid_tokens,
@@ -1666,6 +1860,7 @@ def dq_compute_kernel(
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
     DISABLE_CAUSAL_MASK: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
 
     pid_block = tl.program_id(0)
@@ -1739,6 +1934,10 @@ def dq_compute_kernel(
             if not DISABLE_CAUSAL_MASK:
                 qk += tl.where((st[:, None] >= c + off_k[None, :]), 0, float("-inf"))
             p = tl.exp2(qk - lse)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
+            if HAS_WEIGHTS:
+                w = tl.load(selected_weights_ptr + st_offs, mask=st_mask, other=0.0).to(tl.float32)
+                w = tl.maximum(w, 0.0)
+                p = p * w[:, None]
             dp = tl.dot(do, v)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
             ds = sm_scale * p * (dp - d)  # [BLOCK_SIZE_Q, BLOCK_SIZE_K]
             ds = ds.to(q.dtype)
@@ -2002,6 +2201,9 @@ def backward_dq_opt_per_seq(
 
     for kh in range(num_k_heads):
         valid_topk_idx_permuted_tile = permute_results["valid_topk_idx_permuted_tile"][kh]
+        valid_topk_w_permuted_tile = None
+        if "valid_topk_w_permuted_tile" in permute_results:
+            valid_topk_w_permuted_tile = permute_results["valid_topk_w_permuted_tile"][kh]
         valid_lens = permute_results["valid_lens"][kh]
         valid_start_indices = permute_results["valid_start_indices"][kh]
         valid_lens_cpu = valid_lens.to(dtype=torch.int32, device="cpu").tolist()
@@ -2075,6 +2277,7 @@ def backward_dq_opt_per_seq(
                     dq_buffer,
                     token_index_mapping,
                     valid_topk_idx_permuted_tile,
+                    valid_topk_w_permuted_tile if valid_topk_w_permuted_tile is not None else valid_topk_idx_permuted_tile,
                     cur_valid_lens,
                     cur_valid_start_indices,
                     cur_max_valid_tokens,
@@ -2105,6 +2308,7 @@ def backward_dq_opt_per_seq(
                     BLOCK_SIZE_K=BLOCK_SIZE_K,
                     BLOCK_SIZE_D=BLOCK_SIZE_D,
                     DISABLE_CAUSAL_MASK=disable_causal_mask,
+                    HAS_WEIGHTS=(valid_topk_w_permuted_tile is not None),
                     num_warps=num_warps,
                     num_stages=num_stages,
                 )
@@ -2166,11 +2370,14 @@ def backward_dkdv(
     k_ptr,  # K: n x kh x d
     v_ptr,  # V: n x kh x d
     tq_ptr,  # topk_q_idx: kh x N
+    tq_slot_ptr,  # topk_q_slot: kh x N (slot id in [0, TOPK))
+    tq_w_ptr,  # topk_q_w: kh x N (float32)
     lse_ptr,  # LSE: qh x n
     d_ptr,  # Delta: qh x n
     do_ptr,
     dk_ptr,  # DK: sh x n x kh x d
     dv_ptr,  # DK: sh x n x kh x d
+    dw_ptr,  # DW: kh x n x TOPK (float32) or dummy when HAS_WEIGHTS=0
     # seqlens
     cu_seqlens_q,  # [batch_size + 1]
     cu_seqlens_k,  # [batch_size + 1]
@@ -2195,6 +2402,10 @@ def backward_dkdv(
     stride_vd,
     stride_tqh,
     stride_tqn,
+    stride_tqsh,
+    stride_tqsn,
+    stride_tqwh,
+    stride_tqwn,
     stride_ctqh,
     stride_ctqn,
     stride_lh,
@@ -2212,11 +2423,15 @@ def backward_dkdv(
     stride_dvn,
     stride_dvh,
     stride_dvd,
+    stride_dwh,
+    stride_dwn,
+    stride_dwk,
     # META parameters
     BLOCK_SIZE_Q: tl.constexpr,  # q block size
     BLOCK_SIZE_K: tl.constexpr,  # k block size
     BLOCK_SIZE_D: tl.constexpr,
     DISABLE_CAUSAL_MASK: tl.constexpr,
+    HAS_WEIGHTS: tl.constexpr,
 ):
     qk_scale = sm_scale * 1.44269504
     # get batch id and head id
@@ -2240,6 +2455,9 @@ def backward_dkdv(
     if act_q_len <= 0:
         return
     tq_ptr = tq_ptr + pid_kh * stride_tqh + act_q_start * stride_tqn
+    if HAS_WEIGHTS:
+        tq_slot_ptr = tq_slot_ptr + pid_kh * stride_tqsh + act_q_start * stride_tqsn
+        tq_w_ptr = tq_w_ptr + pid_kh * stride_tqwh + act_q_start * stride_tqwn
     # init pointers
     k_ptrs = tl.make_block_ptr(
         base=k_ptr + k_start * stride_kn + pid_kh * stride_kh,
@@ -2291,25 +2509,30 @@ def backward_dkdv(
     # loop for q blocks
     for i in range(0, act_q_len, BLOCK_SIZE_Q):
         # load
-        idx_q = tl.load(tq_ptr + i + off_q, mask=off_q < act_q_len - i, other=0).to(tl.int32)
+        q_mask = (off_q < act_q_len - i)
+        idx_q = tl.load(tq_ptr + i + off_q, mask=q_mask, other=0).to(tl.int32)
+        if HAS_WEIGHTS:
+            slot = tl.load(tq_slot_ptr + i + off_q, mask=q_mask, other=-1).to(tl.int32)
+            w = tl.load(tq_w_ptr + i + off_q, mask=q_mask, other=0.0).to(tl.float32)
+            w = tl.maximum(w, 0.0)
         q = tl.load(
             q_ptrs + idx_q[:, None] * stride_qn,
-            mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+            mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
             other=0,
         )
         do = tl.load(
             do_ptrs + idx_q[:, None] * stride_don,
-            mask=(off_q < act_q_len - i)[:, None] & (off_d < HEAD_DIM)[None, :],
+            mask=q_mask[:, None] & (off_d < HEAD_DIM)[None, :],
             other=0,
         )
         lse = tl.load(
             lse_ptrs + idx_q[:, None] * stride_ln,
-            mask=(off_q < act_q_len - i)[:, None],
+            mask=q_mask[:, None],
             other=0,
         )
         d = tl.load(
             d_ptrs + idx_q[:, None] * stride_dn,
-            mask=(off_q < act_q_len - i)[:, None],
+            mask=q_mask[:, None],
             other=0,
         )
         # compute qk
@@ -2318,14 +2541,25 @@ def backward_dkdv(
             qk += tl.where(idx_q[:, None] >= off_k[None, :], float(0.0), float("-inf"))
         # compute p, ds
         p = tl.exp2(qk - lse)
+        if HAS_WEIGHTS:
+            p = p * w[:, None]
         dp = tl.dot(do, v.T)
-        ds = sm_scale * p * (dp - d)
+        ds_fp32 = sm_scale * p * (dp - d)
         # cast dtype
         p = p.to(do.dtype)
-        ds = ds.to(q.dtype)
+        ds = ds_fp32.to(q.dtype)
         # update dk and dv
         dk += tl.dot(ds.T, q)
         dv += tl.dot(p.T, do)
+        if HAS_WEIGHTS:
+            # dL/d(log w_s) = sum_i p_i * (dp_i - d) = sum(ds)/sm_scale
+            # dL/dw_s = (1/w_s) * dL/d(log w_s)
+            dlogw = tl.sum(ds_fp32, axis=1) / sm_scale
+            dw = tl.where(w > 0, dlogw / w, 0.0).to(tl.float32)
+            q_abs = q_start + idx_q
+            m_dw = q_mask & (slot >= 0) & (slot < TOPK) & (w > 0)
+            dw_ptrs = dw_ptr + pid_kh * stride_dwh + q_abs * stride_dwn + slot * stride_dwk
+            tl.atomic_add(dw_ptrs, dw, mask=m_dw)
     # save dk dv
     tl.store(dk_ptrs, dk.to(dk_ptr.dtype.element_ty), boundary_check=(0, 1))
     tl.store(dv_ptrs, dv.to(dv_ptr.dtype.element_ty), boundary_check=(0, 1))
@@ -2339,6 +2573,7 @@ def _topk_sparse_attention_bwd_opt(
     k: torch.Tensor,
     v: torch.Tensor,
     topk_idx: torch.Tensor,
+    topk_w: Optional[torch.Tensor],
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
@@ -2408,7 +2643,24 @@ def _topk_sparse_attention_bwd_opt(
     ).to(torch.int32)
     # active query idx for each key block
     # how to get active query idx for sequence b, head h, kv block i?
-    topk_q_idx = reorder_topk_idx(topk_idx, cu_topk_q_count, cu_seqlens_q, cu_seqblocks, block_size)
+    has_weights = topk_w is not None
+    if has_weights:
+        topk_q_idx, topk_q_slot, topk_q_w = reorder_topk_idx(
+            topk_idx,
+            cu_topk_q_count,
+            cu_seqlens_q,
+            cu_seqblocks,
+            block_size,
+            topk_w=topk_w,
+            return_slot=True,
+            return_weights=True,
+        )
+        dw = torch.zeros_like(topk_w, dtype=torch.float32, device=topk_w.device)
+    else:
+        topk_q_idx = reorder_topk_idx(topk_idx, cu_topk_q_count, cu_seqlens_q, cu_seqblocks, block_size)
+        topk_q_slot = topk_q_idx  # dummy - never read when HAS_WEIGHTS=0
+        topk_q_w = delta[:1, :1]  # dummy - never read when HAS_WEIGHTS=0
+        dw = None
     # compute dk dv
     dk = torch.zeros(num_share_q_heads, k_len, num_k_heads, head_dim, device=k.device, dtype=k.dtype)
     dv = torch.zeros(num_share_q_heads, k_len, num_k_heads, head_dim, device=k.device, dtype=k.dtype)
@@ -2426,11 +2678,14 @@ def _topk_sparse_attention_bwd_opt(
         k,
         v,
         topk_q_idx,
+        topk_q_slot,
+        topk_q_w,
         lse,
         delta,
         do,
         dk,
         dv,
+        dw if dw is not None else delta[:1, :1],
         cu_seqlens_q,
         cu_seqlens_k,
         cu_seqblocks,
@@ -2451,6 +2706,10 @@ def _topk_sparse_attention_bwd_opt(
         v.stride(2),
         topk_q_idx.stride(0),
         topk_q_idx.stride(1),
+        topk_q_slot.stride(0),
+        topk_q_slot.stride(1),
+        topk_q_w.stride(0),
+        topk_q_w.stride(1),
         cu_topk_q_count.stride(0),
         cu_topk_q_count.stride(1),
         lse.stride(0),
@@ -2468,10 +2727,14 @@ def _topk_sparse_attention_bwd_opt(
         dv.stride(1),
         dv.stride(2),
         dv.stride(3),
+        (dw.stride(0) if dw is not None else 0),
+        (dw.stride(1) if dw is not None else 0),
+        (dw.stride(2) if dw is not None else 0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         BLOCK_SIZE_D=BLOCK_SIZE_D,
         DISABLE_CAUSAL_MASK=disable_causal_mask,
+        HAS_WEIGHTS=has_weights,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -2506,7 +2769,7 @@ def _topk_sparse_attention_bwd_opt(
         disable_causal_mask=disable_causal_mask,
     )
 
-    return dq, dk, dv
+    return dq, dk, dv, dw
 
 
 class FSATopkSparseAttention(torch.autograd.Function):
@@ -2604,24 +2867,141 @@ class FSATopkSparseAttention(torch.autograd.Function):
                 cu_seqlens_k=cu_seqlens_k,
             )
 
-        dq, dk, dv = _topk_sparse_attention_bwd_opt(
-                o,
-                do,
-                lse,
+        dq, dk, dv, _dw = _topk_sparse_attention_bwd_opt(
+                 o,
+                 do,
+                 lse,
+                 q,
+                 k,
+                 v,
+                 topk_idx,
+                 None,
+                 block_size,
+                 cu_seqlens_q,
+                 cu_seqlens_k,
+                 max_seqlen_q,
+                 max_seqlen_k,
+                 sm_scale,
+                 permute_results,
+                 disable_causal_mask=disable_causal_mask,
+             )
+        return dq, dk, dv, None, None, None, None, None, None, None, None
+
+
+class FSATopkSparseAttentionWeighted(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        q: torch.Tensor,  # [total_len, num_q_heads, head_dim]
+        k: torch.Tensor,  # [total_len, num_k_heads, head_dim]
+        v: torch.Tensor,  # [total_len, num_k_heads, head_dim]
+        topk_idx: torch.Tensor,  # [num_kv_heads, total_len, topk]
+        topk_w: torch.Tensor,  # [num_kv_heads, total_len, topk]
+        block_size: int,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: torch.Tensor,
+        max_seqlen_k: torch.Tensor,
+        sm_scale=None,
+        disable_causal_mask: bool = False,
+    ):
+        assert q.dtype == torch.bfloat16 or q.dtype == torch.float16
+        assert q.dtype == k.dtype and k.dtype == v.dtype
+        assert topk_idx.dtype == torch.int32
+        assert topk_w.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        assert cu_seqlens_q.dtype == torch.int32 and cu_seqlens_k.dtype == torch.int32
+        if sm_scale is None:
+            sm_scale = 1 / math.sqrt(q.shape[-1])
+
+        hq = int(q.shape[1])
+        hk = int(k.shape[1])
+        gqa_deg = (hq // hk) if (hk > 0 and hq % hk == 0) else -1
+        use_nsa_style_fwd = os.getenv("FSA_LOCAL_USE_NSA_STYLE_FWD", "1").strip().lower() not in (
+            "0", "false", "no", "off", ""
+        )
+        small_g_mode = os.getenv("FSA_LOCAL_SMALL_G_MODE", "fallback").strip().lower()
+        if small_g_mode not in ("pad", "fma", "torch", "fallback"):
+            small_g_mode = "pad"
+        if gqa_deg > 0 and gqa_deg < 16 and small_g_mode == "fallback":
+            use_nsa_style_fwd = False
+        permute_results = None
+
+        if use_nsa_style_fwd:
+            o, lse = _topk_sparse_attention_fwd_nsa_style(
+                q=q,
+                k=k,
+                v=v,
+                topk_idx=topk_idx,
+                topk_w=topk_w,
+                block_size=block_size,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                sm_scale=sm_scale,
+            )
+            permute_results = None
+        else:
+            o, lse, permute_results = _topk_sparse_attention_fwd_opt(
                 q,
                 k,
                 v,
                 topk_idx,
+                topk_w,
                 block_size,
                 cu_seqlens_q,
                 cu_seqlens_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 sm_scale,
-                permute_results,
-                disable_causal_mask=disable_causal_mask,
             )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+
+        ctx.save_for_backward(q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k, topk_idx, topk_w)
+        ctx.permute_results = permute_results
+        ctx.sm_scale = sm_scale
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_k = max_seqlen_k
+        ctx.block_size = block_size
+        ctx.disable_causal_mask = disable_causal_mask
+        return o
+
+    @staticmethod
+    def backward(ctx, do: torch.Tensor, *args) -> Any:
+        q, k, v, o, lse, cu_seqlens_q, cu_seqlens_k, topk_idx, topk_w = ctx.saved_tensors
+        permute_results = ctx.permute_results
+
+        max_seqlen_q = ctx.max_seqlen_q
+        max_seqlen_k = ctx.max_seqlen_k
+        sm_scale = ctx.sm_scale
+        block_size = ctx.block_size
+        disable_causal_mask = ctx.disable_causal_mask
+        assert block_size in {32, 64, 128, 256, 512, 1024}
+        if permute_results is None:
+            permute_results = _build_permute_results_for_bwd(
+                topk_idx=topk_idx,
+                block_size=block_size,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                topk_w=topk_w,
+            )
+
+        dq, dk, dv, dw = _topk_sparse_attention_bwd_opt(
+            o,
+            do,
+            lse,
+            q,
+            k,
+            v,
+            topk_idx,
+            topk_w,
+            block_size,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            sm_scale,
+            permute_results,
+            disable_causal_mask=disable_causal_mask,
+        )
+        return dq, dk, dv, None, dw, None, None, None, None, None, None, None
 
 
 def FSA_topk_sparse_attention(
@@ -2719,6 +3099,25 @@ def _expand_topk_for_internal_blocks(
     return expanded.reshape(topk_idx.shape[0], topk_idx.shape[1], topk_idx.shape[2] * ratio).contiguous()
 
 
+def _expand_topk_w_for_internal_blocks(
+    topk_w: torch.Tensor,
+    block_size: int,
+    internal_block_size: int,
+) -> torch.Tensor:
+    """
+    Match _expand_topk_for_internal_blocks expansion for per-topk weights.
+
+    For each original chapter weight w, replicate across sub-block ids created by the split.
+    """
+    ratio = block_size // internal_block_size
+    if ratio == 1:
+        return topk_w
+    # topk_w: [H, N, S] -> expanded: [H, N, S*ratio]
+    w = topk_w.to(torch.float32)
+    expanded = w.unsqueeze(-1).expand(w.shape[0], w.shape[1], w.shape[2], ratio)
+    return expanded.reshape(w.shape[0], w.shape[1], w.shape[2] * ratio).contiguous()
+
+
 def FSA_topk_sparse_attention_varlen_qk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -2727,6 +3126,7 @@ def FSA_topk_sparse_attention_varlen_qk(
     block_size: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
+    topk_w: Optional[torch.Tensor] = None,
     max_seqlen_q: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     softmax_scale: Optional[float] = None,
@@ -2738,16 +3138,36 @@ def FSA_topk_sparse_attention_varlen_qk(
     """
     internal_block_size = _resolve_internal_block_size(block_size)
     topk_idx_internal = _expand_topk_for_internal_blocks(topk_idx, block_size, internal_block_size)
+    topk_w_internal = (
+        _expand_topk_w_for_internal_blocks(topk_w, block_size, internal_block_size)
+        if topk_w is not None
+        else None
+    )
 
     if max_seqlen_q is None:
         max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max().item())
     if max_seqlen_k is None:
         max_seqlen_k = int((cu_seqlens_k[1:] - cu_seqlens_k[:-1]).max().item())
-    return FSATopkSparseAttention.apply(
+    if topk_w_internal is None:
+        return FSATopkSparseAttention.apply(
+            q,
+            k,
+            v,
+            topk_idx_internal,
+            internal_block_size,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            softmax_scale,
+            disable_causal_mask,
+        )
+    return FSATopkSparseAttentionWeighted.apply(
         q,
         k,
         v,
         topk_idx_internal,
+        topk_w_internal,
         internal_block_size,
         cu_seqlens_q,
         cu_seqlens_k,
@@ -2764,10 +3184,12 @@ def FSA_topk_sparse_attention_bthd(
     v_bthd: torch.Tensor,
     block_indices_bths: Optional[torch.Tensor],
     block_size: int,
+    block_weights_bths: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_k: Optional[torch.Tensor] = None,
     topk_idx_hns: Optional[torch.Tensor] = None,
+    topk_w_hns: Optional[torch.Tensor] = None,
     assume_sorted_topk: bool = False,
     disable_causal_mask: bool = False,
 ) -> torch.Tensor:
@@ -2805,6 +3227,7 @@ def FSA_topk_sparse_attention_bthd(
     k = k_bthd.reshape(B * Tk, HK, D).contiguous()
     v = v_bthd.reshape(B * Tk, HK, D).contiguous()
 
+    topk_w: Optional[torch.Tensor] = None
     if topk_idx_hns is not None:
         if topk_idx_hns.ndim != 3:
             raise ValueError("topk_idx_hns must be rank-3 [HK or HQ, B*Tq, topk].")
@@ -2814,11 +3237,20 @@ def FSA_topk_sparse_attention_bthd(
             )
         if topk_idx_hns.shape[0] == HK:
             topk_idx = topk_idx_hns
+            if topk_w_hns is not None:
+                if topk_w_hns.shape != topk_idx_hns.shape:
+                    raise ValueError("topk_w_hns must match topk_idx_hns shape.")
+                topk_w = topk_w_hns
         elif topk_idx_hns.shape[0] == HQ:
             # Convert per-query-head routes to per-kv-head routes by taking the first query-head
             # in each GQA group. In typical GQA use these are shared across the group.
             topk_idx_hns = topk_idx_hns.contiguous()
             topk_idx = topk_idx_hns.view(HK, gqa_deg, B * Tq, topk_idx_hns.shape[-1])[:, 0, :, :]
+            if topk_w_hns is not None:
+                if topk_w_hns.shape != topk_idx_hns.shape:
+                    raise ValueError("topk_w_hns must match topk_idx_hns shape.")
+                topk_w_hns = topk_w_hns.contiguous()
+                topk_w = topk_w_hns.view(HK, gqa_deg, B * Tq, topk_w_hns.shape[-1])[:, 0, :, :]
         else:
             raise ValueError(
                 f"topk_idx_hns first dim must be HK={HK} or HQ={HQ}, got {topk_idx_hns.shape[0]}."
@@ -2832,9 +3264,18 @@ def FSA_topk_sparse_attention_bthd(
             raise ValueError("block_indices_bths must have prefix [B,Tq,...] matching q.")
         if block_indices_bths.shape[2] == HK:
             topk_idx = block_indices_bths.permute(0, 2, 1, 3).reshape(HK, B * Tq, -1)
+            if block_weights_bths is not None:
+                if block_weights_bths.shape != block_indices_bths.shape:
+                    raise ValueError("block_weights_bths must match block_indices_bths shape.")
+                topk_w = block_weights_bths.permute(0, 2, 1, 3).reshape(HK, B * Tq, -1)
         elif block_indices_bths.shape[2] == HQ:
             topk_idx_q = block_indices_bths.permute(0, 2, 1, 3).reshape(HQ, B * Tq, -1).contiguous()
             topk_idx = topk_idx_q.view(HK, gqa_deg, B * Tq, topk_idx_q.shape[-1])[:, 0, :, :]
+            if block_weights_bths is not None:
+                if block_weights_bths.shape != block_indices_bths.shape:
+                    raise ValueError("block_weights_bths must match block_indices_bths shape.")
+                topk_w_q = block_weights_bths.permute(0, 2, 1, 3).reshape(HQ, B * Tq, -1).contiguous()
+                topk_w = topk_w_q.view(HK, gqa_deg, B * Tq, topk_w_q.shape[-1])[:, 0, :, :]
         else:
             raise ValueError(
                 f"block_indices_bths third dim must be HK={HK} or HQ={HQ}, got {block_indices_bths.shape[2]}."
@@ -2845,8 +3286,14 @@ def FSA_topk_sparse_attention_bthd(
     if not assume_sorted_topk:
         # FSA kernels expect per-query top-k entries to be ordered; unsorted entries
         # can mis-handle causal-valid counts vs traversal order.
-        topk_idx = topk_idx.sort(dim=-1).values
+        if topk_w is None:
+            topk_idx = topk_idx.sort(dim=-1).values
+        else:
+            topk_idx, order = topk_idx.sort(dim=-1)
+            topk_w = topk_w.to(torch.float32).gather(dim=-1, index=order)
     topk_idx = topk_idx.contiguous()
+    if topk_w is not None:
+        topk_w = topk_w.to(torch.float32).contiguous()
 
     if cu_seqlens_q is None:
         cu_seqlens_q = torch.arange(B + 1, device=device, dtype=torch.int32) * Tq
@@ -2858,6 +3305,7 @@ def FSA_topk_sparse_attention_bthd(
         k=k,
         v=v,
         topk_idx=topk_idx,
+        topk_w=topk_w,
         block_size=block_size,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
