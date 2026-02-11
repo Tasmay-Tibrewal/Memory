@@ -13,7 +13,7 @@ Supports:
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,6 +30,11 @@ try:
     FLASH_ATTN_AVAILABLE = True
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
+
+from .token_routing_kernel import get_token_routing_kernel_fn, normalize_kernel_version
+
+
+_TOKEN_ROUTED_FALLBACK_WARNED = False
 
 
 class MemoryCrossAttention(nn.Module):
@@ -310,7 +315,9 @@ class MemoryCrossAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        memory: torch.Tensor,
+        memory: Optional[torch.Tensor] = None,
+        token_routing_state: Optional[Dict[str, Any]] = None,
+        token_routing_kernel_version: str = "v2",
         return_attn_weights: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
@@ -319,7 +326,17 @@ class MemoryCrossAttention(nn.Module):
         Args:
             hidden_states: Input tensor (batch_size, seq_len, hidden_dim)
             memory: Memory bank tokens (num_tokens, memory_dim) or
-                   (batch_size, num_tokens, memory_dim) for batched routing
+                   (batch_size, num_tokens, memory_dim) for batched routing.
+                   Can be None when token_routing_state is provided.
+            token_routing_state: Optional token-level routing payload containing:
+                - shared_memory: dense shared-chapter memory
+                - routed_memory: routed-chapter memory bank
+                - token_chapter_indices: per-token routed chapter ids
+                - tokens_per_chapter: chapter size
+                - routed_scale: scaling factor for routed branch
+                - kernel_version / assume_sorted_topk (optional)
+            token_routing_kernel_version: Sparse routed branch kernel version
+                ('v1', 'v2', 'v3'), used when state omits kernel_version.
             return_attn_weights: Whether to return attention weights
             
         Returns:
@@ -327,7 +344,58 @@ class MemoryCrossAttention(nn.Module):
             - Output tensor (batch_size, seq_len, hidden_dim)
             - Optional attention weights if return_attn_weights=True
         """
-        batch_size, seq_len, _ = hidden_states.shape
+        if token_routing_state is not None:
+            if return_attn_weights:
+                raise ValueError(
+                    "return_attn_weights=True is not supported for token_routing_state path."
+                )
+
+            # Mirror memory-checkpoint behavior for token-routed path so
+            # memory_gradient_checkpointing applies consistently.
+            use_checkpoint = (
+                self.gradient_checkpointing
+                and self.training
+                and torch.is_grad_enabled()
+                and not self.use_flash_attention
+            )
+
+            if use_checkpoint:
+                if not CHECKPOINT_AVAILABLE or torch_checkpoint is None:
+                    import warnings
+
+                    warnings.warn(
+                        "memory_gradient_checkpointing is enabled but torch.utils.checkpoint is unavailable. "
+                        "Running without checkpointing.",
+                        UserWarning,
+                    )
+                    preproj = self._forward_token_routed_attention(
+                        hidden_states=hidden_states,
+                        token_routing_state=token_routing_state,
+                        token_routing_kernel_version=token_routing_kernel_version,
+                    )
+                else:
+                    def _token_routed_forward(h: torch.Tensor) -> torch.Tensor:
+                        return self._forward_token_routed_attention(
+                            hidden_states=h,
+                            token_routing_state=token_routing_state,
+                            token_routing_kernel_version=token_routing_kernel_version,
+                        )
+
+                    preproj = torch_checkpoint(
+                        _token_routed_forward,
+                        hidden_states,
+                        use_reentrant=False,
+                    )
+            else:
+                preproj = self._forward_token_routed_attention(
+                    hidden_states=hidden_states,
+                    token_routing_state=token_routing_state,
+                    token_routing_kernel_version=token_routing_kernel_version,
+                )
+            return self._project_output(preproj), None
+
+        if memory is None:
+            raise ValueError("memory must be provided when token_routing_state is None.")
         
         # Use gradient checkpointing when enabled, training, and no flash attention
         # (Flash attention already has implicit checkpointing)
@@ -359,10 +427,7 @@ class MemoryCrossAttention(nn.Module):
             attn_output = self._forward_attention(hidden_states, memory)
         
         # Output projection (not checkpointed - small compared to attention)
-        if hasattr(self, 'use_low_rank_projections') and self.use_low_rank_projections:
-            output = self.o_up(self.o_down(attn_output))
-        else:
-            output = self.o_proj(attn_output)
+        output = self._project_output(attn_output)
         
         if return_attn_weights and not self.use_flash_attention:
             # Recompute weights for returning
@@ -378,6 +443,12 @@ class MemoryCrossAttention(nn.Module):
             return output, attn_weights
         
         return output, None
+
+    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Apply output projection for the current memory-attention variant."""
+        if hasattr(self, 'use_low_rank_projections') and self.use_low_rank_projections:
+            return self.o_up(self.o_down(attn_output))
+        return self.o_proj(attn_output)
     
     def _forward_attention(
         self, 
@@ -400,6 +471,190 @@ class MemoryCrossAttention(nn.Module):
             attn_output = attn_output.reshape(batch_size, seq_len, self.hidden_dim)
         
         return attn_output
+
+    def _forward_token_routed_attention(
+        self,
+        hidden_states: torch.Tensor,
+        token_routing_state: Dict[str, Any],
+        token_routing_kernel_version: str = "v2",
+    ) -> torch.Tensor:
+        """
+        Token-routed memory attention.
+
+        Design:
+          1. Shared chapters are attended densely (FlashAttention when available,
+             otherwise standard PyTorch attention path).
+          2. Routed chapters are attended via sparse top-k chapter indices:
+             - kernel path using kernels-final v1/v2/v3
+             - emulated sparse fallback when kernel path is unavailable
+        """
+        shared_memory = token_routing_state.get("shared_memory")
+        routed_memory = token_routing_state.get("routed_memory")
+        token_chapter_indices = token_routing_state.get("token_chapter_indices", None)
+        tokens_per_chapter = int(token_routing_state.get("tokens_per_chapter", 0))
+        routed_scale = float(token_routing_state.get("routed_scale", 1.0))
+        assume_sorted_topk = bool(token_routing_state.get("assume_sorted_topk", False))
+        kernel_version = token_routing_state.get(
+            "kernel_version",
+            token_routing_kernel_version,
+        )
+        kernel_version = normalize_kernel_version(kernel_version)
+
+        if token_chapter_indices is None:
+            raise ValueError("token_routing_state must include token_chapter_indices.")
+        if token_chapter_indices.dim() != 3:
+            raise ValueError(
+                "token_chapter_indices must be rank-3 [B, T, topk], "
+                f"got shape {tuple(token_chapter_indices.shape)}."
+            )
+        if token_chapter_indices.shape[0] != hidden_states.shape[0] or token_chapter_indices.shape[1] != hidden_states.shape[1]:
+            raise ValueError(
+                "token_chapter_indices shape prefix must match hidden_states [B, T, ...]. "
+                f"got hidden_states={tuple(hidden_states.shape)}, token_chapter_indices={tuple(token_chapter_indices.shape)}"
+            )
+
+        out_dim = self.reduced_dim if self.reduced_dim_mode else self.hidden_dim
+        combined = hidden_states.new_zeros(
+            (hidden_states.shape[0], hidden_states.shape[1], out_dim)
+        )
+
+        # Dense shared-chapter path (FlashAttention if available, else PyTorch).
+        if shared_memory is not None and shared_memory.numel() > 0:
+            combined = combined + self._forward_attention(hidden_states, shared_memory)
+
+        # Sparse routed-chapter path.
+        if (
+            routed_memory is not None
+            and routed_memory.numel() > 0
+            and token_chapter_indices.shape[-1] > 0
+            and tokens_per_chapter > 0
+        ):
+            q, k, v = self._compute_qkv(hidden_states, routed_memory)
+            scale = self.reduced_scale if self.reduced_dim_mode else self.scale
+
+            use_kernel = (
+                q.is_cuda
+                and q.dtype in (torch.float16, torch.bfloat16)
+                and tokens_per_chapter in {32, 64, 128, 256, 512, 1024}
+            )
+            routed_heads: Optional[torch.Tensor] = None
+            if use_kernel:
+                try:
+                    routed_heads = self._token_routed_sparse_attention_kernel(
+                        q=q,
+                        k=k,
+                        v=v,
+                        token_chapter_indices=token_chapter_indices,
+                        block_size=tokens_per_chapter,
+                        scale=scale,
+                        assume_sorted_topk=assume_sorted_topk,
+                        kernel_version=kernel_version,
+                    )
+                except Exception:
+                    routed_heads = None
+
+            if routed_heads is None:
+                global _TOKEN_ROUTED_FALLBACK_WARNED
+                if not _TOKEN_ROUTED_FALLBACK_WARNED:
+                    print(
+                        "MemoryCrossAttention token-routing warning: "
+                        "falling back to emulated sparse attention path "
+                        "(kernel unavailable or unsupported shape/dtype)."
+                    )
+                    _TOKEN_ROUTED_FALLBACK_WARNED = True
+                routed_heads = self._token_routed_sparse_attention_emulated(
+                    q=q,
+                    k=k,
+                    v=v,
+                    token_chapter_indices=token_chapter_indices,
+                    block_size=tokens_per_chapter,
+                    scale=scale,
+                )
+
+            routed = routed_heads.reshape(
+                hidden_states.shape[0],
+                hidden_states.shape[1],
+                out_dim,
+            )
+            combined = combined + (routed * routed_scale)
+
+        return combined
+
+    def _token_routed_sparse_attention_kernel(
+        self,
+        q: torch.Tensor,  # [B, Tq, HQ, D]
+        k: torch.Tensor,  # [B, Tk, HK, D]
+        v: torch.Tensor,  # [B, Tk, HK, D]
+        token_chapter_indices: torch.Tensor,  # [B, Tq, topk]
+        block_size: int,
+        scale: float,
+        assume_sorted_topk: bool,
+        kernel_version: str,
+    ) -> torch.Tensor:
+        """Run kernel-backed sparse token-routing attention."""
+        block_indices = token_chapter_indices.to(dtype=torch.int32, device=q.device)
+        block_indices = block_indices.unsqueeze(2).expand(
+            q.shape[0],
+            q.shape[1],
+            self.num_kv_heads,
+            block_indices.shape[-1],
+        ).contiguous()
+
+        fn = get_token_routing_kernel_fn(kernel_version)
+        return fn(
+            q_bthd=q.contiguous(),
+            k_bthd=k.contiguous(),
+            v_bthd=v.contiguous(),
+            block_indices_bths=block_indices,
+            block_size=int(block_size),
+            softmax_scale=float(scale),
+            assume_sorted_topk=bool(assume_sorted_topk),
+            disable_causal_mask=True,
+        )
+
+    def _token_routed_sparse_attention_emulated(
+        self,
+        q: torch.Tensor,  # [B, Tq, HQ, D]
+        k: torch.Tensor,  # [B, Tk, HK, D]
+        v: torch.Tensor,  # [B, Tk, HK, D]
+        token_chapter_indices: torch.Tensor,  # [B, Tq, topk]
+        block_size: int,
+        scale: float,
+    ) -> torch.Tensor:
+        """
+        Emulated sparse token-routing attention.
+
+        This path is significantly slower than the kernel path and exists as a
+        functional fallback for unsupported environments/shapes.
+        """
+        batch_size, tq, hq, d = q.shape
+        hk = k.shape[2]
+        gqa_deg = hq // hk
+        out = torch.zeros_like(q)
+        token_offsets = torch.arange(block_size, device=q.device, dtype=torch.long)
+
+        for b in range(batch_size):
+            # [Tq, topk * block_size]
+            tok = (
+                token_chapter_indices[b].to(torch.long).unsqueeze(-1) * block_size
+                + token_offsets.view(1, 1, -1)
+            ).reshape(tq, -1)
+            for kh in range(hk):
+                kk = k[b, :, kh, :]  # [Tk, D]
+                vv = v[b, :, kh, :]  # [Tk, D]
+                gathered_k = kk[tok]  # [Tq, Lsel, D]
+                gathered_v = vv[tok]  # [Tq, Lsel, D]
+                for g in range(gqa_deg):
+                    qh = (kh * gqa_deg) + g
+                    q_vec = q[b, :, qh, :].unsqueeze(1)  # [Tq, 1, D]
+                    scores = (q_vec * gathered_k).sum(dim=-1) * scale  # [Tq, Lsel]
+                    attn = F.softmax(scores, dim=-1)
+                    out[b, :, qh, :] = torch.sum(
+                        attn.unsqueeze(-1) * gathered_v,
+                        dim=1,
+                    )
+
+        return out
 
 
 class MemoryCrossAttentionWithRouting(nn.Module):

@@ -57,6 +57,28 @@ Keep v1 and v3 as:
 - v1: simplest fallback/reference.
 - v3: stable alternate that can win on some shapes.
 
+## Repository Integration (Implemented)
+
+Token-level routing is now integrated in the main model stack (`memory_transformer/`), not just benchmark scripts.
+
+When `memory.routing_strategy_train` or `memory.routing_strategy_inference` is set to `token`, the attention path is:
+
+1. Shared chapters (prefix chapters) -> dense cross-attention path (FlashAttention when available; PyTorch fallback otherwise).
+2. Routed chapters (per-token top-k) -> sparse routed path via selected kernel from this folder.
+3. Final output -> `shared_output + routed_scaling_factor * routed_output`.
+
+Kernel selection is controlled by:
+
+- `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`).
+
+Current wiring uses:
+
+- v1 -> `kernels-final/kernel_v1.py`
+- v2 -> `kernels-final/kernel_v2.py` (default)
+- v3 -> `kernels-final/kernel_v3.py`
+
+If the sparse kernel path is unavailable for the current runtime (for example unsupported device/dtype/shape), the model falls back to an emulated sparse PyTorch path for functional correctness.
+
 ## What "v1/v2/v3" Means Here
 
 These are not "semantic versions" of the whole repository. They are just a naming scheme for the kernel variants that were kept as practical options:

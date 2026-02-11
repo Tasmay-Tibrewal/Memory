@@ -19,7 +19,8 @@ class ChapterRouter(nn.Module):
     Uses configurable sequence-level routing:
     - mean-pooled sequence ("sequence")
     - average of rolling-window means ("sequence-rolling")
-    then computes chapter importance scores.
+    - optional token-level routing helper (`route_token_level`) for per-token
+      chapter selection.
     
     Inspired by MoE routing (Switch Transformer, GShard).
     """
@@ -39,7 +40,8 @@ class ChapterRouter(nn.Module):
             routing_strategy:
                 - "sequence": mean-pool over sequence
                 - "sequence-rolling" (or "sequence_rolling"): average of per-position rolling means
-                - "token": per-token router logits, then sequence-aggregated selection
+                - "token": kept for backward compatibility in `forward()`;
+                  use `route_token_level()` for true per-token chapter selection.
         """
         super().__init__()
         
@@ -256,6 +258,86 @@ class ChapterRouter(nn.Module):
         losses["entropy"] = entropy
         
         return losses
+
+    def route_token_level(
+        self,
+        hidden_states: torch.Tensor,
+        return_losses: bool = True,
+        exclude_prefix_chapters: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute token-level chapter routing.
+
+        Args:
+            hidden_states: (batch_size, seq_len, hidden_dim)
+            return_losses: Whether to compute router auxiliary losses
+            exclude_prefix_chapters: Exclude first N chapters from routed selection
+                (used when those chapters are treated as always-on shared chapters).
+
+        Returns:
+            Tuple of:
+            - chapter_indices: (batch_size, seq_len, top_k_selected)
+            - chapter_weights: (batch_size, seq_len, top_k_selected)
+            - losses: Router loss dict (empty when return_losses=False)
+        """
+        if hidden_states.dim() != 3:
+            raise ValueError(
+                f"hidden_states must be 3D (B, T, D), got shape {tuple(hidden_states.shape)}"
+            )
+        if exclude_prefix_chapters < 0 or exclude_prefix_chapters > self.num_chapters:
+            raise ValueError(
+                f"exclude_prefix_chapters must be in [0, {self.num_chapters}], "
+                f"got {exclude_prefix_chapters}"
+            )
+
+        batch_size, seq_len, _ = hidden_states.shape
+        logits = self.router(hidden_states)  # (B, T, C)
+        probs = F.softmax(logits, dim=-1)
+
+        available = self.num_chapters - exclude_prefix_chapters
+        select_k = min(int(self.top_k), int(available))
+        if select_k <= 0:
+            empty_idx = torch.empty(
+                (batch_size, seq_len, 0),
+                dtype=torch.long,
+                device=hidden_states.device,
+            )
+            empty_w = torch.empty(
+                (batch_size, seq_len, 0),
+                dtype=probs.dtype,
+                device=hidden_states.device,
+            )
+            losses = {}
+            if return_losses:
+                flat_logits = logits.reshape(-1, self.num_chapters)
+                flat_probs = probs.reshape(-1, self.num_chapters)
+                flat_idx = torch.empty(
+                    (batch_size * seq_len, 0),
+                    dtype=torch.long,
+                    device=hidden_states.device,
+                )
+                losses = self._compute_losses(flat_logits, flat_probs, flat_idx)
+            return empty_idx, empty_w, losses
+
+        routed_probs = probs[..., exclude_prefix_chapters:]  # (B, T, C_shared_removed)
+        routed_probs = routed_probs / routed_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        chapter_weights, chapter_indices_local = torch.topk(
+            routed_probs,
+            k=select_k,
+            dim=-1,
+        )
+        chapter_weights = chapter_weights / chapter_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        chapter_indices = chapter_indices_local + int(exclude_prefix_chapters)
+
+        losses = {}
+        if return_losses:
+            losses = self._compute_losses(
+                logits.reshape(-1, self.num_chapters),
+                probs.reshape(-1, self.num_chapters),
+                chapter_indices.reshape(-1, select_k),
+            )
+
+        return chapter_indices, chapter_weights, losses
 
 
 class TokenLevelRouter(nn.Module):

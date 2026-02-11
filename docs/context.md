@@ -123,9 +123,10 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 - **Rationale**: A is simpler, matches cross-attention patterns
 
 ### Decision 3: Routing Strategy
-- **Training**: Sequence-level only (mean-pool)
-- **Inference**: Sequence/Rolling/Token/Hybrid options
-- **Rationale**: Token-level during prefill is memory prohibitive (~150TB)
+- **Default**: Sequence-level routing (mean-pool)
+- **Optional**: Token-level routing for train/inference via `routing_strategy_*: token`
+- **Implementation**: Dense shared-chapter branch + sparse routed-chapter kernel branch (`v1/v2/v3`, default `v2`)
+- **Rationale**: Avoid naive token-level KV duplication while preserving per-token routing expressiveness
 
 ### Decision 4: W_o Initialization
 - **Choice**: Zero initialization
@@ -143,7 +144,7 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | Feature | Reason | Future Priority |
 |---------|--------|-----------------|
 | Dynamic context bank | Post-workshop (VAE, clustering needed) | Low |
-| Token-level routing (prefill) | Not in core `memory_transformer/` path yet; kernel experiments live in `kernels/` and stable candidates in `kernels-final/` | Medium |
+| Broad token-routing benchmark/policy retuning | Core path is implemented; broader shape/GPU validation and tuning still pending | Medium |
 | Unit tests | User requested to skip | Low |
 | QAT for memory | Basic quantization only | Low |
 
@@ -197,6 +198,7 @@ shared_routed_norm_eps: float = 1e-6
 routing_strategy_train: str = "sequence"       # sequence/sequence-rolling/token
 routing_strategy_inference: str = "sequence"   # sequence/sequence-rolling/rolling/token/hybrid
 routing_window_size: int = 128                # For rolling/hybrid inference
+token_routing_kernel_version: str = "v2"      # v1/v2/v3 sparse token-routing kernel
 
 # Router losses
 use_load_balance_loss: bool = true
@@ -336,13 +338,14 @@ resume_from_checkpoint: str = null
 memory_transformer/
 â”œâ”€â”€ config.py              â† No internal deps
 â”œâ”€â”€ memory_bank.py         â† No internal deps
-â”œâ”€â”€ memory_attention.py    â† No internal deps
+â”œâ”€â”€ token_routing_kernel.pyâ† No internal deps
+â”œâ”€â”€ memory_attention.py    â† token_routing_kernel
 â”œâ”€â”€ router.py              â† No internal deps
 â”œâ”€â”€ lora.py                â† No internal deps
 â”œâ”€â”€ quantization.py        â† No internal deps
 â”œâ”€â”€ memory_block.py        â† memory_attention
-â”œâ”€â”€ model.py               â† config, memory_bank, memory_block, router
-â”œâ”€â”€ adapter.py             â† config, memory_bank, memory_attention, router, lora
+â”œâ”€â”€ model.py               â† config, memory_bank, memory_block, router, token_routing_kernel
+â”œâ”€â”€ adapter.py             â† config, memory_bank, memory_attention, router, lora, token_routing_kernel
 â””â”€â”€ utils.py               â† No internal deps
 
 training/
@@ -408,7 +411,7 @@ Run these 4 configs to compare approaches:
 3. **Tune hyperparameters** based on results
 4. **Add benchmarks** (specific eval tasks)
 5. **Document results** in walkthrough.md
-6. **Future**: Token-level routing CUDA kernel, dynamic context bank
+6. **Future**: Token-routing benchmark/policy tuning, dynamic context bank
 
 ---
 

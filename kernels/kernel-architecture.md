@@ -275,3 +275,32 @@ Operational caveat:
 Main repository architecture remains memory-augmented transformers and routing design in `memory_transformer/` and `docs/`.
 
 This kernel architecture is a specialized implementation track to make token-level routing feasible at scale, especially for train/prefill where default framework attention strategies are insufficient.
+
+### 10.1 Current Integrated Token-Routing Path
+
+This repository now implements token-level routing end-to-end in model code:
+
+1. Router produces per-token routed chapter indices (`[B, T, topk]`) with optional shared chapter prefix exclusion.
+2. Memory bank is split into:
+   - shared chapter tokens (always-on dense branch),
+   - routed chapter tokens (sparse branch).
+3. Dense shared branch uses memory cross-attention with:
+   - FlashAttention when available,
+   - PyTorch attention fallback otherwise.
+4. Routed sparse branch uses `FSA_topk_sparse_attention_bthd` from:
+   - `kernels-final/kernel_v1.py`, or
+   - `kernels-final/kernel_v2.py` (default), or
+   - `kernels-final/kernel_v3.py`.
+5. Branches are combined as:
+   - `output = shared_output + routed_scaling_factor * routed_output`.
+
+Config knobs used by this path:
+
+- `memory.routing_strategy_train` / `memory.routing_strategy_inference`: set `token` to enable token-level routing.
+- `memory.token_routing_kernel_version`: `v1|v2|v3` (default `v2`).
+- `memory.num_shared_chapters`: shared dense prefix chapters.
+- `memory.routed_scaling_factor`: routed-branch mixing scale.
+
+Runtime fallback behavior:
+
+- If sparse kernel execution is unavailable for current device/dtype/shape, model code falls back to an emulated sparse PyTorch path for functional correctness.

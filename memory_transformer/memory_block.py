@@ -502,6 +502,8 @@ class MemoryTransformerBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         memory: Optional[torch.Tensor] = None,
+        token_routing_state: Optional[Dict[str, torch.Tensor]] = None,
+        token_routing_kernel_version: str = "v2",
         attention_mask: Optional[torch.Tensor] = None,
         position_offset: int = 0,
         position_ids: Optional[torch.Tensor] = None,
@@ -514,6 +516,9 @@ class MemoryTransformerBlock(nn.Module):
         Args:
             hidden_states: (batch_size, seq_len, hidden_dim)
             memory: Memory bank tokens (optional)
+            token_routing_state: Optional token-level sparse-routing payload
+                consumed by MemoryCrossAttention.
+            token_routing_kernel_version: Sparse kernel variant (`v1|v2|v3`).
             attention_mask: Optional attention mask
             position_offset: Position offset for generation
             position_ids: Optional per-token position IDs. When provided, overrides
@@ -541,10 +546,15 @@ class MemoryTransformerBlock(nn.Module):
             # Variant A: Self-Attn -> Memory -> MLP
             
             # Memory cross-attention (if enabled)
-            if self.has_memory and memory is not None:
+            if self.has_memory and (memory is not None or token_routing_state is not None):
                 residual = hidden_states
                 hidden_states = self.memory_layernorm(hidden_states)
-                mem_output, _ = self.memory_attn(hidden_states, memory)
+                mem_output, _ = self.memory_attn(
+                    hidden_states,
+                    memory,
+                    token_routing_state=token_routing_state,
+                    token_routing_kernel_version=token_routing_kernel_version,
+                )
                 hidden_states = residual + mem_output
             
             # MLP
@@ -563,10 +573,15 @@ class MemoryTransformerBlock(nn.Module):
             hidden_states = residual + hidden_states
             
             # Memory cross-attention (if enabled)
-            if self.has_memory and memory is not None:
+            if self.has_memory and (memory is not None or token_routing_state is not None):
                 residual = hidden_states
                 hidden_states = self.memory_layernorm(hidden_states)
-                mem_output, _ = self.memory_attn(hidden_states, memory)
+                mem_output, _ = self.memory_attn(
+                    hidden_states,
+                    memory,
+                    token_routing_state=token_routing_state,
+                    token_routing_kernel_version=token_routing_kernel_version,
+                )
                 hidden_states = residual + mem_output
                 
                 # Second MLP

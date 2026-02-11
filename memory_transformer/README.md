@@ -11,6 +11,7 @@ memory_transformer/
 ├── memory_attention.py # Cross-attention for memory access
 ├── memory_block.py     # Transformer blocks with memory
 ├── router.py           # Chapter-based routing (MoE-style)
+├── token_routing_kernel.py # Token-level sparse kernel loader (v1/v2/v3)
 ├── lora.py             # Standard LoRA implementation
 ├── model.py            # Full MemoryTransformer model
 ├── adapter.py          # Memory adapter for pretrained models
@@ -41,6 +42,8 @@ memory_transformer/
 - `memory.{memory_num_heads,memory_num_kv_heads}`: Optional overrides for memory cross-attention heads (`null` => reuse model/base heads).
 - `model.hidden_activation`: Selects MLP activation (`swiglu`, `silu`, `relu`, `gelu`, `sigmoid`, `tanh`).
 - `model.initializer_range`: Std used for from-scratch `nn.Linear`/`nn.Embedding` initialization.
+- `model.self_attn_wo_init_std`: Optional std override for self-attn output projection `W_o` init (`null` => `initializer_range`).
+- `model.mlp_down_proj_init_std`: Optional std override for `MLP.down_proj` init (`null` => `initializer_range`).
 - `model.tie_embeddings`: Tie or untie token embeddings and LM head.
 - `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
 - `memory.num_shared_chapters`: Always include first N chapters in chaptered memory routing.
@@ -52,6 +55,7 @@ memory_transformer/
 - `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
 - `memory.routing_strategy_{train,inference}`: Supports `sequence`, `sequence-rolling`, and `token` (plus `rolling`/`hybrid` inference modes).
+- `memory.token_routing_kernel_version`: Sparse token-routing kernel version (`v1`, `v2`, `v3`; default `v2`).
 
 **Key Functions**:
 ```python
@@ -132,6 +136,12 @@ V = M @ W_v          # Values from memory
 Output = softmax(QK^T / √d) @ V @ W_o
 ```
 
+**Token-Level Routing Path (Implemented)**:
+- Triggered when model/adapter passes `token_routing_state` (used by `routing_strategy_*: token`).
+- Shared chapters: dense cross-attention branch (FlashAttention if available, else PyTorch attention).
+- Routed chapters: sparse top-k chapter branch via `kernels-final` (`v1/v2/v3`) with `FSA_topk_sparse_attention_bthd`.
+- Combined output: `shared_output + routed_scaling_factor * routed_output`, then projected by `W_o`.
+
 ---
 
 ### `memory_block.py` - Transformer Blocks
@@ -182,7 +192,7 @@ output = block(hidden_states, memory=memory_tokens)
 | Class | Description |
 |-------|-------------|
 | `ChapterRouter` | Sequence-level chapter routing |
-| `TokenLevelRouter` | Per-token routing (generation only) |
+| `TokenLevelRouter` | Per-token routing helper |
 | `RollingRouter` | Rolling window routing |
 
 **Router Losses** (from MoE literature):

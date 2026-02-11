@@ -34,6 +34,8 @@ model:
   attention_dropout: 0.0
   hidden_activation: swiglu       # swiglu/silu/relu/gelu/sigmoid/tanh
   initializer_range: 0.02         # Std for from-scratch Linear/Embedding initialization
+  self_attn_wo_init_std: null     # Optional std override for self-attn W_o; null => initializer_range
+  mlp_down_proj_init_std: null    # Optional std override for MLP down_proj; null => initializer_range
 
   # Norm + output head
   norm_eps: 1e-6
@@ -93,6 +95,7 @@ memory:
   routing_strategy_train: sequence      # sequence/sequence-rolling/token
   routing_strategy_inference: sequence  # sequence/sequence-rolling/rolling/token/hybrid
   routing_window_size: 128
+  token_routing_kernel_version: v2      # v1/v2/v3 for token-level sparse routing kernels
 
   # Router losses
   use_load_balance_loss: true

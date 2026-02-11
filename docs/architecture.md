@@ -216,10 +216,16 @@ W_up: r → d
 - Mean-pool sequence → route → same chapters for all tokens
 - Memory efficient: K is (batch, selected_tokens, d)
 
-**Token-level** (kernel engineering exists; not integrated into core model yet):
+**Token-level** (implemented in core model/adapter when `routing_strategy_*: token`):
 - Each token routes independently (more granular; reduces look-ahead risk from route choices).
-- Naive dense form is memory prohibitive at train/prefill: K would be (batch × seq_len, selected_tokens, d).
-- Kernel experiments live in `kernels/` and stable versions in `kernels-final/` (see their READMEs).
+- Shared chapters are handled by a dense branch:
+  - FlashAttention when available
+  - PyTorch attention fallback otherwise
+- Routed chapters are handled by a sparse branch using `kernels-final`:
+  - `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`)
+  - kernel entrypoint: `FSA_topk_sparse_attention_bthd`
+- Branch merge: `shared_output + routed_scaling_factor * routed_output` before output projection.
+- This avoids naive per-token KV duplication during train/prefill.
 
 ## Summary
 
@@ -242,6 +248,7 @@ The Memory-Augmented Transformer provides:
 | Cross-Attention | `memory_attention.py` | `MemoryCrossAttention`, `MemoryCrossAttentionWithRouting` (dead code - routing handled externally) |
 | Transformer Block | `memory_block.py` | `MemoryTransformerBlock`, `VanillaTransformerBlock`, `RMSNorm`, `RotaryPositionalEmbedding`, `SelfAttention`, `MLP` |
 | Chapter Router | `router.py` | `ChapterRouter`, `TokenLevelRouter`, `RollingRouter` |
+| Token Sparse Kernel Loader | `token_routing_kernel.py` | `normalize_kernel_version`, `get_token_routing_kernel_fn` |
 | Full Model | `model.py` | `MemoryTransformer` |
 | Pretrained Adapter | `adapter.py` | `MemoryAdapter`, `MemoryAdapterLayer` |
 | LoRA | `lora.py` | `LoRALinear`, `apply_lora_to_model` |
@@ -254,6 +261,13 @@ The Memory-Augmented Transformer provides:
 ```python
 # memory_bank.py line 67
 nn.init.normal_(self.memory, mean=0.0, std=self.init_std)  # Default 0.02
+```
+
+#### Targeted Init Overrides (From-Scratch Path)
+```python
+# model.py (optional overrides)
+model.self_attn_wo_init_std      # null => initializer_range
+model.mlp_down_proj_init_std     # null => initializer_range
 ```
 
 #### Zero Output Projection Initialization
@@ -363,6 +377,8 @@ For L=2048, N_m=16K, C=16, k=4:
 | `memory_layer_placement` | Which layers | `all`, `custom` |
 | `memory_block_variant` | Block structure | `A` (default) |
 | `use_chapters` | Enable routing | `true` if N_m > 4K |
+| `routing_strategy_{train,inference}` | Chapter routing granularity | `sequence`, `sequence-rolling`, `token` |
+| `token_routing_kernel_version` | Sparse token-routing kernel | `v2` (default), `v1`, `v3` |
 | `wo_init_zero` | Zero init W_o | `true` (adapter and from-scratch) |
 
 ### Memory Compression Flags

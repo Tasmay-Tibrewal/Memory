@@ -60,6 +60,8 @@ model:
   attention_dropout: 0.0       # Attention dropout
   hidden_activation: swiglu    # swiglu/silu/relu/gelu/sigmoid/tanh
   initializer_range: 0.02      # Std for from-scratch Linear/Embedding initialization
+  self_attn_wo_init_std: null  # Optional std override for self-attn output projection (W_o); null => initializer_range
+  mlp_down_proj_init_std: null # Optional std override for MLP down_proj; null => initializer_range
 
   # === Normalization ===
   norm_eps: 1e-6               # Normalization epsilon
@@ -129,6 +131,7 @@ memory:
   routing_strategy_train: sequence      # "sequence", "sequence-rolling", or "token"
   routing_strategy_inference: sequence  # Inference: "sequence", "sequence-rolling", "rolling", "token", "hybrid"
   routing_window_size: 128              # Rolling/hybrid window size (tokens)
+  token_routing_kernel_version: v2      # v1/v2/v3; used when routing_strategy_* == "token"
   
   # === Router Losses ===
   use_load_balance_loss: true        # Load balancing loss
@@ -161,6 +164,11 @@ memory:
   use_memory_adapter: true           # Enable memory cross-attention
   use_both_memory_and_lora: false    # Enable both for combined experiments
 ```
+
+Token-routing note:
+- When `routing_strategy_train: token` or `routing_strategy_inference: token`, the model uses:
+  - dense shared-chapter attention (FlashAttention if available, otherwise PyTorch fallback)
+  - sparse routed-chapter attention via `kernels-final/kernel_{v1|v2|v3}.py` selected by `token_routing_kernel_version` (default `v2`)
 
 ---
 

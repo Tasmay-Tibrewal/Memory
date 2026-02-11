@@ -25,21 +25,25 @@ This document records design choices, compromises, known issues, and areas for f
 - Matches encoder-decoder cross-attention patterns
 - Variant B (extra MLP) can be enabled via config
 
-### 3. Sequence-Level Routing Only
+### 3. Sequence-Level Default + Token-Level Kernel Path
 
-**Choice**: Route at sequence level (mean-pool), not token level.
+**Choice**:
+- Keep sequence-level routing as the default.
+- Implement token-level routing when `routing_strategy_*: token` is selected.
 
 **Rationale**:
-- Token-level routing is memory-prohibitive during training/prefill
-- Would require custom kernels (Triton/CUDA) for efficient implementation
-- Sequence-level still provides reasonable chapter selection
-- Token-level can be used during generation (seq_len=1)
+- Token-level routing is more expressive and avoids sequence-level route leakage patterns.
+- Naive token-level dense attention is memory-prohibitive during training/prefill.
+- We therefore split token routing into:
+  - dense shared-chapter attention
+  - sparse routed-chapter attention via stable kernels (`kernels-final` v1/v2/v3, default v2)
+- Sequence-level remains a robust default for broad compatibility.
 
 Kernel engineering notes:
 - Experimentation and benchmarks live in `kernels/`
 - Curated stable kernel set lives in `kernels-final/` (v1/v2/v3)
 
-**Future**: Integrate a stable token-level routing kernel path into the core model code when reliability and performance are proven across target workloads.
+**Current**: Integrated in core model/adapter path. Remaining work is tuning and broader benchmark coverage.
 
 ### 4. Zero-Initialized Output Projection
 
@@ -85,7 +89,7 @@ Kernel engineering notes:
 
 **Future**: Add QAT-style training path.
 
-### 2. Token-Level Routing Memory Issue
+### 2. Token-Level Routing Cost / Fallback Behavior
 
 As discussed in idea.txt (lines 62-80), token-level routing during prefill would require:
 ```
@@ -94,9 +98,12 @@ K tensor size = B × S × num_heads × routed_tokens × D
             ≈ 150 TB  (infeasible)
 ```
 
-**Current Solution**: Sequence-level routing only.
+**Current Solution**:
+- Core path uses dense shared + sparse routed attention (kernel-backed).
+- Fallback emulated sparse path exists for unsupported environments/shapes and is slower.
 
-**Future Solution**: Custom CUDA kernel that stores unique chapters once and uses index references.
+**Future Solution**:
+- Expand benchmark coverage and policy tuning across larger shape/device matrices.
 
 ### 3. No Dynamic Memory Updates
 
@@ -175,7 +182,7 @@ Low-rank memory reduces parameters but limits what each token can express.
 
 ### High Priority
 
-1. **Token-level routing during generation**: Currently uses sequence-level even for single tokens.
+1. **Token-level routing tuning and benchmarks**: Expand validation/perf tuning for more shapes and GPUs.
 
 2. **More efficient chapter selection**: Current implementation gathers all chapter tokens; could be optimized.
 
@@ -193,7 +200,7 @@ Low-rank memory reduces parameters but limits what each token can express.
 
 7. **Dynamic context bank**: VAE compression, clustering, memory consolidation.
 
-8. **Custom CUDA kernel**: For token-level routing during prefill.
+8. **Kernel-path optimization**: Further optimize sparse routed path policies and fallback behavior.
 
 9. **Mixed precision memory**: Store memory in fp16 but compute in bf16.
 

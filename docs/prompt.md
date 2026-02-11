@@ -232,8 +232,8 @@ These are explicitly NOT in scope:
 
 1. **Dynamic context extension** - We use fixed memory, not retrieval
 2. **Memory updates during inference** - Memory is frozen after training
-3. **Per-token memory attention** - Too expensive during training
-4. **Custom kernels** - We use Flash Attention when available
+3. **Broad token-routing benchmark/policy retuning** - Core token-routing path is implemented, but broad shape/GPU tuning is still ongoing
+4. **Training-time memory QAT** - Basic quantization exists, but quantization-aware memory training is not implemented
 
 ---
 

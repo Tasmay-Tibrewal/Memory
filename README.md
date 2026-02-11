@@ -24,7 +24,7 @@ This project implements a novel memory-augmented transformer architecture where:
 
 ### Efficient Scaling
 - **Chapter-Based Routing**: MoE-style top-k selection for large memory banks (100k+ tokens)
-- **Token-Level Routing Kernels (Engineering)**: Experimental kernels to make token-level routing practical for train/prefill without per-token KV duplication or de-batching slowdowns
+- **Token-Level Routing (Implemented)**: `routing_strategy_{train,inference}: token` uses dense shared-chapter attention + sparse routed-chapter attention via selected kernel (`v1/v2/v3`, default `v2`)
 - **Router Losses**: Load balancing, auxiliary, and z-loss from MoE literature
 - **Low-Rank Compression**: Factorized memory, low-rank projections
 
@@ -157,6 +157,7 @@ Memory/
 â”‚   â”œâ”€â”€ memory_attention.py  # Cross-attention for memory
 â”‚   â”œâ”€â”€ memory_block.py      # Transformer blocks with memory
 â”‚   â”œâ”€â”€ router.py            # Chapter routing (MoE-style)
+â”‚   â”œâ”€â”€ token_routing_kernel.py # Loader for token-level sparse kernels (v1/v2/v3)
 â”‚   â”œâ”€â”€ lora.py              # Standard LoRA implementation
 â”‚   â”œâ”€â”€ model.py             # Full MemoryTransformer model
 â”‚   â”œâ”€â”€ adapter.py           # Memory adapter for pretrained models
@@ -205,6 +206,31 @@ Memory/
 â”‚       â”œâ”€â”€ session9/        # Prior detailed session artifacts
 â”‚       â””â”€â”€ session10/       # Latest detailed session artifacts
 â”‚
+â”œâ”€â”€ kernels/                  # Kernel exploration workspace (benchmarks, reports, experimental variants)
+â”‚   â”œâ”€â”€ README.md            # Whatâ€™s in kernels/, what worked, whatâ€™s stable
+â”‚   â”œâ”€â”€ kernel-architecture.md # Detailed kernel-method architecture/journey
+â”‚   â”œâ”€â”€ FSA_LOCAL_OPTIMIZATION_REPORT.md # Optimization roadmap + status notes
+â”‚   â”œâ”€â”€ TOKEN_LEVEL_MEMORY_ROUTING_HANDOFF.md # Token-level routing handoff/restart context
+â”‚   â”œâ”€â”€ TOKEN_LEVEL_ROUTING_NSA_REPORT.md # NSA-related explanation/report
+â”‚   â”œâ”€â”€ benchmark_memory_xattn.py # Older benchmark harness
+â”‚   â”œâ”€â”€ benchmark_memory_xattn_optimized_import.py # Main benchmark driver
+â”‚   â”œâ”€â”€ benchmark_memory_xattn_optimized_import__newly_changed.py # Experimental benchmark variant
+â”‚   â”œâ”€â”€ benchmark-memory-kernel.ipynb # Exploratory notebook
+â”‚   â”œâ”€â”€ memory_cross_attn.py  # Custom Triton chapter-routed cross-attn kernels
+â”‚   â”œâ”€â”€ memory_cross_attn_fsa_opt.py # FSA-inspired backend variant
+â”‚   â”œâ”€â”€ flash_sparse_attn_triton_local_nomask.py # Reference flash-sparse Triton implementation
+â”‚   â”œâ”€â”€ fsa_topk_sparse_attention_chapter_routed.py # MoE-inspired chapter-routed experiment
+â”‚   â”œâ”€â”€ fsa_topk_sparse_attention_local.py # Local unoptimized baseline
+â”‚   â”œâ”€â”€ fsa_topk_sparse_attention_local_optimized_older.py # Older optimized local variant (v2 lineage)
+â”‚   â”œâ”€â”€ fsa_topk_sparse_attention_local_optimized_old.py # Old optimized local variant (v3 lineage)
+â”‚   â””â”€â”€ fsa_topk_sparse_attention_local_optimized.py # Newest local optimized variant (unstable in some runs)
+â”‚
+â”œâ”€â”€ kernels-final/            # Stable selected kernels (v1/v2/v3) for practical usage
+â”‚   â”œâ”€â”€ README.md            # Stable-set overview (why v1/v2/v3, what not included)
+â”‚   â”œâ”€â”€ kernel_v1.py          # v1: unoptimized baseline
+â”‚   â”œâ”€â”€ kernel_v2.py          # v2: older optimized (most stable overall)
+â”‚   â””â”€â”€ kernel_v3.py          # v3: old optimized
+â”‚
 â””â”€â”€ idea/                     # Original research documents
     â”œâ”€â”€ idea.txt             # Conceptual explanation
     â”œâ”€â”€ main.tex             # LaTeX paper draft
@@ -236,6 +262,8 @@ model:
   max_position_embeddings: null
   hidden_activation: swiglu
   initializer_range: 0.02
+  self_attn_wo_init_std: null   # Optional override for self-attn W_o init std (null => initializer_range)
+  mlp_down_proj_init_std: null  # Optional override for MLP down_proj init std (null => initializer_range)
   tie_embeddings: true
 
   # Tokenizer to use (must match vocab_size for from-scratch)
@@ -275,6 +303,7 @@ memory:
   normalize_shared_routed_before_mixing: false  # Normalize shared/routed vectors separately before weighted mixing
   shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
+  token_routing_kernel_version: v2       # v1/v2/v3 (used when routing_strategy_* = token)
   routing_strategy_inference: hybrid  # sequence/sequence-rolling/rolling/token/hybrid
   routing_window_size: 128            # Rolling/hybrid window size (tokens)
   
@@ -409,7 +438,12 @@ per backward per micro-step. See `docs/design.md` for details.
 
 ## Kernels (Token-Level Routing)
 
-For token-level routing into very large memory banks during train/prefill, this repo includes an engineering workspace of custom kernels.
+For token-level routing into very large memory banks during train/prefill:
+- Core model path now supports token routing via `routing_strategy_*: token`.
+- Implementation mixes:
+  - dense shared-chapter attention (FlashAttention when available, otherwise PyTorch fallback)
+  - sparse routed-chapter attention via selected `kernels-final` kernel (`v1/v2/v3`, default `v2`)
+- This repo also includes a broader kernel engineering workspace.
 
 - Detailed exploration, reports, and benchmarks: `kernels/`
 - Stable selected set used in practice: `kernels-final/` (v1/v2/v3, with v2 most stable overall)

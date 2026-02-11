@@ -61,7 +61,7 @@ docs/
 **Contents**:
 - Training library selection rationale (PyTorch + Accelerate)
 - Block variant default choice (Variant A)
-- Routing strategy limitations (sequence-level only)
+- Routing strategy behavior (sequence default + implemented token-level kernel path)
 - Zero-initialization reasoning (W_o = 0)
 - Hook-based adapter injection rationale
 - Known limitations and workarounds

@@ -21,6 +21,7 @@ from .memory_attention import MemoryCrossAttention
 from .router import ChapterRouter, compute_total_router_loss
 from .lora import apply_lora_to_model, get_lora_parameters
 from .memory_block import RMSNorm
+from .token_routing_kernel import normalize_kernel_version
 
 
 class MemoryAdapterLayer(nn.Module):
@@ -72,21 +73,30 @@ class MemoryAdapterLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        memory: torch.Tensor,
+        memory: Optional[torch.Tensor],
+        token_routing_state: Optional[Dict[str, torch.Tensor]] = None,
+        token_routing_kernel_version: str = "v2",
     ) -> torch.Tensor:
         """
         Apply memory cross-attention.
         
         Args:
             hidden_states: (batch_size, seq_len, hidden_dim)
-            memory: Memory tokens
+            memory: Memory tokens (or None when token_routing_state is used)
+            token_routing_state: Optional token-level sparse-routing payload.
+            token_routing_kernel_version: Sparse kernel variant (`v1|v2|v3`).
             
         Returns:
             Updated hidden states
         """
         residual = hidden_states
         hidden_states = self.memory_layernorm(hidden_states)
-        mem_output, _ = self.memory_attn(hidden_states, memory)
+        mem_output, _ = self.memory_attn(
+            hidden_states,
+            memory,
+            token_routing_state=token_routing_state,
+            token_routing_kernel_version=token_routing_kernel_version,
+        )
         return residual + mem_output
 
 
@@ -133,6 +143,9 @@ class MemoryAdapter(nn.Module):
             raise ValueError(
                 f"memory.shared_routed_norm_eps must be > 0, got {self.memory_config.shared_routed_norm_eps}"
             )
+        self.token_routing_kernel_version = normalize_kernel_version(
+            self.memory_config.token_routing_kernel_version
+        )
         
         # Load pretrained model
         if config.model.base_model_name is None:
@@ -572,19 +585,84 @@ class MemoryAdapter(nn.Module):
             # Apply memory (we already know this is a memory layer)
             if not self.memory_config.vanilla_mode:
                 memory = self.get_memory_for_layer(layer_idx)
+                token_routing_state = None
 
                 # Route if using chapters
                 if self.memory_config.use_chapters and memory is not None:
                     router_key = str(layer_idx)
                     router = self.routers[router_key] if router_key in self.routers else None
                     if router is not None:
+                        token_routing_state = None
                         mem_cfg = self.memory_config
                         use_cache = self._fwd_use_cache
                         past_key_values = self._fwd_past_key_values
                         attention_mask = self._fwd_attention_mask
                         strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+                        bank_idx = self.memory_bank_assignments[layer_idx]
+                        chaptered_bank = self.memory_banks[str(bank_idx)]
+                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
 
-                        if self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling", "token"}:
+                        if strategy == "token":
+                            chapter_indices_global, _, router_losses = router.route_token_level(
+                                hidden_states=hidden_states,
+                                return_losses=self.training,
+                                exclude_prefix_chapters=mem_cfg.num_shared_chapters,
+                            )
+                            if not is_recompute:
+                                self._fwd_all_router_losses.append(router_losses)
+
+                            full_memory = chaptered_bank.get_memory()
+                            num_shared = max(0, min(int(mem_cfg.num_shared_chapters), int(mem_cfg.num_chapters)))
+                            shared_tokens = num_shared * tokens_per_chapter
+
+                            if shared_tokens > 0:
+                                shared_memory = full_memory[:shared_tokens].contiguous()
+                            else:
+                                shared_memory = None
+
+                            if shared_tokens < full_memory.shape[0]:
+                                routed_memory = full_memory[shared_tokens:].contiguous()
+                            else:
+                                routed_memory = None
+
+                            if (
+                                mem_cfg.normalize_shared_routed_before_mixing
+                                and shared_memory is not None
+                                and routed_memory is not None
+                                and shared_memory.numel() > 0
+                                and routed_memory.numel() > 0
+                            ):
+                                merged = torch.cat([shared_memory, routed_memory], dim=0).unsqueeze(0)
+                                merged = self._normalize_shared_routed_memory_vectors(
+                                    merged,
+                                    num_shared_chapters=num_shared,
+                                    tokens_per_chapter=tokens_per_chapter,
+                                    norm_type=mem_cfg.shared_routed_norm_type,
+                                    eps=float(mem_cfg.shared_routed_norm_eps),
+                                ).squeeze(0)
+                                shared_memory = merged[:shared_tokens].contiguous()
+                                routed_memory = merged[shared_tokens:].contiguous()
+
+                            if chapter_indices_global.numel() > 0:
+                                chapter_indices_local = chapter_indices_global - int(num_shared)
+                                if torch.any(chapter_indices_local < 0):
+                                    raise RuntimeError(
+                                        "Token-level routed chapter indices underflow after shared-prefix removal."
+                                    )
+                            else:
+                                chapter_indices_local = chapter_indices_global
+
+                            token_routing_state = {
+                                "shared_memory": shared_memory,
+                                "routed_memory": routed_memory,
+                                "token_chapter_indices": chapter_indices_local.to(dtype=torch.int32),
+                                "tokens_per_chapter": int(tokens_per_chapter),
+                                "routed_scale": float(mem_cfg.routed_scaling_factor),
+                                "kernel_version": self.token_routing_kernel_version,
+                            }
+                            memory = None
+
+                        elif self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}:
                             router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
@@ -629,41 +707,44 @@ class MemoryAdapter(nn.Module):
                         else:
                             raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
 
-                        chapter_indices, chapter_weights = self._prepend_shared_chapters(
-                            chapter_indices,
-                            chapter_weights,
-                            num_chapters=mem_cfg.num_chapters,
-                            num_shared_chapters=mem_cfg.num_shared_chapters,
-                            routed_scaling_factor=mem_cfg.routed_scaling_factor,
-                        )
-
-                        # Side effect: only append router losses on first pass
-                        if not is_recompute:
-                            self._fwd_all_router_losses.append(router_losses)
-
-                        bank_idx = self.memory_bank_assignments[layer_idx]
-                        chaptered_bank = self.memory_banks[str(bank_idx)]
-                        memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
-
-                        # Bug 14 fix: Weight memory tokens by routing probabilities
-                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
-                        if mem_cfg.normalize_shared_routed_before_mixing:
-                            memory = self._normalize_shared_routed_memory_vectors(
-                                memory,
+                        if strategy != "token":
+                            chapter_indices, chapter_weights = self._prepend_shared_chapters(
+                                chapter_indices,
+                                chapter_weights,
+                                num_chapters=mem_cfg.num_chapters,
                                 num_shared_chapters=mem_cfg.num_shared_chapters,
-                                tokens_per_chapter=tokens_per_chapter,
-                                norm_type=mem_cfg.shared_routed_norm_type,
-                                eps=float(mem_cfg.shared_routed_norm_eps),
+                                routed_scaling_factor=mem_cfg.routed_scaling_factor,
                             )
-                        w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
-                        w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
-                        w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
-                        memory = memory * w
+
+                            # Side effect: only append router losses on first pass
+                            if not is_recompute:
+                                self._fwd_all_router_losses.append(router_losses)
+
+                            memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
+
+                            # Bug 14 fix: Weight memory tokens by routing probabilities
+                            if mem_cfg.normalize_shared_routed_before_mixing:
+                                memory = self._normalize_shared_routed_memory_vectors(
+                                    memory,
+                                    num_shared_chapters=mem_cfg.num_shared_chapters,
+                                    tokens_per_chapter=tokens_per_chapter,
+                                    norm_type=mem_cfg.shared_routed_norm_type,
+                                    eps=float(mem_cfg.shared_routed_norm_eps),
+                                )
+                            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+                            w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
+                            w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
+                            memory = memory * w
 
                 # Memory injection always runs (first pass AND recompute)
-                if memory is not None:
+                if memory is not None or token_routing_state is not None:
                     adapter = self.memory_adapters[str(layer_idx)]
-                    hidden_states = adapter(hidden_states, memory)
+                    hidden_states = adapter(
+                        hidden_states,
+                        memory,
+                        token_routing_state=token_routing_state,
+                        token_routing_kernel_version=self.token_routing_kernel_version,
+                    )
 
             # Mark this layer as processed (only on first pass)
             if not is_recompute:

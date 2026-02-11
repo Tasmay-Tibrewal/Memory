@@ -1,7 +1,7 @@
 *.pyc
 __pycache__
 .ruff_cache
-.claude
+.claude/
 # some kernel testing -> not required for the repo
 native-sparse-attention/
 Flash-Sparse-Attention/

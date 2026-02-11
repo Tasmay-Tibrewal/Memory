@@ -77,10 +77,13 @@ class MemoryConfig:
     # Routing strategy:
     # - "sequence": mean-pool
     # - "sequence-rolling": average of rolling-window means across sequence
-    # - "token": per-token router logits (sequence-aggregated selection)
+    # - "token": per-token chapter routing (dense shared + sparse routed path)
     routing_strategy_train: str = "sequence"
     routing_strategy_inference: str = "sequence"  # "sequence", "sequence-rolling", "rolling", "token", "hybrid"
     routing_window_size: int = 128  # For rolling/hybrid routing during generation (inference)
+    # Token-level sparse routing kernel version used when routing_strategy is "token".
+    # Options: "v1", "v2", "v3" (default: v2).
+    token_routing_kernel_version: str = "v2"
     
     # === Router losses ===
     use_load_balance_loss: bool = True
@@ -150,6 +153,10 @@ class ModelConfig:
     attention_dropout: float = 0.0
     hidden_activation: str = "swiglu"  # swiglu/silu/relu/gelu/sigmoid/tanh
     initializer_range: float = 0.02  # Std for from-scratch Linear/Embedding init
+    # Optional targeted init overrides for from-scratch model components.
+    # If None, they fall back to initializer_range.
+    self_attn_wo_init_std: Optional[float] = None
+    mlp_down_proj_init_std: Optional[float] = None
     
     # === Normalization ===
     norm_eps: float = 1e-6

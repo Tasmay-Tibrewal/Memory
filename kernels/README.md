@@ -203,6 +203,14 @@ These kernels exist to enable token-level routing for the memory bank in scenari
 - each token can route differently, and
 - naive dense attention would force KV duplication or would require de-batching.
 
+Current integration status in repository code:
+
+- Token-level routing is implemented in `memory_transformer/model.py` and `memory_transformer/adapter.py`.
+- Shared chapters are handled by dense memory cross-attention.
+- Routed chapters are handled by sparse attention kernels loaded from `kernels-final/`.
+- Kernel choice is config-driven via `memory.token_routing_kernel_version` (`v1|v2|v3`, default `v2`).
+- If kernel execution is unsupported at runtime, the model uses an emulated sparse fallback path for correctness.
+
 Decoding/inference note:
 
 - During decoding (`seq_len = 1`), token-level routing is much easier to do without huge memory blow-ups.

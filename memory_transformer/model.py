@@ -25,8 +25,11 @@ from .memory_block import (
     MemoryTransformerBlock, 
     VanillaTransformerBlock, 
     RMSNorm,
+    SelfAttention,
+    MLP,
 )
 from .router import ChapterRouter, compute_total_router_loss
+from .token_routing_kernel import normalize_kernel_version
 
 
 class MemoryTransformer(nn.Module):
@@ -50,6 +53,18 @@ class MemoryTransformer(nn.Module):
         if self.initializer_range <= 0:
             raise ValueError(
                 f"model.initializer_range must be > 0, got {config.model.initializer_range}"
+            )
+        self.self_attn_wo_init_std = config.model.self_attn_wo_init_std
+        if self.self_attn_wo_init_std is not None and self.self_attn_wo_init_std <= 0:
+            raise ValueError(
+                "model.self_attn_wo_init_std must be > 0 when set, "
+                f"got {self.self_attn_wo_init_std}"
+            )
+        self.mlp_down_proj_init_std = config.model.mlp_down_proj_init_std
+        if self.mlp_down_proj_init_std is not None and self.mlp_down_proj_init_std <= 0:
+            raise ValueError(
+                "model.mlp_down_proj_init_std must be > 0 when set, "
+                f"got {self.mlp_down_proj_init_std}"
             )
         
         hidden_dim = config.model.hidden_dim
@@ -90,6 +105,9 @@ class MemoryTransformer(nn.Module):
             raise ValueError(
                 f"memory.shared_routed_norm_eps must be > 0, got {self.memory_config.shared_routed_norm_eps}"
             )
+        self.token_routing_kernel_version = normalize_kernel_version(
+            self.memory_config.token_routing_kernel_version
+        )
         
         # Token embedding
         self.embed_tokens = nn.Embedding(vocab_size, hidden_dim)
@@ -176,6 +194,7 @@ class MemoryTransformer(nn.Module):
         
         # Initialize
         self.apply(self._init_weights)
+        self._apply_targeted_init_overrides()
 
         # Optionally tie input embedding and LM head weights.
         if self.tie_embeddings:
@@ -211,6 +230,32 @@ class MemoryTransformer(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.initializer_range)
+
+    def _apply_targeted_init_overrides(self):
+        """
+        Apply optional targeted init overrides for selected module weights.
+
+        These overrides are only used in the from-scratch model path and only
+        when explicitly set in config; otherwise global initializer_range stays
+        in effect.
+        """
+        if self.self_attn_wo_init_std is not None:
+            for module in self.modules():
+                if isinstance(module, SelfAttention):
+                    nn.init.normal_(
+                        module.o_proj.weight,
+                        mean=0.0,
+                        std=self.self_attn_wo_init_std,
+                    )
+
+        if self.mlp_down_proj_init_std is not None:
+            for module in self.modules():
+                if isinstance(module, MLP):
+                    nn.init.normal_(
+                        module.down_proj.weight,
+                        mean=0.0,
+                        std=self.mlp_down_proj_init_std,
+                    )
     
     def _get_memory_dim(self) -> int:
         """Get dimension of memory tokens."""
@@ -482,6 +527,7 @@ class MemoryTransformer(nn.Module):
             if layer_idx in self.memory_layer_indices and not self.memory_config.vanilla_mode:
                 # Get memory for this layer
                 memory = self.get_memory_for_layer(layer_idx)
+                token_routing_state = None
                 
                 # Route if using chapters
                 if self.memory_config.use_chapters and memory is not None:
@@ -490,9 +536,71 @@ class MemoryTransformer(nn.Module):
                     if router is not None:
                         mem_cfg = self.memory_config
                         strategy = mem_cfg.routing_strategy_train if self.training else mem_cfg.routing_strategy_inference
+                        bank_idx = self.memory_bank_assignments[layer_idx]
+                        chaptered_bank = self.memory_banks[str(bank_idx)]
+                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
+
+                        if strategy == "token":
+                            chapter_indices_global, _, router_losses = router.route_token_level(
+                                hidden_states=hidden_states,
+                                return_losses=self.training,
+                                exclude_prefix_chapters=mem_cfg.num_shared_chapters,
+                            )
+                            all_router_losses.append(router_losses)
+
+                            full_memory = chaptered_bank.get_memory()  # [N_m, D]
+                            num_shared = max(0, min(int(mem_cfg.num_shared_chapters), int(mem_cfg.num_chapters)))
+                            shared_tokens = num_shared * tokens_per_chapter
+
+                            if shared_tokens > 0:
+                                shared_memory = full_memory[:shared_tokens].contiguous()
+                            else:
+                                shared_memory = None
+
+                            if shared_tokens < full_memory.shape[0]:
+                                routed_memory = full_memory[shared_tokens:].contiguous()
+                            else:
+                                routed_memory = None
+
+                            if (
+                                mem_cfg.normalize_shared_routed_before_mixing
+                                and shared_memory is not None
+                                and routed_memory is not None
+                                and shared_memory.numel() > 0
+                                and routed_memory.numel() > 0
+                            ):
+                                merged = torch.cat([shared_memory, routed_memory], dim=0).unsqueeze(0)
+                                merged = self._normalize_shared_routed_memory_vectors(
+                                    merged,
+                                    num_shared_chapters=num_shared,
+                                    tokens_per_chapter=tokens_per_chapter,
+                                    norm_type=mem_cfg.shared_routed_norm_type,
+                                    eps=float(mem_cfg.shared_routed_norm_eps),
+                                ).squeeze(0)
+                                shared_memory = merged[:shared_tokens].contiguous()
+                                routed_memory = merged[shared_tokens:].contiguous()
+
+                            if chapter_indices_global.numel() > 0:
+                                chapter_indices_local = chapter_indices_global - int(num_shared)
+                                if torch.any(chapter_indices_local < 0):
+                                    raise RuntimeError(
+                                        "Token-level routed chapter indices underflow after shared-prefix removal."
+                                    )
+                            else:
+                                chapter_indices_local = chapter_indices_global
+
+                            token_routing_state = {
+                                "shared_memory": shared_memory,
+                                "routed_memory": routed_memory,
+                                "token_chapter_indices": chapter_indices_local.to(dtype=torch.int32),
+                                "tokens_per_chapter": int(tokens_per_chapter),
+                                "routed_scale": float(mem_cfg.routed_scaling_factor),
+                                "kernel_version": self.token_routing_kernel_version,
+                            }
+                            memory = None
 
                         # Use router-native strategies during training/prefill; rolling/hybrid remain separate inference paths.
-                        if self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling", "token"}:
+                        elif self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}:
                             router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
@@ -535,46 +643,47 @@ class MemoryTransformer(nn.Module):
                         else:
                             raise ValueError(f"Unknown routing_strategy_inference: {strategy}")
 
-                        chapter_indices, chapter_weights = self._prepend_shared_chapters(
-                            chapter_indices,
-                            chapter_weights,
-                            num_chapters=mem_cfg.num_chapters,
-                            num_shared_chapters=mem_cfg.num_shared_chapters,
-                            routed_scaling_factor=mem_cfg.routed_scaling_factor,
-                        )
-
-                        all_router_losses.append(router_losses)
-                        
-                        # Get chaptered memory bank and select chapters
-                        bank_idx = self.memory_bank_assignments[layer_idx]
-                        chaptered_bank = self.memory_banks[str(bank_idx)]
-                        memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
-                        
-                        # Bug 14 fix: Weight memory tokens by routing probabilities
-                        # chapter_weights: (batch, top_k), each chapter contributes tokens_per_chapter tokens
-                        tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
-                        if mem_cfg.normalize_shared_routed_before_mixing:
-                            memory = self._normalize_shared_routed_memory_vectors(
-                                memory,
+                        if strategy != "token":
+                            chapter_indices, chapter_weights = self._prepend_shared_chapters(
+                                chapter_indices,
+                                chapter_weights,
+                                num_chapters=mem_cfg.num_chapters,
                                 num_shared_chapters=mem_cfg.num_shared_chapters,
-                                tokens_per_chapter=tokens_per_chapter,
-                                norm_type=mem_cfg.shared_routed_norm_type,
-                                eps=float(mem_cfg.shared_routed_norm_eps),
+                                routed_scaling_factor=mem_cfg.routed_scaling_factor,
                             )
-                        w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
-                        w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
-                        w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
-                        memory = memory * w
+
+                            all_router_losses.append(router_losses)
+                            
+                            # Get chaptered memory bank and select chapters
+                            memory, _ = chaptered_bank.get_chapters_batched(chapter_indices)
+                            
+                            # Bug 14 fix: Weight memory tokens by routing probabilities
+                            # chapter_weights: (batch, top_k), each chapter contributes tokens_per_chapter tokens
+                            if mem_cfg.normalize_shared_routed_before_mixing:
+                                memory = self._normalize_shared_routed_memory_vectors(
+                                    memory,
+                                    num_shared_chapters=mem_cfg.num_shared_chapters,
+                                    tokens_per_chapter=tokens_per_chapter,
+                                    norm_type=mem_cfg.shared_routed_norm_type,
+                                    eps=float(mem_cfg.shared_routed_norm_eps),
+                                )
+                            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
+                            w = w.repeat(1, 1, tokens_per_chapter)                     # (B, top_k, tpc)
+                            w = w.reshape(memory.shape[0], -1, 1)                      # (B, top_k*tpc, 1)
+                            memory = memory * w
                 
                 if use_gradient_checkpointing:
                     def _layer_forward(
                         h: torch.Tensor,
                         _layer: nn.Module = layer,
                         _memory: Optional[torch.Tensor] = memory,
+                        _token_routing_state = token_routing_state,
                     ) -> torch.Tensor:
                         out, _ = _layer(
                             h,
                             memory=_memory,
+                            token_routing_state=_token_routing_state,
+                            token_routing_kernel_version=self.token_routing_kernel_version,
                             attention_mask=attention_mask,
                             position_offset=position_offset,
                             position_ids=position_ids,
@@ -589,6 +698,8 @@ class MemoryTransformer(nn.Module):
                     hidden_states, new_kv = layer(
                         hidden_states,
                         memory=memory,
+                        token_routing_state=token_routing_state,
+                        token_routing_kernel_version=self.token_routing_kernel_version,
                         attention_mask=attention_mask,
                         position_offset=position_offset,
                         position_ids=position_ids,
