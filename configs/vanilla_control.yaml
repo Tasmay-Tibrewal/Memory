@@ -12,7 +12,7 @@ model:
   hidden_dim: 512
   num_heads: 8
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 42
+  num_layers: 43
   intermediate_dim: 1536
   vocab_size: 49152
   max_seq_len: 2048
@@ -51,8 +51,8 @@ memory:
   # Memory bank settings
   num_memory_tokens: 16448
   memory_dim: null # Uses hidden_dim
-  memory_num_heads: 16 # null => fallback to model.num_heads for memory cross-attn
-  memory_num_kv_heads: 1 # null => fallback to model.num_kv_heads (or model.num_heads if null)
+  memory_num_heads: 8 # null => fallback to model.num_heads for memory cross-attn
+  memory_num_kv_heads: 4 # null => fallback to model.num_kv_heads (or model.num_heads if null)
   # 1 kv head for key, value -> faster inference, lesser overhead.
   # also memory savings, during training, inference is there.
 
@@ -78,7 +78,7 @@ memory:
   # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
   # giving more imp. to routed tokens and lesser to shared common ones.
   routing_strategy_train: sequence
-  routing_strategy_inference: rolling
+  routing_strategy_inference: sequence
   token_routing_kernel_version: v2 # Used when routing_strategy_train/inference is token
 
   # Router losses
@@ -182,5 +182,5 @@ training:
   wandb_run_name: run-vanilla-pretrain
 
   # Output
-  output_dir: ./outputs/base_small
+  output_dir: ./outputs/vanilla_control
   resume_from_checkpoint: null

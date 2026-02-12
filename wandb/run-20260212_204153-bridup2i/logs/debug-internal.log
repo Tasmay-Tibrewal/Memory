@@ -1,0 +1,6 @@
+{"time":"2026-02-12T20:41:54.163756577+05:30","level":"INFO","msg":"stream: starting","core version":"0.24.2"}
+{"time":"2026-02-12T20:41:54.712738594+05:30","level":"INFO","msg":"stream: created new stream","id":"bridup2i"}
+{"time":"2026-02-12T20:41:54.712828233+05:30","level":"INFO","msg":"handler: started","stream_id":"bridup2i"}
+{"time":"2026-02-12T20:41:54.713738222+05:30","level":"INFO","msg":"stream: started","id":"bridup2i"}
+{"time":"2026-02-12T20:41:54.713747005+05:30","level":"INFO","msg":"writer: started","stream_id":"bridup2i"}
+{"time":"2026-02-12T20:41:54.713760014+05:30","level":"INFO","msg":"sender: started","stream_id":"bridup2i"}

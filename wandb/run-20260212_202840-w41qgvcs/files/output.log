@@ -1,0 +1,26 @@
+============================================================
+Model Information
+============================================================
+Total Parameters:     152.63M
+Trainable Parameters: 152.63M
+Trainable %:          100.00%
+Model Size:           612.23 MB
+------------------------------------------------------------
+Parameter Breakdown (params, bf16 estimate)
+------------------------------------------------------------
+Total model                       152,627,772 (291.11 MB)
+Vanilla transformer (no adapters/memory) 119,568,896 (228.06 MB)
+LoRA                              0 (0.00 MB)
+Memory bank                       8,421,376 (16.06 MB)
+Memory layers (without bank)      24,637,500 (46.99 MB)
+Memory layers (with bank)         33,058,876 (63.05 MB)
+------------------------------------------------------------
+Memory Configuration
+------------------------------------------------------------
+Memory Tokens:        16448
+Memory Placement:     all
+Memory Sharing:       shared
+Chapters:             514
+Top-K Chapters:       8
+============================================================
+Training:   1%|          | 100/9600 [10:57<17:10:20,  6.51s/it, loss=6.2378, lr=3.00e-04, step_s=6.530] 

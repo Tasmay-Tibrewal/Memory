@@ -1,0 +1,79 @@
+============================================================
+Model Information
+============================================================
+Total Parameters:     157.33M
+Trainable Parameters: 157.33M
+Trainable %:          100.00%
+Model Size:           642.17 MB
+------------------------------------------------------------
+Parameter Breakdown (params, bf16 estimate)
+------------------------------------------------------------
+Total model                       157,329,920 (300.08 MB)
+Vanilla transformer (no adapters/memory) 157,329,920 (300.08 MB)
+LoRA                              0 (0.00 MB)
+Memory bank                       0 (0.00 MB)
+Memory layers (without bank)      0 (0.00 MB)
+Memory layers (with bank)         0 (0.00 MB)
+============================================================
+Training:   0%|                                                                                                                                                                                                                                                  | 0/9600 [00:00<?, ?it/s]/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/utils/data/dataloader.py:1118: UserWarning: 'pin_memory' argument is set as true but no accelerator is found, then device pinned memory won't be used.
+  super().__init__(loader)
+Traceback (most recent call last):
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 53, in <module>
+    main()
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 49, in main
+    trainer.train()
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/training/trainer.py", line 706, in train
+    outputs = self.model(
+              ^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 819, in forward
+    return model_forward(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 807, in __call__
+    return convert_to_fp32(self.model_forward(*args, **kwargs))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 733, in forward
+    hidden_states = checkpoint_fn(_layer_forward, hidden_states, use_reentrant=False)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1181, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/utils/checkpoint.py", line 512, in checkpoint
+    ret = function(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 723, in _layer_forward
+    out, _ = _layer(
+             ^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 658, in forward
+    hidden_states, new_kv = self.self_attn(
+                            ^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 351, in forward
+    attn_weights = self.attn_dropout(attn_weights)
+                   ^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1952, in __getattr__
+    def __getattr__(self, name: str) -> Union[Tensor, "Module"]:
+
+KeyboardInterrupt
