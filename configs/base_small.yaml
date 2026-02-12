@@ -144,7 +144,7 @@ training:
 
   # Training hyperparameters
   batch_size: 32
-  gradient_accumulation_steps: 16 # smaller, since smaller train corpus
+  gradient_accumulation_steps: 2 # smaller, since smaller train corpus
   # num_epochs: null
   max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
   warmup_steps: 250 # smaller warmup for smaller training corpus
@@ -162,7 +162,7 @@ training:
   min_lr_ratio: 0.1
   # wsd_stable_ratio is over-riden by decay_start_ratio and warmup_steps
   wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
-  decay_start_ratio: 0.8 # Optional global override for decay start (ratio of steps till decay start)
+  decay_start_ratio: 0.85 # Optional global override for decay start (ratio of steps till decay start)
   # resolved decay start overrides stable, stable = total - (warmup + decay steps)
   # decay_start_step: 2000
 
@@ -173,7 +173,7 @@ training:
   gradient_checkpointing: true
   save_steps: 100
   eval_steps: 100
-  save_total_limit: 50 # Set null to keep all checkpoints
+  save_total_limit: 100 # Set null to keep all checkpoints
 
   # Logging
   logging_steps: 10

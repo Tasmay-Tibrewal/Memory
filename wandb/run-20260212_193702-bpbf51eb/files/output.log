@@ -23,7 +23,7 @@ Memory Sharing:       shared
 Chapters:             514
 Top-K Chapters:       8
 ============================================================
-Training:   0%|                                            | 23/9600 [16:41<115:29:51, 43.42s/it, loss=9.4309, lr=1.92e-04, step_s=43.463]Traceback (most recent call last):
+Training:   2%|▎                | 18/1200 [13:04<14:15:20, 43.42s/it, loss=10.3178, lr=3.00e-04, step_s=43.510]Traceback (most recent call last):
   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 53, in <module>
     main()
   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 49, in main

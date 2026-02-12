@@ -12,7 +12,7 @@ model:
   hidden_dim: 512
   num_heads: 8
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 48
+  num_layers: 42
   intermediate_dim: 1536
   vocab_size: 49152
   max_seq_len: 2048
@@ -49,7 +49,7 @@ memory:
   vanilla_mode: true
 
   # Memory bank settings
-  num_memory_tokens: 65792
+  num_memory_tokens: 16448
   memory_dim: null # Uses hidden_dim
   memory_num_heads: 16 # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: 1 # null => fallback to model.num_kv_heads (or model.num_heads if null)
@@ -66,14 +66,14 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 514 # 512 (to be routed) + 2 (shared)
+  num_chapters: 514 # 256 (to be routed) + 1 (shared)
   top_k_chapters: 8
   num_shared_chapters: 2 # First N chapters are always included for every sample
   routed_scaling_factor: 5 # Scales routed chapter weights relative to shared chapters
   normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
   shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
-  # scaled to 5, because 2 shared chapters weighed as 2, and 8 routed chapter as 1
+  # scaled to 5, because 1 shared chapter weighed as 1, and 4 routed chapter as 1
   # so to compensate, we need 2x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
   # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
   # giving more imp. to routed tokens and lesser to shared common ones.
@@ -140,11 +140,11 @@ training:
 
   # Distributed
   distributed_strategy: ddp
-  # num_gpus: 1
+  num_gpus: 8
 
   # Training hyperparameters
   batch_size: 32
-  gradient_accumulation_steps: 16 # smaller, since smaller train corpus
+  gradient_accumulation_steps: 2 # smaller, since smaller train corpus
   # num_epochs: null
   max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
   warmup_steps: 250 # smaller warmup for smaller training corpus
@@ -162,7 +162,7 @@ training:
   min_lr_ratio: 0.1
   # wsd_stable_ratio is over-riden by decay_start_ratio and warmup_steps
   wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
-  decay_start_ratio: 0.8 # Optional global override for decay start (ratio of steps till decay start)
+  decay_start_ratio: 0.85 # Optional global override for decay start (ratio of steps till decay start)
   # resolved decay start overrides stable, stable = total - (warmup + decay steps)
   # decay_start_step: 2000
 
@@ -173,7 +173,7 @@ training:
   gradient_checkpointing: true
   save_steps: 100
   eval_steps: 100
-  save_total_limit: 50 # Set null to keep all checkpoints
+  save_total_limit: 100 # Set null to keep all checkpoints
 
   # Logging
   logging_steps: 10
