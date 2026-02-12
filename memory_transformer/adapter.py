@@ -603,7 +603,7 @@ class MemoryAdapter(nn.Module):
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
 
                         if strategy == "token":
-                            chapter_indices_global, _, router_losses = router.route_token_level(
+                            chapter_indices_global, chapter_weights_token, router_losses = router.route_token_level(
                                 hidden_states=hidden_states,
                                 return_losses=self.training,
                                 exclude_prefix_chapters=mem_cfg.num_shared_chapters,
@@ -659,6 +659,14 @@ class MemoryAdapter(nn.Module):
                                 "tokens_per_chapter": int(tokens_per_chapter),
                                 "routed_scale": float(mem_cfg.routed_scaling_factor),
                                 "kernel_version": self.token_routing_kernel_version,
+                                # chapter_weights_token: (B, T, top_k) router-produced
+                                # per-token importance weights for each selected chapter.
+                                # Used for MoE-style weighted combination of per-chapter
+                                # attention outputs. When present, each chapter's
+                                # cross-attention is computed independently and mixed by
+                                # these weights; when None, all chapters are attended
+                                # jointly in a single pass.
+                                "chapter_weights": chapter_weights_token,
                             }
                             memory = None
 

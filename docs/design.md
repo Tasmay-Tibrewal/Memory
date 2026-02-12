@@ -9,6 +9,7 @@ This document records design choices, compromises, known issues, and areas for f
 **Choice**: Raw PyTorch with HuggingFace Accelerate for distributed training.
 
 **Rationale**:
+
 - Full control over custom memory cross-attention layers
 - Accelerate handles DDP/FSDP transparently
 - Easy integration with HF models for adapter mode
@@ -21,6 +22,7 @@ This document records design choices, compromises, known issues, and areas for f
 **Choice**: Self-Attention → Memory Cross-Attention → MLP
 
 **Rationale**:
+
 - Simpler architecture
 - Matches encoder-decoder cross-attention patterns
 - Variant B (extra MLP) can be enabled via config
@@ -28,18 +30,23 @@ This document records design choices, compromises, known issues, and areas for f
 ### 3. Sequence-Level Default + Token-Level Kernel Path
 
 **Choice**:
+
 - Keep sequence-level routing as the default.
 - Implement token-level routing when `routing_strategy_*: token` is selected.
 
 **Rationale**:
+
 - Token-level routing is more expressive and avoids sequence-level route leakage patterns.
 - Naive token-level dense attention is memory-prohibitive during training/prefill.
 - We therefore split token routing into:
-  - dense shared-chapter attention
+  - dense shared-chapter attention (always weighted 1.0)
   - sparse routed-chapter attention via stable kernels (`kernels-final` v1/v2/v3, default v2)
+- **Router weights are applied MoE-style**: each chapter runs through independent softmax attention, then outputs are weighted by router probabilities and summed. This ensures router weights directly control chapter contribution rather than being overridden by Q·K similarity (which would happen with joint-softmax pre-scaling).
+- Per-chapter kernel calls use CUDA stream parallelism with event-based synchronization.
 - Sequence-level remains a robust default for broad compatibility.
 
 Kernel engineering notes:
+
 - Experimentation and benchmarks live in `kernels/`
 - Curated stable kernel set lives in `kernels-final/` (v1/v2/v3)
 
@@ -50,6 +57,7 @@ Kernel engineering notes:
 **Choice**: Initialize W_o in memory cross-attention to zero.
 
 **Rationale**:
+
 - Ensures model behaves exactly like base model at initialization
 - Memory contribution gradually increases as training progresses
 - Prevents instability when injecting adapters into pretrained models
@@ -59,12 +67,14 @@ Kernel engineering notes:
 **Choice**: Use persistent PyTorch forward hooks (registered lazily on first forward, never removed) to inject memory after each decoder layer.
 
 **Rationale**:
+
 - Non-invasive to pretrained model code
 - Works across many model architectures
 - Survives `GradientCheckpointingLayer` backward recomputation (hooks fire during recompute, producing correct memory-path gradients)
 - Lazy registration ensures DDP/FSDP/compile wrapping is applied before hooks attach
 
 **Trade-offs**:
+
 - Slight overhead from hook mechanism.
 - Per-forward state is stashed on instance attributes (`self._fwd_*`); hooks read these instead of closure variables.
 - Side effects (router loss accumulation, routing-cache mutation) are suppressed during recompute via a `_fwd_processed_layers` set.
@@ -79,10 +89,12 @@ Kernel engineering notes:
 **Status**: Implemented for inference/evaluation workflows.
 
 **Current support**:
+
 - Memory-bank quantization utilities are available (INT8 and packed INT4).
 - Deployment helpers can quantize memory banks and full models for inference.
 
 **Limitation**:
+
 - Training-time quantization-aware updates are not implemented.
 
 **Workaround**: Use low-rank factorization for training-time memory compression.
@@ -92,6 +104,7 @@ Kernel engineering notes:
 ### 2. Token-Level Routing Cost / Fallback Behavior
 
 As discussed in idea.txt (lines 62-80), token-level routing during prefill would require:
+
 ```
 K tensor size = B × S × num_heads × routed_tokens × D
             = 250 × 10000 × 32 × 16000 × 128
@@ -99,10 +112,12 @@ K tensor size = B × S × num_heads × routed_tokens × D
 ```
 
 **Current Solution**:
+
 - Core path uses dense shared + sparse routed attention (kernel-backed).
 - Fallback emulated sparse path exists for unsupported environments/shapes and is slower.
 
 **Future Solution**:
+
 - Expand benchmark coverage and policy tuning across larger shape/device matrices.
 
 ### 3. No Dynamic Memory Updates
@@ -114,6 +129,7 @@ The "context bank" for inference-time memory updates (idea.txt lines 84-102) is 
 ### 4. Limited Model Architecture Support
 
 Currently tested with:
+
 - Qwen 2.5 series
 - Basic Llama/Mistral structure
 
@@ -122,6 +138,7 @@ Other architectures may need adapter.py modifications.
 ### 5. KV-Cache Attention Mask Requires Full-Length Mask
 
 `SelfAttention` now requires full-length masks during cached decoding:
+
 - When `past_kv` is provided, `attention_mask.shape[1]` must equal `kv_len`.
 - Short step-only masks are rejected with a clear `ValueError`.
 
@@ -134,6 +151,7 @@ routers. If hidden states include padding positions, routing logits/chapter sele
 be biased.
 
 **Recommendation**:
+
 - Use these helpers with hidden states that do not include padded positions, or
 - Apply masked pooling before routing when padding is present.
 
@@ -151,6 +169,7 @@ detected via `self._fwd_processed_layers`; side effects (router loss append, rou
 mutation) are suppressed on recompute, but memory injection always runs.
 
 **Known limitations**:
+
 - The design assumes one forward → one backward per micro-step (standard training with Accelerate). Multiple forwards before a single backward is **not supported** when gradient checkpointing is active on the base model.
 - The out-of-band guard is best-effort (see Trade-offs in §5 above). Do not call `self.base_model(...)` directly; always go through `adapter.forward()`.
 
@@ -159,6 +178,7 @@ mutation) are suppressed on recompute, but memory injection always runs.
 ### 1. Memory Bank Size vs Compute
 
 Large memory banks (100k+ tokens) require chapter routing.
+
 - With routing: lose some information access
 - Without routing: O(L × N_m) attention cost
 
@@ -174,7 +194,8 @@ Shared memory bank gives each layer access to all information, but layers may ne
 
 Low-rank memory reduces parameters but limits what each token can express.
 
-**Compromise**: 
+**Compromise**:
+
 - Default to full for from-scratch (expressiveness matters)
 - Default to low-rank for adapters (parameter efficiency matters)
 
@@ -207,24 +228,27 @@ Low-rank memory reduces parameters but limits what each token can express.
 ## Config Recommendations
 
 ### For From-Scratch Pretraining
+
 ```yaml
 memory:
   num_memory_tokens: 4096-16384
   memory_sharing: shared
   use_chapters: true (if >4096 tokens)
-  use_low_rank_memory: false  # Full expressiveness
+  use_low_rank_memory: false # Full expressiveness
 ```
 
 ### For Adapter Fine-tuning
+
 ```yaml
 memory:
   num_memory_tokens: 1024-2048
-  memory_layer_placement: custom  # First/last 5 layers
+  memory_layer_placement: custom # First/last 5 layers
   use_low_rank_memory: true
   memory_rank: 256
 ```
 
 ### For Efficient Comparison
+
 ```yaml
 # Compare these 4 configs:
 # 1. vanilla_mode: true (no memory baseline)

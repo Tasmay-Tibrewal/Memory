@@ -48,6 +48,7 @@ Memory Bank M ∈ ℝ^(N_m × d)
 ```
 
 **Types:**
+
 - **StandardMemoryBank**: Full parameters (`N_m × d`)
 - **FactorizedMemoryBank**: `M = A × B^T` where A: `(N_m, r)`, B: `(d, r)` - saves `(N_m + d)r` vs `N_m × d`
 - **ReducedDimMemoryBank**: Store M as `(N_m, r)`, do attention in reduced space
@@ -55,12 +56,13 @@ Memory Bank M ∈ ℝ^(N_m × d)
 ### 2. Memory Cross-Attention
 
 Standard cross-attention where:
+
 - **Queries (Q)**: Come from input hidden states H
 - **Keys (K)** and **Values (V)**: Come from memory bank M
 
 ```python
 Q = H @ W_q     # (batch, seq_len, d) → (batch, seq_len, d)
-K = M @ W_k     # (N_m, d) → (N_m, d)  
+K = M @ W_k     # (N_m, d) → (N_m, d)
 V = M @ W_v     # (N_m, d) → (N_m, d)
 
 Attention = softmax(Q @ K^T / √d_k) @ V
@@ -68,6 +70,7 @@ Output = Attention @ W_o
 ```
 
 **Key Design: Zero-initialized W_o**
+
 - Output projection starts at zero
 - Model starts as if no memory exists
 - Gradual learning of when/how to use memory
@@ -76,11 +79,13 @@ Output = Attention @ W_o
 ### 3. Block Variants
 
 **Variant A** (Default):
+
 ```
 Self-Attention → Memory Cross-Attention → MLP
 ```
 
 **Variant B** (Extra MLP):
+
 ```
 Self-Attention → MLP → Memory Cross-Attention → MLP
 ```
@@ -90,9 +95,10 @@ Variant B provides additional nonlinear processing after memory retrieval.
 ### 4. Memory Layer Placement
 
 Memory layers can be placed:
+
 - `all`: Every layer has memory
 - `first_k`: First k layers only
-- `last_k`: Last k layers only  
+- `last_k`: Last k layers only
 - `every_n`: Every n-th layer
 - `custom`: Explicit list of layer indices
 
@@ -129,9 +135,11 @@ top_k_indices, top_k_weights = topk(probs, k)
 ### Router Losses
 
 1. **Load Balance Loss**: Encourages uniform chapter usage
+
    ```
    L_balance = C × Σ(f_i × P_i)
    ```
+
    where f_i = fraction routed to chapter i, P_i = avg probability for chapter i
 
 2. **Auxiliary Loss**: Penalizes variance in chapter usage
@@ -159,6 +167,7 @@ For pretrained models, we inject memory as adapters:
 ```
 
 **Trainable parameters:**
+
 - Memory bank M
 - Memory projections (W_q, W_k, W_v, W_o)
 - Optional: LoRA on attention (W_q, W_v)
@@ -167,6 +176,7 @@ For pretrained models, we inject memory as adapters:
 ## Low-Rank Options
 
 ### Memory Bank Factorization
+
 ```
 M = A @ B^T
 A: (N_m, r)  -- tokens
@@ -177,7 +187,9 @@ Compression: ~8× for r=512, d=4096
 ```
 
 ### Reduced Dimension Mode
+
 Entire attention happens in reduced space:
+
 ```
 W_q: d → r    (project queries down)
 W_k: r → r    (operate in reduced space)
@@ -186,6 +198,7 @@ W_o: r → d    (project back up)
 ```
 
 ### Projection Factorization
+
 ```
 W = W_down @ W_up
 W_down: d → r
@@ -194,42 +207,68 @@ W_up: r → d
 
 ## Comparison: Memory vs LoRA
 
-| Aspect | Memory Adapter | LoRA |
-|--------|---------------|------|
-| What it adds | New cross-attention | Modifies existing attention |
-| Parameters | M + projections | A, B matrices per layer |
-| Information | Explicit memory tokens | Implicit in weight modifications |
-| Mechanism | Attend to stored knowledge | Adapt computation |
-| Combination | ✓ Can use together | ✓ Can use together |
+| Aspect       | Memory Adapter             | LoRA                             |
+| ------------ | -------------------------- | -------------------------------- |
+| What it adds | New cross-attention        | Modifies existing attention      |
+| Parameters   | M + projections            | A, B matrices per layer          |
+| Information  | Explicit memory tokens     | Implicit in weight modifications |
+| Mechanism    | Attend to stored knowledge | Adapt computation                |
+| Combination  | ✓ Can use together         | ✓ Can use together               |
 
 ## Initialization
 
 - **Token embeddings**: Normal(0, 0.02)
-- **Memory bank**: Normal(0, 0.02)  
+- **Memory bank**: Normal(0, 0.02)
 - **All projections**: Normal(0, 0.02)
 - **W_o (output)**: **Zero** (critical for stable training — adapter and from-scratch)
 - **LoRA B**: Zero (standard)
 
 ## Token-Level vs Sequence-Level Routing
 
-**Sequence-level** (implemented):
+**Sequence-level** (default):
+
 - Mean-pool sequence → route → same chapters for all tokens
+- Memory tokens are **pre-multiplied by router weights** before attention (soft chapter mixing)
 - Memory efficient: K is (batch, selected_tokens, d)
 
-**Token-level** (implemented in core model/adapter when `routing_strategy_*: token`):
-- Each token routes independently (more granular; reduces look-ahead risk from route choices).
-- Shared chapters are handled by a dense branch:
-  - FlashAttention when available
-  - PyTorch attention fallback otherwise
-- Routed chapters are handled by a sparse branch using `kernels-final`:
-  - `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`)
-  - kernel entrypoint: `FSA_topk_sparse_attention_bthd`
-- Branch merge: `shared_output + routed_scaling_factor * routed_output` before output projection.
-- This avoids naive per-token KV duplication during train/prefill.
+**Token-level** (activated by `routing_strategy_*: token`):
+
+- Each token routes independently via `TokenLevelRouter` or `ChapterRouter.route_token_level()`
+- Router outputs `(B, T, top_k)` indices and **normalized** weights (softmax → top-k → renormalize with `clamp_min(1e-12)` safety)
+
+### Weighted Combination (MoE-Style)
+
+When router weights are provided, each chapter is attended **independently** with its own softmax, then outputs are combined with router weights:
+
+```
+For each chapter i in top-k:
+    output_i = softmax(Q @ K_i^T / √d) @ V_i    ← independent softmax
+
+final = Σ_i  w_i · output_i                      ← weighted combination
+```
+
+This is critical: **joint softmax** (all chapters in one attention call) would let Q·K similarity override the router's weighting. Independent softmax ensures router weights **directly control** each chapter's contribution.
+
+### Branch Architecture
+
+1. **Shared chapters** (prefix chapters): dense cross-attention, always weighted at **1.0** (no router gating)
+2. **Routed chapters** (per-token top-k): sparse attention via `kernels-final` (`v1/v2/v3`), each chapter gets independent softmax, weighted by router probabilities
+3. **Output merge**: `shared_output + routed_scaling_factor × routed_output`, then projected by `W_o`
+
+### CUDA Stream Parallelism
+
+On GPU with `top_k > 1`, per-chapter attention calls are launched on separate CUDA streams for pipeline overlap. Event-based synchronization (`torch.cuda.Event` + `wait_event`) is used to safely synchronize before weighted accumulation.
+
+Fallback: sequential computation on CPU or when `top_k = 1`.
+
+### Emulated Fallback
+
+If the sparse kernel is unavailable (unsupported device/dtype/shape), the model falls back to an emulated PyTorch path that correctly implements the same independent-softmax-per-chapter logic.
 
 ## Summary
 
 The Memory-Augmented Transformer provides:
+
 1. **Explicit memory** via learnable latent tokens
 2. **Flexible placement** of memory across layers
 3. **Scalable access** via chapter routing
@@ -242,28 +281,31 @@ The Memory-Augmented Transformer provides:
 
 ### Where Each Component Lives
 
-| Component | File | Key Classes/Functions |
-|-----------|------|----------------------|
-| Memory Bank | `memory_bank.py` | `StandardMemoryBank`, `FactorizedMemoryBank`, `ReducedDimMemoryBank`, `ChapteredMemoryBank` |
-| Cross-Attention | `memory_attention.py` | `MemoryCrossAttention`, `MemoryCrossAttentionWithRouting` (dead code - routing handled externally) |
-| Transformer Block | `memory_block.py` | `MemoryTransformerBlock`, `VanillaTransformerBlock`, `RMSNorm`, `RotaryPositionalEmbedding`, `SelfAttention`, `MLP` |
-| Chapter Router | `router.py` | `ChapterRouter`, `TokenLevelRouter`, `RollingRouter` |
-| Token Sparse Kernel Loader | `token_routing_kernel.py` | `normalize_kernel_version`, `get_token_routing_kernel_fn` |
-| Full Model | `model.py` | `MemoryTransformer` |
-| Pretrained Adapter | `adapter.py` | `MemoryAdapter`, `MemoryAdapterLayer` |
-| LoRA | `lora.py` | `LoRALinear`, `apply_lora_to_model` |
-| Quantization | `quantization.py` | `QuantizedMemoryBank` |
-| Configuration | `config.py` | `MemoryConfig`, `ModelConfig`, `TrainingConfig`, `Config` |
+| Component                  | File                                       | Key Classes/Functions                                                                                               |
+| -------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| Memory Bank                | `memory_bank.py`                           | `StandardMemoryBank`, `FactorizedMemoryBank`, `ReducedDimMemoryBank`, `ChapteredMemoryBank`                         |
+| Cross-Attention            | `memory_attention.py`                      | `MemoryCrossAttention`, `MemoryCrossAttentionWithRouting` (dead code - routing handled externally)                  |
+| Transformer Block          | `memory_block.py`                          | `MemoryTransformerBlock`, `VanillaTransformerBlock`, `RMSNorm`, `RotaryPositionalEmbedding`, `SelfAttention`, `MLP` |
+| Chapter Router             | `router.py`                                | `ChapterRouter`, `TokenLevelRouter`, `RollingRouter`                                                                |
+| Token Sparse Kernel Loader | `token_routing_kernel.py`                  | `normalize_kernel_version`, `get_token_routing_kernel_fn`                                                           |
+| Full Model                 | `model.py`                                 | `MemoryTransformer`                                                                                                 |
+| Pretrained Adapter         | `adapter.py`                               | `MemoryAdapter`, `MemoryAdapterLayer`                                                                               |
+| LoRA                       | `lora.py`                                  | `LoRALinear`, `apply_lora_to_model`                                                                                 |
+| Quantization               | `quantization.py`                          | `QuantizedMemoryBank`                                                                                               |
+| Configuration              | `config.py`                                | `MemoryConfig`, `ModelConfig`, `TrainingConfig`, `Config`                                                           |
+| Kernel Benchmark           | `kernels-final/benchmark_kernels_final.py` | Correctness + timing for v1/v2/v3 (unweighted joint-softmax and weighted MoE-style)                                 |
 
 ### Key Implementation Details
 
 #### Memory Initialization
+
 ```python
 # memory_bank.py line 67
 nn.init.normal_(self.memory, mean=0.0, std=self.init_std)  # Default 0.02
 ```
 
 #### Targeted Init Overrides (From-Scratch Path)
+
 ```python
 # model.py (optional overrides)
 model.self_attn_wo_init_std      # null => initializer_range
@@ -271,6 +313,7 @@ model.mlp_down_proj_init_std     # null => initializer_range
 ```
 
 #### Zero Output Projection Initialization
+
 ```python
 # memory_attention.py line 112
 if wo_init_zero:
@@ -278,6 +321,7 @@ if wo_init_zero:
 ```
 
 #### Block Variant Selection
+
 ```python
 # memory_block.py lines 370-400
 if self.memory_block_variant == "A":
@@ -294,6 +338,7 @@ elif self.memory_block_variant == "B":
 ```
 
 #### Persistent Hook-Based Adapter Injection
+
 ```python
 # adapter.py — hooks registered lazily on first forward(), never removed.
 # This ensures hooks survive GradientCheckpointingLayer backward recompute.
@@ -333,14 +378,16 @@ surface; do not call `self.base_model(...)` directly.
 ## Parameter Counts
 
 ### Memory Bank Parameters
-| Size | Standard | Factorized (r=256) | ReducedDim (r=256) |
-|------|----------|--------------------|--------------------|
-| 1K tokens, d=768 | 786K | 262K (3× less) | 262K |
-| 4K tokens, d=768 | 3.1M | 264K (12× less) | 1M |
-| 16K tokens, d=768 | 12.3M | 270K (45× less) | 4.1M |
-| 4K tokens, d=4096 | 16.7M | 1.1M (15× less) | 1M |
+
+| Size              | Standard | Factorized (r=256) | ReducedDim (r=256) |
+| ----------------- | -------- | ------------------ | ------------------ |
+| 1K tokens, d=768  | 786K     | 262K (3× less)     | 262K               |
+| 4K tokens, d=768  | 3.1M     | 264K (12× less)    | 1M                 |
+| 16K tokens, d=768 | 12.3M    | 270K (45× less)    | 4.1M               |
+| 4K tokens, d=4096 | 16.7M    | 1.1M (15× less)    | 1M                 |
 
 ### Total Trainable Parameters (Adapter Mode)
+
 ```
 Memory adapter on Qwen2.5-1.5B:
 - Memory bank: 2048 × 256 (factorized) = 0.5M
@@ -356,12 +403,14 @@ vs Full model: 1.5B → 1% of parameters trainable
 ## Computational Complexity
 
 ### Attention Costs
-| Component | Without Chapters | With Chapters (k=4, C=16) |
-|-----------|------------------|---------------------------|
-| Self-Attention | O(L²d) | O(L²d) |
-| Memory Cross-Attention | O(L × N_m × d) | O(L × k × N_c × d) |
+
+| Component              | Without Chapters | With Chapters (k=4, C=16) |
+| ---------------------- | ---------------- | ------------------------- |
+| Self-Attention         | O(L²d)           | O(L²d)                    |
+| Memory Cross-Attention | O(L × N_m × d)   | O(L × k × N_c × d)        |
 
 For L=2048, N_m=16K, C=16, k=4:
+
 - Without chapters: 2048 × 16384 = 33.5M ops per head
 - With chapters: 2048 × 4 × 1024 = 8.4M ops per head (4× faster)
 
@@ -370,24 +419,26 @@ For L=2048, N_m=16K, C=16, k=4:
 ## Configuration Quick Reference
 
 ### Essential Flags
-| Flag | Purpose | Typical Values |
-|------|---------|----------------|
-| `vanilla_mode` | Disable memory | `false` (true for control) |
-| `num_memory_tokens` | Memory size | 512-16384 |
-| `memory_layer_placement` | Which layers | `all`, `custom` |
-| `memory_block_variant` | Block structure | `A` (default) |
-| `use_chapters` | Enable routing | `true` if N_m > 4K |
+
+| Flag                                 | Purpose                     | Typical Values                          |
+| ------------------------------------ | --------------------------- | --------------------------------------- |
+| `vanilla_mode`                       | Disable memory              | `false` (true for control)              |
+| `num_memory_tokens`                  | Memory size                 | 512-16384                               |
+| `memory_layer_placement`             | Which layers                | `all`, `custom`                         |
+| `memory_block_variant`               | Block structure             | `A` (default)                           |
+| `use_chapters`                       | Enable routing              | `true` if N_m > 4K                      |
 | `routing_strategy_{train,inference}` | Chapter routing granularity | `sequence`, `sequence-rolling`, `token` |
-| `token_routing_kernel_version` | Sparse token-routing kernel | `v2` (default), `v1`, `v3` |
-| `wo_init_zero` | Zero init W_o | `true` (adapter and from-scratch) |
+| `token_routing_kernel_version`       | Sparse token-routing kernel | `v2` (default), `v1`, `v3`              |
+| `wo_init_zero`                       | Zero init W_o               | `true` (adapter and from-scratch)       |
 
 ### Memory Compression Flags
-| Flag | Purpose | When to Use |
-|------|---------|-------------|
-| `use_low_rank_memory` | Factorize M | Large memory, adapter mode |
-| `memory_rank` | Factorization rank | 128-512 |
-| `low_rank_mode` | Factorization type | `factorized` or `reduced_dim` |
-| `use_low_rank_projections` | Factorize W | Very large models |
+
+| Flag                       | Purpose            | When to Use                   |
+| -------------------------- | ------------------ | ----------------------------- |
+| `use_low_rank_memory`      | Factorize M        | Large memory, adapter mode    |
+| `memory_rank`              | Factorization rank | 128-512                       |
+| `low_rank_mode`            | Factorization type | `factorized` or `reduced_dim` |
+| `use_low_rank_projections` | Factorize W        | Very large models             |
 
 ---
 
@@ -400,4 +451,3 @@ For L=2048, N_m=16K, C=16, k=4:
 - **Our approach**: Learnable internal memory with cross-attention
 
 Key difference: Our memory is **learned end-to-end** and **internal to the model**, not retrieved from external sources.
-

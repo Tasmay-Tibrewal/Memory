@@ -479,7 +479,7 @@ class MemoryCrossAttention(nn.Module):
         token_routing_kernel_version: str = "v2",
     ) -> torch.Tensor:
         """
-        Token-routed memory attention.
+        Token-routed memory attention with MoE-style chapter weighting.
 
         Design:
           1. Shared chapters are attended densely (FlashAttention when available,
@@ -487,6 +487,28 @@ class MemoryCrossAttention(nn.Module):
           2. Routed chapters are attended via sparse top-k chapter indices:
              - kernel path using kernels-final v1/v2/v3
              - emulated sparse fallback when kernel path is unavailable
+
+        Chapter weight application (MoE-style):
+          When ``chapter_weights`` is provided in ``token_routing_state``, each
+          selected chapter's cross-attention is computed **independently** (its
+          own softmax), and the per-chapter outputs are combined via a weighted
+          sum using the router-produced weights.  This mirrors how Mixture-of-
+          Experts works: each expert computes independently, outputs are mixed
+          by gating weights.  Crucially, this enables gradient flow back to the
+          router — ``chapter_weights`` participates in the computation graph, so
+          ``d_loss / d_chapter_weights`` is computed automatically by autograd,
+          which in turn trains the router network.
+
+          When ``chapter_weights`` is ``None``, all top-k chapters are attended
+          jointly in a single kernel call (original behaviour, cross-chapter
+          softmax, zero overhead).
+
+        Performance note:
+          The weighted path makes ``top_k`` kernel calls instead of one.  Total
+          FLOPs are identical (same Q·K and P·V work, just split across calls).
+          The only overhead is ``top_k − 1`` extra kernel launches (~5–20 µs
+          each on modern GPUs).  The Triton kernels in ``kernels-final/`` are
+          called **unchanged** — no optimised kernel code is modified.
         """
         shared_memory = token_routing_state.get("shared_memory")
         routed_memory = token_routing_state.get("routed_memory")
@@ -494,6 +516,7 @@ class MemoryCrossAttention(nn.Module):
         tokens_per_chapter = int(token_routing_state.get("tokens_per_chapter", 0))
         routed_scale = float(token_routing_state.get("routed_scale", 1.0))
         assume_sorted_topk = bool(token_routing_state.get("assume_sorted_topk", False))
+        chapter_weights = token_routing_state.get("chapter_weights", None)
         kernel_version = token_routing_state.get(
             "kernel_version",
             token_routing_kernel_version,
@@ -531,44 +554,118 @@ class MemoryCrossAttention(nn.Module):
         ):
             q, k, v = self._compute_qkv(hidden_states, routed_memory)
             scale = self.reduced_scale if self.reduced_dim_mode else self.scale
+            top_k = token_chapter_indices.shape[-1]
 
             use_kernel = (
                 q.is_cuda
                 and q.dtype in (torch.float16, torch.bfloat16)
                 and tokens_per_chapter in {32, 64, 128, 256, 512, 1024}
             )
-            routed_heads: Optional[torch.Tensor] = None
-            if use_kernel:
-                try:
-                    routed_heads = self._token_routed_sparse_attention_kernel(
-                        q=q,
-                        k=k,
-                        v=v,
-                        token_chapter_indices=token_chapter_indices,
-                        block_size=tokens_per_chapter,
-                        scale=scale,
-                        assume_sorted_topk=assume_sorted_topk,
-                        kernel_version=kernel_version,
-                    )
-                except Exception:
-                    routed_heads = None
 
-            if routed_heads is None:
-                global _TOKEN_ROUTED_FALLBACK_WARNED
-                if not _TOKEN_ROUTED_FALLBACK_WARNED:
-                    print(
-                        "MemoryCrossAttention token-routing warning: "
-                        "falling back to emulated sparse attention path "
-                        "(kernel unavailable or unsupported shape/dtype)."
-                    )
-                    _TOKEN_ROUTED_FALLBACK_WARNED = True
-                routed_heads = self._token_routed_sparse_attention_emulated(
-                    q=q,
-                    k=k,
-                    v=v,
+            # -----------------------------------------------------------------
+            # Weighted path: MoE-style per-chapter independent attention.
+            #
+            # For each of the top_k selected chapters, we run the sparse
+            # attention kernel (or emulated fallback) with topk=1, producing
+            # that chapter's cross-attention output.  We then scale by the
+            # router weight and accumulate.
+            #
+            # Mathematically:
+            #   routed_output = sum_i  w_i * softmax(Q @ K_i^T / sqrt(d)) @ V_i
+            #
+            # where i indexes selected chapters, w_i = chapter_weights[:,:,i],
+            # and K_i / V_i are the key/value vectors of chapter i.
+            #
+            # Each chapter has its own softmax (independent normalisation), which
+            # is the standard MoE formulation.  The weights w_i come from the
+            # router and participate in the autograd graph, enabling the router
+            # to be trained end-to-end.
+            #
+            # Parallelism:
+            #   On CUDA, each chapter's kernel is launched on a **separate CUDA
+            #   stream** so the GPU can overlap execution when individual calls
+            #   don't saturate all SMs.  After all streams finish, the weighted
+            #   accumulation runs on the default stream.  On CPU the calls run
+            #   sequentially (no streams).
+            # -----------------------------------------------------------------
+            if chapter_weights is not None:
+                B, T = q.shape[0], q.shape[1]
+
+                if q.is_cuda and top_k > 1:
+                    # -- Parallel CUDA stream path --
+                    # Launch each per-chapter attention on its own stream so the
+                    # GPU can pipeline / overlap independent kernel launches.
+                    streams = [torch.cuda.Stream(device=q.device) for _ in range(top_k)]
+                    chapter_outputs = [None] * top_k
+                    events = [None] * top_k
+
+                    for i in range(top_k):
+                        single_idx = token_chapter_indices[:, :, i : i + 1]
+                        with torch.cuda.stream(streams[i]):
+                            chapter_outputs[i] = self._token_routed_attention_single(
+                                q=q, k=k, v=v,
+                                token_chapter_indices=single_idx,
+                                block_size=tokens_per_chapter,
+                                scale=scale,
+                                assume_sorted_topk=assume_sorted_topk,
+                                kernel_version=kernel_version,
+                                use_kernel=use_kernel,
+                            )  # [B, T, HQ, D]
+                            # Record an event after the forward kernel completes.
+                            # Event-based sync is safer than wait_stream for
+                            # custom autograd backward passes (e.g. FSA Triton
+                            # kernels) that may not preserve stream affinity.
+                            events[i] = torch.cuda.Event()
+                            events[i].record()
+
+                    # Synchronise: make the current (default) stream wait for
+                    # each chapter's completion event before reading outputs.
+                    current_stream = torch.cuda.current_stream(q.device)
+                    for e in events:
+                        current_stream.wait_event(e)
+
+                    # Weighted accumulation (runs on default stream after sync).
+                    routed_accum = q.new_zeros(B, T, q.shape[2], q.shape[3])
+                    for i in range(top_k):
+                        w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)
+                        routed_accum = routed_accum + chapter_outputs[i] * w_i
+
+                else:
+                    # -- Sequential CPU / single-chapter path --
+                    routed_accum = q.new_zeros(B, T, q.shape[2], q.shape[3])
+                    for i in range(top_k):
+                        single_idx = token_chapter_indices[:, :, i : i + 1]
+                        chapter_out = self._token_routed_attention_single(
+                            q=q, k=k, v=v,
+                            token_chapter_indices=single_idx,
+                            block_size=tokens_per_chapter,
+                            scale=scale,
+                            assume_sorted_topk=assume_sorted_topk,
+                            kernel_version=kernel_version,
+                            use_kernel=use_kernel,
+                        )
+                        w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)
+                        routed_accum = routed_accum + chapter_out * w_i
+
+                routed_heads = routed_accum
+
+            # -----------------------------------------------------------------
+            # Unweighted path: original single-call joint-softmax attention.
+            #
+            # All top-k chapters are passed to the kernel together.  The softmax
+            # is computed across all selected chapters jointly (cross-chapter
+            # normalisation).  No chapter weights are applied — this is the
+            # legacy behaviour with zero extra overhead.
+            # -----------------------------------------------------------------
+            else:
+                routed_heads = self._token_routed_attention_single(
+                    q=q, k=k, v=v,
                     token_chapter_indices=token_chapter_indices,
                     block_size=tokens_per_chapter,
                     scale=scale,
+                    assume_sorted_topk=assume_sorted_topk,
+                    kernel_version=kernel_version,
+                    use_kernel=use_kernel,
                 )
 
             routed = routed_heads.reshape(
@@ -579,6 +676,74 @@ class MemoryCrossAttention(nn.Module):
             combined = combined + (routed * routed_scale)
 
         return combined
+
+    def _token_routed_attention_single(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        token_chapter_indices: torch.Tensor,
+        block_size: int,
+        scale: float,
+        assume_sorted_topk: bool,
+        kernel_version: str,
+        use_kernel: bool,
+    ) -> torch.Tensor:
+        """
+        Run sparse attention for the given chapter indices (kernel or emulated).
+
+        This is a unified helper used by both the weighted (per-chapter) and
+        unweighted (joint) paths in ``_forward_token_routed_attention``.  It
+        tries the Triton kernel first; on failure it falls back to the emulated
+        PyTorch path.
+
+        Args:
+            q: Query tensor [B, Tq, HQ, D].
+            k: Key tensor [B, Tk, HK, D].
+            v: Value tensor [B, Tk, HK, D].
+            token_chapter_indices: Chapter indices [B, Tq, topk] (topk can be 1
+                for per-chapter calls or the full top_k for joint calls).
+            block_size: Number of tokens per chapter (must be a power of 2 in
+                {32, 64, 128, 256, 512, 1024} for kernel path).
+            scale: Softmax scaling factor (typically 1/sqrt(head_dim)).
+            assume_sorted_topk: Whether indices are pre-sorted.
+            kernel_version: Which kernel version to use ("v1", "v2", "v3").
+            use_kernel: Whether the kernel path is available (CUDA, dtype, etc.).
+
+        Returns:
+            Attention output [B, Tq, HQ, D].
+        """
+        result: Optional[torch.Tensor] = None
+        if use_kernel:
+            try:
+                result = self._token_routed_sparse_attention_kernel(
+                    q=q, k=k, v=v,
+                    token_chapter_indices=token_chapter_indices,
+                    block_size=block_size,
+                    scale=scale,
+                    assume_sorted_topk=assume_sorted_topk,
+                    kernel_version=kernel_version,
+                )
+            except Exception:
+                result = None
+
+        if result is None:
+            global _TOKEN_ROUTED_FALLBACK_WARNED
+            if not _TOKEN_ROUTED_FALLBACK_WARNED:
+                print(
+                    "MemoryCrossAttention token-routing warning: "
+                    "falling back to emulated sparse attention path "
+                    "(kernel unavailable or unsupported shape/dtype)."
+                )
+                _TOKEN_ROUTED_FALLBACK_WARNED = True
+            result = self._token_routed_sparse_attention_emulated(
+                q=q, k=k, v=v,
+                token_chapter_indices=token_chapter_indices,
+                block_size=block_size,
+                scale=scale,
+            )
+
+        return result
 
     def _token_routed_sparse_attention_kernel(
         self,
@@ -733,21 +898,36 @@ class MemoryCrossAttentionWithRouting(nn.Module):
             # Memory already batched (e.g., from chaptered bank)
             selected_memory = memory
         
-        # Bug 7 fix: Apply chapter_weights to scale memory tokens
         if chapter_weights is not None:
-            # chapter_weights: (batch, top_k) -> expand to (batch, top_k*tpc, 1)
-            w = chapter_weights.unsqueeze(-1)                          # (B, top_k, 1)
-            w = w.repeat(1, 1, self.tokens_per_chapter)                # (B, top_k, tpc)
-            w = w.reshape(batch_size, -1, 1)                           # (B, top_k*tpc, 1)
-            selected_memory = selected_memory * w
-        
-        # Standard cross-attention on selected memory
+            # MoE-style: run cross-attention independently per chapter, then
+            # combine with router weights.  Each chapter gets its own softmax
+            # normalisation, so the router weights directly control relative
+            # contribution — identical to _forward_token_routed_attention.
+            #
+            # Previous code pre-scaled V by weights before a joint softmax,
+            # which let attention scores override the router's weighting.
+            top_k = chapter_indices.shape[1]
+            accum = hidden_states.new_zeros(hidden_states.shape)
+            for i in range(top_k):
+                start = i * self.tokens_per_chapter
+                end = start + self.tokens_per_chapter
+                chapter_mem = selected_memory[:, start:end, :]  # (B, tpc, dim)
+                chapter_out, _ = self.attention(
+                    hidden_states,
+                    chapter_mem,
+                    return_attn_weights=False,
+                )
+                w_i = chapter_weights[:, i].unsqueeze(-1).unsqueeze(-1)  # (B, 1, 1)
+                accum = accum + chapter_out * w_i
+            return accum, None
+
+        # Unweighted: joint cross-attention over all selected chapters
         output, attn_weights = self.attention(
-            hidden_states, 
+            hidden_states,
             selected_memory,
             return_attn_weights=False,
         )
-        
+
         return output, attn_weights
     
     def _select_chapters(

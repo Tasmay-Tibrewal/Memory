@@ -1,4 +1,4 @@
-﻿# Memory-Augmented Transformer
+# Memory-Augmented Transformer
 
 A PyTorch implementation of **memory-augmented transformers** with learnable cross-attention memory banks, designed for both from-scratch training and parameter-efficient fine-tuning of pretrained models.
 
@@ -7,6 +7,7 @@ A PyTorch implementation of **memory-augmented transformers** with learnable cro
 ## Overview
 
 This project implements a novel memory-augmented transformer architecture where:
+
 - **Learnable memory tokens** are stored in a memory bank
 - Transformer layers access memory via **cross-attention** (queries from hidden states, keys/values from memory)
 - **Chapter-based routing** (MoE-inspired) enables scaling to very large memory banks
@@ -17,18 +18,21 @@ This project implements a novel memory-augmented transformer architecture where:
 ## Features
 
 ### Core Architecture
+
 - **Learnable Memory Banks**: Cross-attention to persistent latent tokens learned during training
 - **Multiple Memory Variants**: Standard, Factorized (M=AB^T), Reduced-dimension
 - **Flexible Placement**: Memory in all layers, first/last k, every n-th, or custom list
 - **Memory Sharing**: Shared bank, per-layer banks, or grouped sharing
 
 ### Efficient Scaling
+
 - **Chapter-Based Routing**: MoE-style top-k selection for large memory banks (100k+ tokens)
 - **Token-Level Routing (Implemented)**: `routing_strategy_{train,inference}: token` uses dense shared-chapter attention + sparse routed-chapter attention via selected kernel (`v1/v2/v3`, default `v2`)
 - **Router Losses**: Load balancing, auxiliary, and z-loss from MoE literature
 - **Low-Rank Compression**: Factorized memory, low-rank projections
 
 ### Training Infrastructure
+
 - **Multi-GPU Training**: DDP/FSDP support via HuggingFace Accelerate
 - **Mixed Precision**: bf16/fp16 training
 - **Gradient Checkpointing**: Reduce memory usage (including for memory attention)
@@ -40,12 +44,14 @@ This project implements a novel memory-augmented transformer architecture where:
 - **Learning Rate Finder**: Find optimal learning rate before training
 
 ### Adapter Mode
+
 - **Memory Adapters**: Add memory to frozen pretrained models
 - **LoRA Integration**: Standard LoRA for comparison
 - **Combined Mode**: Memory + LoRA together
 - **Supported Models**: Qwen 2.5/3, Llama 2/3, Mistral
 
 ### Configuration
+
 - **YAML-Based Config**: All 50+ options in config files
 - **Example Configs**: Ready-to-use configurations with dataset suggestions
 - **Vanilla Mode**: Disable memory for control experiments
@@ -55,6 +61,7 @@ This project implements a novel memory-augmented transformer architecture where:
 ## Installation
 
 ### Basic Installation
+
 ```bash
 git clone <repository-url>
 cd Memory
@@ -62,6 +69,7 @@ pip install -r requirements.txt
 ```
 
 ### Optional Dependencies
+
 ```bash
 # For Flash Attention (Linux, CUDA 11.8+)
 pip install flash-attn --no-build-isolation
@@ -74,6 +82,7 @@ pip install wandb
 ```
 
 ### Verify Installation
+
 ```python
 from memory_transformer import load_config
 load_config("configs/base_small.yaml")
@@ -81,6 +90,7 @@ print("Installation successful!")
 ```
 
 ### Quick CPU Smoke Test (No HF Downloads)
+
 ```python
 from memory_transformer.config import load_config
 from memory_transformer.model import MemoryTransformer
@@ -112,16 +122,19 @@ print("Smoke OK:", out["logits"].shape)
 ## Quick Start
 
 ### 1. Training from Scratch (Small Model)
+
 ```bash
 python scripts/train.py --config configs/base_small.yaml
 ```
 
 ### 2. Memory Adapter on Pretrained Model
+
 ```bash
 python scripts/train.py --config configs/adapter_qwen2.5_1.5b.yaml
 ```
 
 ### 3. Multi-GPU Training
+
 ```bash
 # DDP (recommended for most cases)
 accelerate launch --num_processes 4 scripts/train.py --config configs/base_small.yaml
@@ -131,11 +144,13 @@ accelerate launch --num_processes 4 --use_fsdp scripts/train.py --config configs
 ```
 
 ### 4. Evaluation
+
 ```bash
 python scripts/eval.py --config configs/adapter_qwen2.5_1.5b.yaml --checkpoint outputs/final_model
 ```
 
 ### 5. Inference
+
 ```bash
 python scripts/inference.py --checkpoint outputs/final_model --prompt "Explain machine learning"
 ```
@@ -227,6 +242,7 @@ Memory/
 â”‚
 â”œâ”€â”€ kernels-final/            # Stable selected kernels (v1/v2/v3) for practical usage
 â”‚   â”œâ”€â”€ README.md            # Stable-set overview (why v1/v2/v3, what not included)
+â”‚   â”œâ”€â”€ benchmark_kernels_final.py # Benchmark: correctness + timing (unweighted & MoE-weighted)
 â”‚   â”œâ”€â”€ kernel_v1.py          # v1: unoptimized baseline
 â”‚   â”œâ”€â”€ kernel_v2.py          # v2: older optimized (most stable overall)
 â”‚   â””â”€â”€ kernel_v3.py          # v3: old optimized
@@ -245,15 +261,17 @@ Memory/
 All settings are controlled via YAML config files. See [`configs/README.md`](configs/README.md) for complete reference.
 
 ### Config Structure
+
 ```yaml
-model:      # Model architecture
-memory:     # Memory bank settings
-training:   # Training hyperparameters
+model: # Model architecture
+memory: # Memory bank settings
+training: # Training hyperparameters
 ```
 
 ### Key Configuration Options
 
 #### Model Settings
+
 ```yaml
 model:
   # Attention heads (set num_kv_heads < num_heads to enable GQA)
@@ -262,8 +280,8 @@ model:
   max_position_embeddings: null
   hidden_activation: swiglu
   initializer_range: 0.02
-  self_attn_wo_init_std: null   # Optional override for self-attn W_o init std (null => initializer_range)
-  mlp_down_proj_init_std: null  # Optional override for MLP down_proj init std (null => initializer_range)
+  self_attn_wo_init_std: null # Optional override for self-attn W_o init std (null => initializer_range)
+  mlp_down_proj_init_std: null # Optional override for MLP down_proj init std (null => initializer_range)
   tie_embeddings: true
 
   # Tokenizer to use (must match vocab_size for from-scratch)
@@ -277,43 +295,44 @@ model:
   use_rope: true
   attention_dropout: 0.0
 ```
- 
+
 #### Memory Settings
+
 ```yaml
 memory:
   # Main toggles
-  vanilla_mode: false          # Disable memory for control experiments
-  use_memory_adapter: true     # Enable memory cross-attention
-  
+  vanilla_mode: false # Disable memory for control experiments
+  use_memory_adapter: true # Enable memory cross-attention
+
   # Memory bank
-  num_memory_tokens: 2048      # Number of memory tokens
-  memory_num_heads: null       # Optional memory-attn heads (null => model/base heads)
-  memory_num_kv_heads: null    # Optional memory-attn KV heads (null => model/base KV heads)
-  memory_layer_placement: all  # all/first_k/last_k/every_n/custom
-  memory_sharing: shared       # shared/per_layer/every_k_layers
-  memory_block_variant: A      # A: SAâ†’Memâ†’MLP, B: SAâ†’MLPâ†’Memâ†’MLP
-  memory_dropout: null         # Memory cross-attn dropout (null => model.dropout)
-  
+  num_memory_tokens: 2048 # Number of memory tokens
+  memory_num_heads: null # Optional memory-attn heads (null => model/base heads)
+  memory_num_kv_heads: null # Optional memory-attn KV heads (null => model/base KV heads)
+  memory_layer_placement: all # all/first_k/last_k/every_n/custom
+  memory_sharing: shared # shared/per_layer/every_k_layers
+  memory_block_variant: A # A: SAâ†’Memâ†’MLP, B: SAâ†’MLPâ†’Memâ†’MLP
+  memory_dropout: null # Memory cross-attn dropout (null => model.dropout)
+
   # Chapter routing
-  use_chapters: true           # Enable MoE-style routing
-  num_chapters: 16             # Number of chapters
-  top_k_chapters: 4            # Chapters to select
-  num_shared_chapters: 0       # Always include first N chapters for every sample
-  routed_scaling_factor: 1.0   # Scale routed chapter weights vs shared chapters
-  normalize_shared_routed_before_mixing: false  # Normalize shared/routed vectors separately before weighted mixing
+  use_chapters: true # Enable MoE-style routing
+  num_chapters: 16 # Number of chapters
+  top_k_chapters: 4 # Chapters to select
+  num_shared_chapters: 0 # Always include first N chapters for every sample
+  routed_scaling_factor: 1.0 # Scale routed chapter weights vs shared chapters
+  normalize_shared_routed_before_mixing: false # Normalize shared/routed vectors separately before weighted mixing
   shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
-  token_routing_kernel_version: v2       # v1/v2/v3 (used when routing_strategy_* = token)
-  routing_strategy_inference: hybrid  # sequence/sequence-rolling/rolling/token/hybrid
-  routing_window_size: 128            # Rolling/hybrid window size (tokens)
-  
+  token_routing_kernel_version: v2 # v1/v2/v3 (used when routing_strategy_* = token)
+  routing_strategy_inference: hybrid # sequence/sequence-rolling/rolling/token/hybrid
+  routing_window_size: 128 # Rolling/hybrid window size (tokens)
+
   # Low-rank options
-  use_low_rank_memory: true    # Factorized memory bank
-  memory_rank: 256             # Low-rank dimension
-  
+  use_low_rank_memory: true # Factorized memory bank
+  memory_rank: 256 # Low-rank dimension
+
   # LoRA
-  use_lora: false              # Enable LoRA
-  use_both_memory_and_lora: false  # Combine both
+  use_lora: false # Enable LoRA
+  use_both_memory_and_lora: false # Combine both
 
   # Optional: quantize memory bank for inference/eval scripts
   quantize_memory: false
@@ -321,54 +340,57 @@ memory:
 ```
 
 #### Training Settings
+
 ```yaml
 training:
   # Separate learning rates
   memory_lr: 2e-4
   lora_lr: 1e-4
-  base_model_lr: 0             # 0 = frozen
-  
+  base_model_lr: 0 # 0 = frozen
+
   # Dataset
   dataset_name: HuggingFaceH4/ultrachat_200k
-  training_mode: instruction_finetuning  # or pretraining
-  
+  training_mode: instruction_finetuning # or pretraining
+
   # Distributed
-  distributed_strategy: ddp    # ddp or fsdp
+  distributed_strategy: ddp # ddp or fsdp
   fsdp_sharding_strategy: FULL_SHARD
   mixed_precision: bf16
-  scheduler: wsd               # cosine/linear/constant/wsd
+  scheduler: wsd # cosine/linear/constant/wsd
   wsd_stable_ratio: 0.3
   decay_start_ratio: null
-  save_total_limit: 3          # null => keep all checkpoints
+  save_total_limit: 3 # null => keep all checkpoints
   # WandB logs include loss/total_loss, step_time_s, grad_norm, router metrics
   # (including entropy when routing is enabled), and CUDA memory usage.
 ```
 
 ### Example Configurations
 
-| Config | Use Case |
-|--------|----------|
-| `base_small.yaml` | From-scratch pretraining (100M params) |
-| `adapter_qwen2.5_1.5b.yaml` | Memory adapter on Qwen2.5-1.5B |
-| `vanilla_control.yaml` | Control experiment (no memory) |
-| `memory_lora_combined.yaml` | Memory + LoRA combined |
+| Config                       | Use Case                                     |
+| ---------------------------- | -------------------------------------------- |
+| `base_small.yaml`            | From-scratch pretraining (100M params)       |
+| `adapter_qwen2.5_1.5b.yaml`  | Memory adapter on Qwen2.5-1.5B               |
+| `vanilla_control.yaml`       | Control experiment (no memory)               |
+| `memory_lora_combined.yaml`  | Memory + LoRA combined                       |
 | `reference_all_options.yaml` | Full config surface (documentation template) |
 
 ---
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [`docs/architecture.md`](docs/architecture.md) | Detailed architecture with diagrams |
-| [`docs/design.md`](docs/design.md) | Design decisions, compromises, known issues |
-| [`docs/context.md`](docs/context.md) | Quick summary for handoffs |
-| [`docs/philosophy.md`](docs/philosophy.md) | Development philosophy and style guide |
-| [`docs/meta_artifacts/session_summary.md`](docs/meta_artifacts/session_summary.md) | Session summaries |
-| [`configs/README.md`](configs/README.md) | Complete configuration reference |
+| Document                                                                           | Description                                 |
+| ---------------------------------------------------------------------------------- | ------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                                     | Detailed architecture with diagrams         |
+| [`docs/design.md`](docs/design.md)                                                 | Design decisions, compromises, known issues |
+| [`docs/context.md`](docs/context.md)                                               | Quick summary for handoffs                  |
+| [`docs/philosophy.md`](docs/philosophy.md)                                         | Development philosophy and style guide      |
+| [`docs/meta_artifacts/session_summary.md`](docs/meta_artifacts/session_summary.md) | Session summaries                           |
+| [`configs/README.md`](configs/README.md)                                           | Complete configuration reference            |
 
 ### Package Documentation
+
 Each subfolder has its own README:
+
 - [`memory_transformer/README.md`](memory_transformer/README.md) - Core modules
 - [`training/README.md`](training/README.md) - Training infrastructure
 - [`inference/README.md`](inference/README.md) - Generation utilities
@@ -403,6 +425,7 @@ python scripts/eval.py --checkpoint outputs_memory/final_model
 ## Troubleshooting
 
 ### Out of Memory
+
 ```yaml
 # Reduce batch size and use accumulation
 training:
@@ -418,9 +441,10 @@ memory:
 ```
 
 ### Slow Training
+
 ```yaml
 model:
-  use_flash_attention: true    # Requires flash-attn package
+  use_flash_attention: true # Requires flash-attn package
 training:
   gradient_checkpointing: true
   mixed_precision: bf16
@@ -432,6 +456,7 @@ side effects are suppressed via `_fwd_processed_layers`. One limitation: assumes
 per backward per micro-step. See `docs/design.md` for details.
 
 ### Model Not Learning
+
 - Check `wo_init_zero: true` (critical for stable training â€” adapter and from-scratch)
 - Enable `use_load_balance_loss: true` if router collapses
 - Increase `memory_lr` relative to `base_model_lr`
@@ -439,6 +464,7 @@ per backward per micro-step. See `docs/design.md` for details.
 ## Kernels (Token-Level Routing)
 
 For token-level routing into very large memory banks during train/prefill:
+
 - Core model path now supports token routing via `routing_strategy_*: token`.
 - Implementation mixes:
   - dense shared-chapter attention (FlashAttention when available, otherwise PyTorch fallback)
@@ -447,6 +473,7 @@ For token-level routing into very large memory banks during train/prefill:
 
 - Detailed exploration, reports, and benchmarks: `kernels/`
 - Stable selected set used in practice: `kernels-final/` (v1/v2/v3, with v2 most stable overall)
+- **Benchmark**: `kernels-final/benchmark_kernels_final.py` tests correctness (forward + dQ/dK/dV/dW backward) and timing for both unweighted (joint-softmax) and weighted (MoE-style per-chapter independent-softmax with CUDA stream parallelism) modes
 - Motivation: avoid per-token KV duplication or de-batched slow paths, and reduce look-ahead risk from sequence-level route choices
 - Note: NSA forward can be faster for `G>=16` in some configs, but backward is much slower and it does not support `G<16` as a general solution
 
@@ -457,22 +484,27 @@ For token-level routing into very large memory banks during train/prefill:
 The following features are planned for future development:
 
 ### Attention Visualization
+
 - Visualize memory attention patterns
 - Analyze which chapters are selected by the router
 - Track router decisions over training
 
 ### Benchmarking Suite
+
+- ✅ **Implemented**: Kernel correctness + timing benchmark (`kernels-final/benchmark_kernels_final.py`) covering unweighted and MoE-weighted modes
 - Throughput measurement scripts
 - Latency profiling tools
 - Memory usage tracking during training/inference
 
 ### Export & Deployment
+
 - âœ… **Implemented**: Full model quantization (int8/4-bit) via `inference/merge.py`
 - âœ… **Implemented**: Model merging and weight extraction
 - ONNX export for production deployment
 - TensorRT optimization
 
 ### Advanced Features
+
 - Memory compression learning (distill documents into memory)
 - Multi-tier memory with different granularities
 - Retrieval-augmented hybrid approaches
@@ -482,6 +514,7 @@ The following features are planned for future development:
 ## Citation
 
 If you use this code, please cite:
+
 ```bibtex
 @misc{memory-transformer,
   title={Memory-Augmented Transformer with Learnable Cross-Attention Memory Banks},
@@ -495,4 +528,3 @@ If you use this code, please cite:
 ## License
 
 MIT License
-

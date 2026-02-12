@@ -15,11 +15,11 @@ model:
   num_layers: 32
   intermediate_dim: 3172
   vocab_size: 49152
-  max_seq_len: 8192
+  max_seq_len: 2048
   max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
 
   # Tokenizer (must match vocab_size for from-scratch)
-  tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
+  tokenizer_name: HuggingFaceTB/SmolLM2-135M
   bos_token_id: 0
   eos_token_id: 0
   pad_token_id: 0
@@ -77,8 +77,8 @@ memory:
   # so to compensate, we need 2x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
   # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
   # giving more imp. to routed tokens and lesser to shared common ones.
-  routing_strategy_train: token
-  routing_strategy_inference: token
+  routing_strategy_train: sequence
+  routing_strategy_inference: rolling
   token_routing_kernel_version: v2 # Used when routing_strategy_train/inference is token
 
   # Router losses
@@ -114,8 +114,8 @@ training:
   # Uncomment ONE of these dataset configurations:
 
   # Option 1: General pretraining (recommended for from-scratch)
-  dataset_name: allenai/c4
-  dataset_subset: en
+  dataset_name: HuggingFaceFW/fineweb-edu
+  dataset_subset: sample-10BT
   dataset_split: train
   eval_split: validation # c4 has train/validation splits
   text_field: text

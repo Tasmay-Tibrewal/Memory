@@ -67,6 +67,8 @@ When `memory.routing_strategy_train` or `memory.routing_strategy_inference` is s
 2. Routed chapters (per-token top-k) -> sparse routed path via selected kernel from this folder.
 3. Final output -> `shared_output + routed_scaling_factor * routed_output`.
 
+**Note on router weights**: The kernels themselves do **not** handle router weight application. Weights are applied externally in Python (MoE-style: independent kernel call per chapter, weighted output accumulation). This keeps the kernel code unchanged and maintainable.
+
 Kernel selection is controlled by:
 
 - `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`).
@@ -87,17 +89,56 @@ These are not "semantic versions" of the whole repository. They are just a namin
 - v2: stability-first optimized choice (default)
 - v3: older large optimized alternative
 
-## How This Relates to Benchmarks
+## Benchmarking
 
-Benchmarks live in `kernels/`:
+### Kernels-Final Benchmark (Primary)
 
-- Main benchmark: `kernels/benchmark_memory_xattn_optimized_import.py`
-- Experimental benchmark branch: `kernels/benchmark_memory_xattn_optimized_import__newly_changed.py`
+`benchmark_kernels_final.py` in this folder is the primary benchmark for the stable kernel set. It tests all three versions (v1, v2, v3) with two operation modes:
 
-The convention used in this project:
+1. **Unweighted** (joint softmax): Single kernel call with all top-k chapters — cross-chapter softmax normalisation.
+2. **Weighted** (MoE-style): Per-chapter independent kernel calls on CUDA streams with event-based synchronisation, followed by router-weighted output accumulation. This matches the production path in `memory_attention.py`.
 
-- Keep the older working benchmark file as "main".
-- Keep the "newly changed" variant for experiments.
+**What it checks:**
+
+| Check                         | Unweighted | Weighted (MoE) |
+| ----------------------------- | ---------- | -------------- |
+| Forward output                | ✓          | ✓              |
+| dQ (query gradient)           | ✓          | ✓              |
+| dK (key gradient)             | ✓          | ✓              |
+| dV (value gradient)           | ✓          | ✓              |
+| dW (chapter_weights gradient) | N/A        | ✓              |
+
+Correctness is verified against naive Python reference implementations.
+
+**Usage examples:**
+
+```bash
+# Full suite: correctness + timing for all kernels
+python benchmark_kernels_final.py --mode all
+
+# Correctness only, 3 trials
+python benchmark_kernels_final.py --mode correctness --num-checks 3
+
+# Timing only, forward-only, specific kernels
+python benchmark_kernels_final.py --mode timing --kernels v2,v3 --fwd-only
+
+# Skip weighted mode (unweighted only)
+python benchmark_kernels_final.py --no-weighted
+
+# Use preset config matching Qwen-7B shapes
+python benchmark_kernels_final.py --preset qwen-7b --mode timing
+
+# Custom shapes
+python benchmark_kernels_final.py --mem-tokens 8192 --chapter-size 128 --topk 4 \
+    --seq-len 2048 --hidden-dim 3584 --heads 28 --kv-heads 4
+```
+
+### Legacy Benchmarks
+
+Broader benchmarks including NSA baselines, FlexAttention, and experimental kernel variants live in `kernels/`:
+
+- `kernels/benchmark_memory_xattn_optimized_import.py` (main legacy benchmark)
+- `kernels/benchmark_memory_xattn_optimized_import__newly_changed.py` (experimental)
 
 ## Safety Note
 

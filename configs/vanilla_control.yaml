@@ -1,94 +1,186 @@
 # =============================================================================
-# Vanilla Control Experiment (No Memory)
+# Memory-Augmented Transformer: Small From-Scratch Model
 # =============================================================================
-# This config trains a standard transformer WITHOUT memory for comparison.
-# Use this as a baseline to measure the impact of memory augmentation.
+# This config trains a small (~100M param) memory-augmented transformer
+# from scratch for research experiments.
 #
-# Usage: python scripts/train.py --config configs/vanilla_control.yaml
+# Usage: python scripts/train.py --config configs/base_small.yaml
 # =============================================================================
 
 model:
-  # Same architecture as memory model
-  hidden_dim: 768
-  num_heads: 12
-  num_kv_heads: null # GQA KV heads (null => use num_heads)
-  num_layers: 12
-  intermediate_dim: 3072
-  vocab_size: 32000
-  max_seq_len: 8192
+  # Architecture
+  hidden_dim: 1024
+  num_heads: 16
+  num_kv_heads: 4 # GQA KV heads (null => use num_heads)
+  num_layers: 32
+  intermediate_dim: 3172
+  vocab_size: 49152
+  max_seq_len: 2048
   max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
 
   # Tokenizer (must match vocab_size for from-scratch)
-  tokenizer_name: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-  bos_token_id: null
-  eos_token_id: null
-  pad_token_id: null
+  tokenizer_name: HuggingFaceTB/SmolLM2-135M
+  bos_token_id: 0
+  eos_token_id: 0
+  pad_token_id: 0
 
+  # Standard settings
   use_rope: true
+  rope_theta: 100000.0
+  dropout: 0.0
+  attention_dropout: 0.0
   hidden_activation: swiglu
   initializer_range: 0.02
+  # output scaling for residuals by 1/sqrt(3d) -> ideally it is 1/sqrt(2d) for self-attn, mlp; but here we have a memory layer also, thus 1/sqrt(3d)
+  self_attn_wo_init_std: 0.002     # Optional std override for self-attn W_o; null => initializer_range
+  mlp_down_proj_init_std: 0.002    # Optional std override for MLP down_proj; null => initializer_range
+
   tie_embeddings: true
   use_rms_norm: true
+  norm_eps: 1e-5
   use_flash_attention: true
 
+  # Not using pretrained base (from-scratch)
   base_model_name: null
   freeze_base_model: false
 
 memory:
-  # ======================================
-  # KEY: VANILLA MODE ENABLED
-  # This disables ALL memory components
-  # ======================================
+  # === MAIN TOGGLE: Set to true for vanilla (no memory) control ===
   vanilla_mode: true
 
-  # These are ignored when vanilla_mode=true
-  # but listed for documentation
-  num_memory_tokens: 4096
-  memory_num_heads: null
-  memory_num_kv_heads: null
-  memory_dropout: null
-  use_chapters: false
-  num_shared_chapters: 0
-  routed_scaling_factor: 1.0
-  normalize_shared_routed_before_mixing: false
-  shared_routed_norm_type: rms
+  # Memory bank settings
+  num_memory_tokens: 65792
+  memory_dim: null # Uses hidden_dim
+  memory_num_heads: 16 # null => fallback to model.num_heads for memory cross-attn
+  memory_num_kv_heads: 1 # null => fallback to model.num_kv_heads (or model.num_heads if null)
+  # 1 kv head for key, value -> faster inference, lesser overhead.
+  # also memory savings, during training, inference is there.
+
+  # Memory placement: all layers get memory
+  memory_layer_placement: all
+  memory_sharing: shared # Single shared bank
+  memory_block_variant: A # SA -> Mem -> MLP
+  memory_dropout: null # null => fallback to model.dropout for memory cross-attention
+
+  memory_gradient_checkpointing: true
+
+  # Chapter routing (MoE-style sparse access)
+  use_chapters: true
+  num_chapters: 514 # 512 (to be routed) + 2 (shared)
+  top_k_chapters: 8
+  num_shared_chapters: 2 # First N chapters are always included for every sample
+  routed_scaling_factor: 5 # Scales routed chapter weights relative to shared chapters
+  normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
+  shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
+  # scaled to 5, because 2 shared chapters weighed as 2, and 8 routed chapter as 1
+  # so to compensate, we need 2x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
+  # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
+  # giving more imp. to routed tokens and lesser to shared common ones.
+  routing_strategy_train: sequence
+  routing_strategy_inference: rolling
+  token_routing_kernel_version: v2 # Used when routing_strategy_train/inference is token
+
+  # Router losses
+  use_load_balance_loss: true
+  load_balance_coefficient: 0.01
+  use_auxiliary_loss: false
+  use_z_loss: false
+
+  # Low-rank options (disabled for full expressiveness)
+  use_low_rank_memory: false
+  # memory_rank: 256
+  # low_rank_mode: factorized
+
+  # Initialization
+  wo_init_zero: true
+  memory_init_std: 0.02
+
+  # LoRA (disabled for from-scratch)
   use_lora: false
-  use_memory_adapter: false
+  use_memory_adapter: true
+  use_both_memory_and_lora: false
 
 training:
-  memory_lr: 1e-4
-  base_model_lr: 1e-4
+  # Learning rates
+  memory_lr: 3e-4
+  lora_lr: 3e-4
+  base_model_lr: 3e-4 # Same for from-scratch
 
+  # Training mode
   training_mode: pretraining
 
-  # Use same dataset as memory model for fair comparison
-  dataset_name: allenai/c4
-  dataset_subset: en
+  # === DATASET SUGGESTIONS ===
+  # Uncomment ONE of these dataset configurations:
+
+  # Option 1: General pretraining (recommended for from-scratch)
+  dataset_name: HuggingFaceFW/fineweb-edu
+  dataset_subset: sample-10BT
   dataset_split: train
   eval_split: validation # c4 has train/validation splits
   text_field: text
 
-  max_length: 2048
+  # Option 2: SlimPajama (high quality)
+  # dataset_name: cerebras/SlimPajama-627B
+  # dataset_split: train
+  # text_field: text
 
-  batch_size: 8
-  gradient_accumulation_steps: 8
-  max_steps: 50000
-  warmup_steps: 1000
+  # Option 3: RedPajama
+  # dataset_name: togethercomputer/RedPajama-Data-1T-Sample
+  # dataset_split: train
+  # text_field: text
 
+  # Option 4: Wikipedia for testing
+  # dataset_name: wikipedia
+  # dataset_subset: 20220301.en
+  # dataset_split: train
+  # text_field: text
+
+  max_length: 2048 # Shorter for pretraining efficiency
+
+  # Distributed
+  distributed_strategy: ddp
+  # num_gpus: 1
+
+  # Training hyperparameters
+  batch_size: 128
+  gradient_accumulation_steps: 4 # smaller, since smaller train corpus
+  # num_epochs: null
+  max_steps: 10000 # 10k steps for 10B tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
+  warmup_steps: 500 # smaller warmup for smaller training corpus
+
+  # Optimizer
   optimizer: adamw
   weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1e-8
   max_grad_norm: 1.0
-  scheduler: cosine
-  decay_start_ratio: null
-  decay_start_step: null
 
+  # Scheduler
+  scheduler: WSD
+  min_lr_ratio: 0.1
+  # wsd_stable_ratio is over-riden by decay_start_ratio and warmup_steps
+  wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
+  decay_start_ratio: 0.8 # Optional global override for decay start (ratio of steps till decay start)
+  # resolved decay start overrides stable, stable = total - (warmup + decay steps)
+  # decay_start_step: 2000
+
+  # Mixed precision
   mixed_precision: bf16
+
+  # Checkpointing
   gradient_checkpointing: true
-
   save_steps: 2000
+  eval_steps: 100
   save_total_limit: 3 # Set null to keep all checkpoints
-  logging_steps: 10
-  log_to_wandb: false
 
-  output_dir: ./outputs/vanilla_control
+  # Logging
+  logging_steps: 10
+  log_to_wandb: true
+  wandb_project: memory-transformer
+  wandb_run_name: run-full-pretrain
+
+  # Output
+  output_dir: ./outputs/base_small
+  resume_from_checkpoint: null

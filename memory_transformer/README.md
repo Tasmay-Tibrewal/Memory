@@ -29,14 +29,15 @@ memory_transformer/
 
 **Classes**:
 
-| Class | Description |
-|-------|-------------|
-| `MemoryConfig` | Memory bank settings, routing, LoRA, quantization |
-| `ModelConfig` | Transformer architecture settings |
+| Class            | Description                                             |
+| ---------------- | ------------------------------------------------------- |
+| `MemoryConfig`   | Memory bank settings, routing, LoRA, quantization       |
+| `ModelConfig`    | Transformer architecture settings                       |
 | `TrainingConfig` | Training hyperparameters, dataset, distributed settings |
-| `Config` | Main config combining all sub-configs |
+| `Config`         | Main config combining all sub-configs                   |
 
 **Notable Fields**:
+
 - `model.tokenizer_name`: Ensures tokenizer/vocab alignment for from-scratch training.
 - `model.num_kv_heads`: Enables GQA in from-scratch self-attention/memory attention (`null` => no grouping).
 - `memory.{memory_num_heads,memory_num_kv_heads}`: Optional overrides for memory cross-attention heads (`null` => reuse model/base heads).
@@ -58,6 +59,7 @@ memory_transformer/
 - `memory.token_routing_kernel_version`: Sparse token-routing kernel version (`v1`, `v2`, `v3`; default `v2`).
 
 **Key Functions**:
+
 ```python
 load_config(path) -> Config           # Load from YAML
 save_config(config, path)             # Save to YAML
@@ -66,6 +68,7 @@ get_memory_bank_assignments(config)   # Compute bank-to-layer mapping
 ```
 
 **Example Usage**:
+
 ```python
 from memory_transformer import load_config
 config = load_config("configs/adapter_qwen2.5_1.5b.yaml")
@@ -80,15 +83,16 @@ print(config.memory.num_memory_tokens)  # 2048
 
 **Classes**:
 
-| Class | Description | Parameters |
-|-------|-------------|------------|
-| `MemoryBank` | Abstract base class | - |
-| `StandardMemoryBank` | Full N×d memory | N_m × d |
-| `FactorizedMemoryBank` | M = A × B^T decomposition | (N_m × r) + (d × r) |
-| `ReducedDimMemoryBank` | Store in reduced dimension | N_m × r |
-| `ChapteredMemoryBank` | Wrapper adding chapter structure | Wraps any bank |
+| Class                  | Description                      | Parameters          |
+| ---------------------- | -------------------------------- | ------------------- |
+| `MemoryBank`           | Abstract base class              | -                   |
+| `StandardMemoryBank`   | Full N×d memory                  | N_m × d             |
+| `FactorizedMemoryBank` | M = A × B^T decomposition        | (N_m × r) + (d × r) |
+| `ReducedDimMemoryBank` | Store in reduced dimension       | N_m × r             |
+| `ChapteredMemoryBank`  | Wrapper adding chapter structure | Wraps any bank      |
 
 **Factory Function**:
+
 ```python
 create_memory_bank(
     num_tokens: int,
@@ -101,6 +105,7 @@ create_memory_bank(
 ```
 
 **Memory Compression Comparison**:
+
 ```
 Standard:    N_m × d = 4096 × 4096 = 67M params
 Factorized:  (N_m + d) × r = 8192 × 512 = 4.2M params (16× less)
@@ -115,12 +120,13 @@ ReducedDim:  N_m × r = 4096 × 512 = 2.1M params (32× less)
 
 **Classes**:
 
-| Class | Description |
-|-------|-------------|
-| `MemoryCrossAttention` | Standard memory cross-attention |
-| `MemoryCrossAttentionWithRouting` | *(dead code)* - routing handled externally |
+| Class                             | Description                                |
+| --------------------------------- | ------------------------------------------ |
+| `MemoryCrossAttention`            | Standard memory cross-attention            |
+| `MemoryCrossAttentionWithRouting` | _(dead code)_ - routing handled externally |
 
 **Key Features**:
+
 - Multi-head attention with configurable heads
 - Low-rank projection options (`use_low_rank_projections`)
 - Reduced-dimension mode (`reduced_dim_mode`)
@@ -129,6 +135,7 @@ ReducedDim:  N_m × r = 4096 × 512 = 2.1M params (32× less)
 - **Zero-initialized W_o** for stable training (adapter and from-scratch)
 
 **Equation**:
+
 ```
 Q = H @ W_q          # Queries from hidden states
 K = M @ W_k          # Keys from memory
@@ -137,10 +144,15 @@ Output = softmax(QK^T / √d) @ V @ W_o
 ```
 
 **Token-Level Routing Path (Implemented)**:
+
 - Triggered when model/adapter passes `token_routing_state` (used by `routing_strategy_*: token`).
-- Shared chapters: dense cross-attention branch (FlashAttention if available, else PyTorch attention).
+- Shared chapters: dense cross-attention branch (FlashAttention if available, else PyTorch attention). Always weighted at **1.0** (no router gating).
 - Routed chapters: sparse top-k chapter branch via `kernels-final` (`v1/v2/v3`) with `FSA_topk_sparse_attention_bthd`.
+- **Weighted combination (MoE-style)**: each chapter gets its own independent softmax; outputs weighted by router probabilities and summed. This ensures the router directly controls chapter contribution (joint softmax would let Q·K similarity override weighting).
+- **CUDA parallelism**: per-chapter kernel calls launch on separate CUDA streams; event-based sync (`torch.cuda.Event` + `wait_event`) before weighted accumulation.
 - Combined output: `shared_output + routed_scaling_factor * routed_output`, then projected by `W_o`.
+- Fallback: emulated PyTorch sparse path when kernels unavailable.
+- **Benchmark**: `kernels-final/benchmark_kernels_final.py` verifies correctness (forward + dQ/dK/dV/dW backward) and times both modes.
 
 ---
 
@@ -150,16 +162,17 @@ Output = softmax(QK^T / √d) @ V @ W_o
 
 **Classes**:
 
-| Class | Description |
-|-------|-------------|
-| `RMSNorm` | Root Mean Square Layer Normalization |
-| `RotaryPositionalEmbedding` | RoPE implementation |
-| `SelfAttention` | Standard self-attention |
-| `MLP` | SwiGLU feed-forward network |
-| `MemoryTransformerBlock` | Block with optional memory cross-attention |
-| `VanillaTransformerBlock` | Standard block without memory |
+| Class                       | Description                                |
+| --------------------------- | ------------------------------------------ |
+| `RMSNorm`                   | Root Mean Square Layer Normalization       |
+| `RotaryPositionalEmbedding` | RoPE implementation                        |
+| `SelfAttention`             | Standard self-attention                    |
+| `MLP`                       | SwiGLU feed-forward network                |
+| `MemoryTransformerBlock`    | Block with optional memory cross-attention |
+| `VanillaTransformerBlock`   | Standard block without memory              |
 
 **Block Variants**:
+
 ```
 Variant A (default):
     Self-Attn → Memory Cross-Attn → MLP
@@ -169,6 +182,7 @@ Variant B:
 ```
 
 **Usage**:
+
 ```python
 block = MemoryTransformerBlock(
     hidden_dim=768,
@@ -189,23 +203,26 @@ output = block(hidden_states, memory=memory_tokens)
 
 **Classes**:
 
-| Class | Description |
-|-------|-------------|
-| `ChapterRouter` | Sequence-level chapter routing |
-| `TokenLevelRouter` | Per-token routing helper |
-| `RollingRouter` | Rolling window routing |
+| Class              | Description                    |
+| ------------------ | ------------------------------ |
+| `ChapterRouter`    | Sequence-level chapter routing |
+| `TokenLevelRouter` | Per-token routing helper       |
+| `RollingRouter`    | Rolling window routing         |
+
+**Weight Normalization**: All routers apply `softmax → top-k → renormalize`. The renormalization uses `.clamp_min(1e-12)` to guard against division-by-zero in fp16 edge cases.
 
 **Router Losses** (from MoE literature):
 
-| Loss | Purpose | Coefficient |
-|------|---------|-------------|
-| Load Balance | Encourage uniform chapter usage | 0.01 |
-| Auxiliary | Penalize over/under-utilization | 0.01 |
-| Z-Loss | Regularize router logits | 0.001 |
+| Loss         | Purpose                         | Coefficient |
+| ------------ | ------------------------------- | ----------- |
+| Load Balance | Encourage uniform chapter usage | 0.01        |
+| Auxiliary    | Penalize over/under-utilization | 0.01        |
+| Z-Loss       | Regularize router logits        | 0.001       |
 
 `ChapterRouter` also emits `entropy` as a monitoring metric (not added to training loss unless explicitly wired).
 
 **Example**:
+
 ```python
 router = ChapterRouter(
     hidden_dim=768,
@@ -223,11 +240,12 @@ chapter_indices, weights, losses = router(hidden_states, return_losses=True)
 
 **Classes**:
 
-| Class | Description |
-|-------|-------------|
+| Class        | Description                     |
+| ------------ | ------------------------------- |
 | `LoRALinear` | Linear layer with LoRA adapters |
 
 **Key Functions**:
+
 ```python
 apply_lora_to_model(model, targets, rank, alpha)  # Add LoRA to model
 get_lora_parameters(model)                         # Get trainable params
@@ -236,6 +254,7 @@ unmerge_lora_weights(model)                        # Unmerge for training
 ```
 
 **Comparison Modes**:
+
 ```yaml
 # LoRA only
 use_lora: true
@@ -258,6 +277,7 @@ use_both_memory_and_lora: true
 **Class**: `MemoryTransformer`
 
 **Features**:
+
 - Token and positional embeddings
 - N transformer blocks with optional memory
 - Shared or per-layer memory banks
@@ -265,6 +285,7 @@ use_both_memory_and_lora: true
 - Language modeling head
 
 **Key Methods**:
+
 ```python
 model = MemoryTransformer(config)
 
@@ -286,11 +307,13 @@ count_parameters(model)  # Returns param count
 **Class**: `MemoryAdapter`
 
 **Supported Architectures**:
+
 - Qwen 2.5 / Qwen 3 series
 - Llama 2 / Llama 3 series
 - Mistral series
 
 **Gradient Checkpointing (Adapter Mode)**:
+
 - `MemoryAdapter` injects memory using **persistent** forward hooks (registered lazily on
   first `forward()`, never removed). This is compatible with `GradientCheckpointingLayer`
   backward recomputation (`qwen2`, `qwen3`, `llama`, `mistral`, etc.).
@@ -306,6 +329,7 @@ count_parameters(model)  # Returns param count
 - Full rationale: `docs/design.md` ("Adapter Hooks + Gradient Checkpointing").
 
 **How It Works**:
+
 1. Loads pretrained model from HuggingFace
 2. Freezes base model parameters (optional)
 3. Creates memory banks and adapters
@@ -313,6 +337,7 @@ count_parameters(model)  # Returns param count
 5. Hooks inject memory cross-attention after each layer, surviving GC recompute
 
 **Key Methods**:
+
 ```python
 adapter = MemoryAdapter(config)
 
@@ -332,9 +357,11 @@ groups = adapter.get_parameter_groups()
 **Purpose**: Reduce memory footprint via quantization.
 
 **Classes**:
+
 - `QuantizedMemoryBank`: 8-bit or 4-bit storage
 
 **Functions**:
+
 ```python
 quantize_memory_bank(tensor, quant_bits=8)         # -> (int8 (num_tokens, dim), scales)
 dequantize_memory_bank(quantized, scales, quant_bits=8)  # -> float (num_tokens, dim)
@@ -352,17 +379,17 @@ dequantize_memory_bank(quantized, scales, quant_bits=4)  # -> float (num_tokens,
 
 **Functions**:
 
-| Function | Description |
-|----------|-------------|
-| `set_seed(seed)` | Set random seeds |
-| `count_parameters(model)` | Count trainable params |
-| `format_params(count)` | Format as "1.2B", "350M" |
-| `get_model_size_mb(model)` | Memory footprint in MB |
-| `print_model_info(model, config)` | Print summary |
-| `save_checkpoint(model, path, ...)` | Save training state |
-| `load_checkpoint(path)` | Load training state |
-| `get_cosine_schedule(...)` | Cosine LR scheduler |
-| `get_linear_schedule(...)` | Linear LR scheduler |
+| Function                            | Description              |
+| ----------------------------------- | ------------------------ |
+| `set_seed(seed)`                    | Set random seeds         |
+| `count_parameters(model)`           | Count trainable params   |
+| `format_params(count)`              | Format as "1.2B", "350M" |
+| `get_model_size_mb(model)`          | Memory footprint in MB   |
+| `print_model_info(model, config)`   | Print summary            |
+| `save_checkpoint(model, path, ...)` | Save training state      |
+| `load_checkpoint(path)`             | Load training state      |
+| `get_cosine_schedule(...)`          | Cosine LR scheduler      |
+| `get_linear_schedule(...)`          | Linear LR scheduler      |
 
 ---
 
