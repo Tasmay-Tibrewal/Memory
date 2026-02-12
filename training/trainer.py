@@ -53,7 +53,7 @@ class Trainer:
     - Multi-GPU with DDP/FSDP via Accelerate
     - Mixed precision (fp16/bf16)
     - Gradient checkpointing
-    - Separate learning rates for memory/LoRA/base
+    - Separate learning rates for memory bank / memory layers / LoRA / base
     - Eval during training
     - Early stopping
     - Best model saving
@@ -299,21 +299,24 @@ class Trainer:
         if isinstance(self.model, MemoryAdapter):
             param_groups = self.model.get_parameter_groups()
         else:
-            # From-scratch training: split memory-related modules and backbone params.
-            memory_markers = (
-                "memory_banks.",
+            # From-scratch training: split memory-bank params from other memory
+            # params so memory_bank_lr can override memory_lr when set.
+            memory_non_bank_markers = (
                 "routers.",
                 ".memory_attn.",
                 ".memory_layernorm.",
                 ".post_memory_layernorm.",
                 ".post_memory_mlp.",
             )
+            memory_bank_params: List[nn.Parameter] = []
             memory_params: List[nn.Parameter] = []
             backbone_params: List[nn.Parameter] = []
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if any(marker in name for marker in memory_markers):
+                if "memory_banks." in name:
+                    memory_bank_params.append(p)
+                elif any(marker in name for marker in memory_non_bank_markers):
                     memory_params.append(p)
                 else:
                     backbone_params.append(p)
@@ -321,6 +324,15 @@ class Trainer:
             param_groups = []
             if memory_params:
                 param_groups.append({"params": memory_params, "lr": train_cfg.memory_lr, "name": "memory"})
+            if memory_bank_params:
+                memory_bank_lr = (
+                    train_cfg.memory_lr
+                    if train_cfg.memory_bank_lr is None
+                    else train_cfg.memory_bank_lr
+                )
+                param_groups.append(
+                    {"params": memory_bank_params, "lr": memory_bank_lr, "name": "memory_bank"}
+                )
             if backbone_params:
                 param_groups.append({"params": backbone_params, "lr": train_cfg.base_model_lr, "name": "base_model"})
         

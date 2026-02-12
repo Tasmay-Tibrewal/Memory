@@ -177,6 +177,9 @@ class TrainingConfig:
     
     # === Learning rates (separate for different components) ===
     memory_lr: float = 1e-4
+    # Optional override for memory-bank parameters only. If None, memory banks
+    # use memory_lr.
+    memory_bank_lr: Optional[float] = None
     lora_lr: float = 1e-4
     base_model_lr: float = 1e-5
     

@@ -125,6 +125,7 @@ memory:
 training:
   # Learning rates
   memory_lr: 1e-4
+  memory_bank_lr: null            # Optional override for memory bank LR (null => use memory_lr)
   lora_lr: 1e-4
   base_model_lr: 1e-5
 
@@ -198,5 +199,6 @@ training:
 # Optional quick recommendations (copy into a real run config):
 # - From-scratch small: hidden_dim=512-768, num_layers=6-12, num_memory_tokens=512-4096
 # - Adapter memory: freeze_base_model=true, num_memory_tokens=1024-2048, memory_lr=2e-4
+#   (optionally set memory_bank_lr separately for bank-only tuning)
 # - WSD schedule: scheduler=wsd, warmup_ratio=0.02-0.05, wsd_stable_ratio=0.2-0.4
 # -----------------------------------------------------------------------------

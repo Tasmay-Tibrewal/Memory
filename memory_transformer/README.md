@@ -47,6 +47,7 @@ memory_transformer/
 - `model.mlp_down_proj_init_std`: Optional std override for `MLP.down_proj` init (`null` => `initializer_range`).
 - `model.tie_embeddings`: Tie or untie token embeddings and LM head.
 - `model.{bos,eos,pad}_token_id`: Optional tokenizer special-ID overrides.
+- `training.memory_bank_lr`: Optional memory-bank-only LR override (`null` => falls back to `training.memory_lr`).
 - `memory.num_shared_chapters`: Always include first N chapters in chaptered memory routing.
 - `memory.routed_scaling_factor`: Scale routed chapter weights relative to shared chapter weights.
 - `memory.normalize_shared_routed_before_mixing`: Normalize shared/routed memory vectors separately before weighted mixing.

@@ -920,21 +920,47 @@ class MemoryAdapter(nn.Module):
             params.extend(adapter.parameters())
         
         return params
+
+    def get_memory_bank_parameters(self) -> List[nn.Parameter]:
+        """Get memory-bank parameters only."""
+        params = []
+        for bank in self.memory_banks.values():
+            params.extend(bank.parameters())
+        return params
     
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """Get parameter groups with different learning rates."""
-        mem_cfg = self.memory_config
         train_cfg = self.config.training
         
         groups = []
         
-        # Memory parameters
-        memory_params = self.get_memory_parameters()
+        # Memory parameters excluding memory banks
+        memory_params: List[nn.Parameter] = []
+        for router in self.routers.values():
+            memory_params.extend(p for p in router.parameters() if p.requires_grad)
+        for adapter in self.memory_adapters.values():
+            memory_params.extend(p for p in adapter.parameters() if p.requires_grad)
         if memory_params:
             groups.append({
                 "params": memory_params,
                 "lr": train_cfg.memory_lr,
                 "name": "memory",
+            })
+
+        # Memory bank parameters (optional LR override)
+        memory_bank_params = [
+            p for p in self.get_memory_bank_parameters() if p.requires_grad
+        ]
+        if memory_bank_params:
+            memory_bank_lr = (
+                train_cfg.memory_lr
+                if train_cfg.memory_bank_lr is None
+                else train_cfg.memory_bank_lr
+            )
+            groups.append({
+                "params": memory_bank_params,
+                "lr": memory_bank_lr,
+                "name": "memory_bank",
             })
         
         # LoRA parameters

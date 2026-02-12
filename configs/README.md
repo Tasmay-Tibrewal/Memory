@@ -178,6 +178,7 @@ Token-routing note:
 training:
   # === Learning Rates (separate for components) ===
   memory_lr: 1e-4              # Memory parameters LR
+  memory_bank_lr: null         # Optional memory-bank-only LR override (null => memory_lr)
   lora_lr: 1e-4                # LoRA parameters LR
   base_model_lr: 1e-5          # Base model LR (if not frozen)
   

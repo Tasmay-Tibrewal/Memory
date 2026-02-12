@@ -345,6 +345,7 @@ memory:
 training:
   # Separate learning rates
   memory_lr: 2e-4
+  memory_bank_lr: null # Optional override; null => use memory_lr
   lora_lr: 1e-4
   base_model_lr: 0 # 0 = frozen
 

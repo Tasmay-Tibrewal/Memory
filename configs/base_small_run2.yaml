@@ -105,6 +105,7 @@ memory:
 training:
   # Learning rates
   memory_lr: 3e-4
+  memory_bank_lr: null # Optional override for memory bank params only
   lora_lr: 3e-4
   base_model_lr: 3e-4 # Same for from-scratch
 
