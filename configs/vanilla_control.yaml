@@ -115,7 +115,7 @@ training:
 
   # Option 1: General pretraining (recommended for from-scratch)
   dataset_name: Tasmay-Tib/fineweb-edu-10bt-split
-  dataset_subset: sample-10BT
+  dataset_subset: null
   dataset_split: train
   eval_split: eval
   text_field: text
