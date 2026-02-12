@@ -196,7 +196,10 @@ class Trainer:
         if not self.train_config.log_to_wandb or not self.accelerator.is_main_process:
             return
 
-        wandb_init = {"project": self.train_config.wandb_project}
+        # `project_name` is already passed to `accelerator.init_trackers(...)`.
+        # Do not pass `project` again in wandb init kwargs, or wandb.init()
+        # receives duplicate project arguments and raises TypeError.
+        wandb_init = {}
         if self.train_config.wandb_run_name:
             wandb_init["name"] = self.train_config.wandb_run_name
 
