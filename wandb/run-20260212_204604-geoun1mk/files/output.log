@@ -39,4 +39,4 @@ Step 400: eval_loss = 4.7667
 Saved best checkpoint to outputs/base_small/best_model
 Removed shared tensor {'lm_head.weight'} while saving. This should be OK, but check by verifying that you don't receive any warning while reloading
 Saved checkpoint to outputs/base_small/checkpoint-400
-Training:   5%|███▊                                                                                | 436/9600 [49:41<15:41:42,  6.17s/it, loss=4.7058, lr=3.00e-04, step_s=6.252]
+Training:   5%|███▉                                                                                | 445/9600 [50:37<15:39:10,  6.16s/it, loss=4.6253, lr=3.00e-04, step_s=6.209]

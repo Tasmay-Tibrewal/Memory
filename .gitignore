@@ -5,6 +5,7 @@ __pycache__
 .python-version
 ddp_debug.log
 outputs/
+wandb/
 # some kernel testing -> not required for the repo
 native-sparse-attention/
 Flash-Sparse-Attention/
