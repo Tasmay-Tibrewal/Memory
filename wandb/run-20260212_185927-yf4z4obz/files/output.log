@@ -1,0 +1,181 @@
+============================================================
+Model Information
+============================================================
+Total Parameters:     177.89M
+Trainable Parameters: 177.89M
+Trainable %:          100.00%
+Model Size:           708.61 MB
+------------------------------------------------------------
+Parameter Breakdown (params, bf16 estimate)
+------------------------------------------------------------
+Total model                       177,891,900 (339.30 MB)
+Vanilla transformer (no adapters/memory) 119,568,896 (228.06 MB)
+LoRA                              0 (0.00 MB)
+Memory bank                       33,685,504 (64.25 MB)
+Memory layers (without bank)      24,637,500 (46.99 MB)
+Memory layers (with bank)         58,323,004 (111.24 MB)
+------------------------------------------------------------
+Memory Configuration
+------------------------------------------------------------
+Memory Tokens:        65792
+Memory Placement:     all
+Memory Sharing:       shared
+Chapters:             514
+Top-K Chapters:       8
+============================================================
+Training:   0%|                            | 1/9600 [01:06<176:33:20, 66.22s/it, loss=10.9816, lr=9.60e-06, step_s=66.216]Traceback (most recent call last):
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 53, in <module>
+    main()
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 49, in main
+    trainer.train()
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/training/trainer.py", line 706, in train
+    outputs = self.model(
+              ^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1666, in forward
+    else self._run_ddp_forward(*inputs, **kwargs)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1492, in _run_ddp_forward
+    return self.module(*inputs, **kwargs)  # type: ignore[index]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 819, in forward
+    return model_forward(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 807, in __call__
+    return convert_to_fp32(self.model_forward(*args, **kwargs))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 702, in forward
+    hidden_states = checkpoint_fn(_layer_forward, hidden_states, use_reentrant=False)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1181, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/utils/checkpoint.py", line 512, in checkpoint
+    ret = function(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 689, in _layer_forward
+    out, _ = _layer(
+             ^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 563, in forward
+    hidden_states = self.mlp(hidden_states)
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 389, in forward
+    hidden = F.silu(self.gate_proj(x)) * self.up_proj(x)
+                                         ^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 53, in <module>
+[rank0]:     main()
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/scripts/train.py", line 49, in main
+[rank0]:     trainer.train()
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/training/trainer.py", line 706, in train
+[rank0]:     outputs = self.model(
+[rank0]:               ^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1666, in forward
+[rank0]:     else self._run_ddp_forward(*inputs, **kwargs)
+[rank0]:          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/parallel/distributed.py", line 1492, in _run_ddp_forward
+[rank0]:     return self.module(*inputs, **kwargs)  # type: ignore[index]
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 819, in forward
+[rank0]:     return model_forward(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/accelerate/utils/operations.py", line 807, in __call__
+[rank0]:     return convert_to_fp32(self.model_forward(*args, **kwargs))
+[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/amp/autocast_mode.py", line 44, in decorate_autocast
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 702, in forward
+[rank0]:     hidden_states = checkpoint_fn(_layer_forward, hidden_states, use_reentrant=False)
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_compile.py", line 54, in inner
+[rank0]:     return disable_fn(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1181, in _fn
+[rank0]:     return fn(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/utils/checkpoint.py", line 512, in checkpoint
+[rank0]:     ret = function(*args, **kwargs)
+[rank0]:           ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/model.py", line 689, in _layer_forward
+[rank0]:     out, _ = _layer(
+[rank0]:              ^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 563, in forward
+[rank0]:     hidden_states = self.mlp(hidden_states)
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/memory_transformer/memory_block.py", line 389, in forward
+[rank0]:     hidden = F.silu(self.gate_proj(x)) * self.up_proj(x)
+[rank0]:                                          ^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/weka/innmivfractalslurmh1/home/fractal_admin/tasmay_tibrewal/Memory/.venv/lib/python3.11/site-packages/torch/nn/modules/linear.py", line 134, in forward
+[rank0]:     return F.linear(input, self.weight, self.bias)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]: KeyboardInterrupt

@@ -49,7 +49,7 @@ memory:
   vanilla_mode: false
 
   # Memory bank settings
-  num_memory_tokens: 65792
+  num_memory_tokens: 16448
   memory_dim: null # Uses hidden_dim
   memory_num_heads: 16 # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: 1 # null => fallback to model.num_kv_heads (or model.num_heads if null)
@@ -66,14 +66,14 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 514 # 512 (to be routed) + 2 (shared)
+  num_chapters: 514 # 256 (to be routed) + 1 (shared)
   top_k_chapters: 8
   num_shared_chapters: 2 # First N chapters are always included for every sample
   routed_scaling_factor: 5 # Scales routed chapter weights relative to shared chapters
   normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
   shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
-  # scaled to 5, because 2 shared chapters weighed as 2, and 8 routed chapter as 1
+  # scaled to 5, because 1 shared chapter weighed as 1, and 4 routed chapter as 1
   # so to compensate, we need 2x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
   # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
   # giving more imp. to routed tokens and lesser to shared common ones.
@@ -140,7 +140,7 @@ training:
 
   # Distributed
   distributed_strategy: ddp
-  # num_gpus: 1
+  num_gpus: 8
 
   # Training hyperparameters
   batch_size: 32

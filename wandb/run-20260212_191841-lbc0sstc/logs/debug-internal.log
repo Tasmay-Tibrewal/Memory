@@ -1,0 +1,6 @@
+{"time":"2026-02-12T19:18:42.149082126+05:30","level":"INFO","msg":"stream: starting","core version":"0.24.2"}
+{"time":"2026-02-12T19:18:42.673688512+05:30","level":"INFO","msg":"stream: created new stream","id":"lbc0sstc"}
+{"time":"2026-02-12T19:18:42.673780553+05:30","level":"INFO","msg":"handler: started","stream_id":"lbc0sstc"}
+{"time":"2026-02-12T19:18:42.677765131+05:30","level":"INFO","msg":"stream: started","id":"lbc0sstc"}
+{"time":"2026-02-12T19:18:42.677784423+05:30","level":"INFO","msg":"writer: started","stream_id":"lbc0sstc"}
+{"time":"2026-02-12T19:18:42.677791672+05:30","level":"INFO","msg":"sender: started","stream_id":"lbc0sstc"}
