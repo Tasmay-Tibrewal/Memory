@@ -1,6 +1,0 @@
-{"time":"2026-02-12T20:46:05.007043855+05:30","level":"INFO","msg":"stream: starting","core version":"0.24.2"}
-{"time":"2026-02-12T20:46:05.612411753+05:30","level":"INFO","msg":"stream: created new stream","id":"geoun1mk"}
-{"time":"2026-02-12T20:46:05.612574234+05:30","level":"INFO","msg":"handler: started","stream_id":"geoun1mk"}
-{"time":"2026-02-12T20:46:05.614336761+05:30","level":"INFO","msg":"stream: started","id":"geoun1mk"}
-{"time":"2026-02-12T20:46:05.614356297+05:30","level":"INFO","msg":"writer: started","stream_id":"geoun1mk"}
-{"time":"2026-02-12T20:46:05.614373971+05:30","level":"INFO","msg":"sender: started","stream_id":"geoun1mk"}
