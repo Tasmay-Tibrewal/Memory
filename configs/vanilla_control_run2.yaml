@@ -12,7 +12,7 @@ model:
   hidden_dim: 512
   num_heads: 8
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 30
+  num_layers: 43
   intermediate_dim: 1536
   vocab_size: 49152
   max_seq_len: 1024
@@ -46,7 +46,7 @@ model:
 
 memory:
   # === MAIN TOGGLE: Set to true for vanilla (no memory) control ===
-  vanilla_mode: false
+  vanilla_mode: true
 
   # Memory bank settings
   num_memory_tokens: 16448
@@ -181,8 +181,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-pretrain-run2
+  wandb_run_name: run-vanilla-pretrain-run2
 
   # Output
-  output_dir: ./outputs/base_small_run2
+  output_dir: ./outputs/vanilla_control_run2
   resume_from_checkpoint: null
