@@ -114,10 +114,10 @@ training:
   # Uncomment ONE of these dataset configurations:
 
   # Option 1: General pretraining (recommended for from-scratch)
-  dataset_name: HuggingFaceFW/fineweb-edu
+  dataset_name: Tasmay-Tib/fineweb-edu-10bt-split
   dataset_subset: sample-10BT
   dataset_split: train
-  eval_split: validation # c4 has train/validation splits
+  eval_split: eval
   text_field: text
 
   # Option 2: SlimPajama (high quality)
@@ -146,8 +146,8 @@ training:
   batch_size: 128
   gradient_accumulation_steps: 4 # smaller, since smaller train corpus
   # num_epochs: null
-  max_steps: 10000 # 10k steps for 10B tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
-  warmup_steps: 500 # smaller warmup for smaller training corpus
+  max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
+  warmup_steps: 250 # smaller warmup for smaller training corpus
 
   # Optimizer
   optimizer: adamw
@@ -171,7 +171,7 @@ training:
 
   # Checkpointing
   gradient_checkpointing: true
-  save_steps: 2000
+  save_steps: 100
   eval_steps: 100
   save_total_limit: 3 # Set null to keep all checkpoints
 
