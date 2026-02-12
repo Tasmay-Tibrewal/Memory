@@ -173,7 +173,7 @@ training:
   gradient_checkpointing: true
   save_steps: 100
   eval_steps: 100
-  save_total_limit: 3 # Set null to keep all checkpoints
+  save_total_limit: 50 # Set null to keep all checkpoints
 
   # Logging
   logging_steps: 10
