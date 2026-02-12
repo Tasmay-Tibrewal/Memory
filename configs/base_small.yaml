@@ -9,11 +9,11 @@
 
 model:
   # Architecture
-  hidden_dim: 1024
-  num_heads: 16
+  hidden_dim: 512
+  num_heads: 8
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 32
-  intermediate_dim: 3172
+  num_layers: 30
+  intermediate_dim: 1536
   vocab_size: 49152
   max_seq_len: 2048
   max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
