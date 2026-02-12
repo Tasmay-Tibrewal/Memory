@@ -143,8 +143,8 @@ training:
   # num_gpus: 1
 
   # Training hyperparameters
-  batch_size: 64
-  gradient_accumulation_steps: 8 # smaller, since smaller train corpus
+  batch_size: 32
+  gradient_accumulation_steps: 16 # smaller, since smaller train corpus
   # num_epochs: null
   max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
   warmup_steps: 250 # smaller warmup for smaller training corpus
