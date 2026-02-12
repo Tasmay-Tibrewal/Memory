@@ -501,6 +501,59 @@ class Trainer:
             key: sums[key] / max(counts.get(key, 1), 1)
             for key in sums.keys()
         }
+
+    def _compute_router_aux_loss_for_logging(self, router_losses: Any) -> float:
+        """
+        Compute weighted router auxiliary loss from raw router loss dicts.
+
+        Primary path uses the model's own aggregation implementation to avoid
+        drift from training loss semantics. Falls back to a local computation
+        if unavailable.
+        """
+        if not isinstance(router_losses, list) or not router_losses:
+            return 0.0
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        if hasattr(unwrapped_model, "_aggregate_router_losses"):
+            with torch.no_grad():
+                aux = unwrapped_model._aggregate_router_losses(router_losses)
+            return float(aux.detach().item())
+
+        mem_cfg = self.config.memory
+        load_coef = (
+            float(mem_cfg.load_balance_coefficient)
+            if bool(mem_cfg.use_load_balance_loss)
+            else 0.0
+        )
+        aux_coef = (
+            float(mem_cfg.auxiliary_loss_coefficient)
+            if bool(mem_cfg.use_auxiliary_loss)
+            else 0.0
+        )
+        z_coef = (
+            float(mem_cfg.z_loss_coefficient)
+            if bool(mem_cfg.use_z_loss)
+            else 0.0
+        )
+
+        non_empty = 0
+        total = 0.0
+        for layer_losses in router_losses:
+            if not isinstance(layer_losses, dict) or not layer_losses:
+                continue
+            layer_total = 0.0
+            if load_coef > 0.0 and torch.is_tensor(layer_losses.get("load_balance")):
+                layer_total += load_coef * float(layer_losses["load_balance"].detach().item())
+            if aux_coef > 0.0 and torch.is_tensor(layer_losses.get("auxiliary")):
+                layer_total += aux_coef * float(layer_losses["auxiliary"].detach().item())
+            if z_coef > 0.0 and torch.is_tensor(layer_losses.get("z_loss")):
+                layer_total += z_coef * float(layer_losses["z_loss"].detach().item())
+            total += layer_total
+            non_empty += 1
+
+        if non_empty == 0:
+            return 0.0
+        return total / non_empty
     
     def _resume_from_checkpoint(self, checkpoint_path: str):
         """Resume training from checkpoint."""
@@ -678,6 +731,8 @@ class Trainer:
 
         # Track loss statistics for logging windows (Bug 38 fix: divide by actual count, not a fixed constant)
         running_loss = 0.0
+        running_ce_loss = 0.0
+        running_router_aux_loss = 0.0
         running_loss_steps = 0
         running_step_time = 0.0
         running_step_time_steps = 0
@@ -685,6 +740,8 @@ class Trainer:
         running_router_counts: Dict[str, int] = {}
         last_grad_norm: Optional[float] = None
         last_loss_value: Optional[float] = None
+        last_ce_loss_value: Optional[float] = None
+        last_router_aux_loss_value: Optional[float] = None
         step_timer_start = time.perf_counter()
 
         # Determine epoch stopping condition
@@ -711,6 +768,11 @@ class Trainer:
 
                     loss = outputs["loss"]
                     last_loss_value = float(loss.detach().item())
+                    router_aux_loss_value = self._compute_router_aux_loss_for_logging(
+                        outputs.get("router_losses")
+                    )
+                    last_router_aux_loss_value = float(router_aux_loss_value)
+                    last_ce_loss_value = float(last_loss_value - last_router_aux_loss_value)
                     step_router_metrics = self._summarize_router_losses(
                         outputs.get("router_losses")
                     )
@@ -744,6 +806,10 @@ class Trainer:
                 # Update logging window
                 if last_loss_value is not None:
                     running_loss += last_loss_value
+                    running_ce_loss += last_ce_loss_value if last_ce_loss_value is not None else last_loss_value
+                    running_router_aux_loss += (
+                        last_router_aux_loss_value if last_router_aux_loss_value is not None else 0.0
+                    )
                     running_loss_steps += 1
                 now = time.perf_counter()
                 running_step_time += (now - step_timer_start)
@@ -757,6 +823,8 @@ class Trainer:
                 # Logging: first optimizer step and then every logging_steps.
                 if self.global_step == 1 or (self.global_step % train_cfg.logging_steps == 0):
                     avg_loss = running_loss / max(running_loss_steps, 1)
+                    avg_ce_loss = running_ce_loss / max(running_loss_steps, 1)
+                    avg_router_aux_loss = running_router_aux_loss / max(running_loss_steps, 1)
                     lr = self.scheduler.get_last_lr()[0]
                     avg_step_time = running_step_time / max(running_step_time_steps, 1)
 
@@ -770,6 +838,8 @@ class Trainer:
                         log_payload = {
                             "train/loss": avg_loss,
                             "train/total_loss": avg_loss,
+                            "train/ce_loss": avg_ce_loss,
+                            "train/router_aux_loss": avg_router_aux_loss,
                             "train/learning_rate": lr,
                             "train/step": self.global_step,
                             "train/epoch": self.epoch,
@@ -794,6 +864,8 @@ class Trainer:
                         self.accelerator.log(log_payload)
 
                     running_loss = 0.0
+                    running_ce_loss = 0.0
+                    running_router_aux_loss = 0.0
                     running_loss_steps = 0
                     running_step_time = 0.0
                     running_step_time_steps = 0

@@ -85,7 +85,8 @@ memory:
   use_load_balance_loss: true
   load_balance_coefficient: 0.01
   use_auxiliary_loss: false
-  use_z_loss: false
+  use_z_loss: true
+  z_loss_coefficient: 0.001
 
   # Low-rank options (disabled for full expressiveness)
   use_low_rank_memory: false
