@@ -8,7 +8,8 @@ Entry point scripts for training, evaluation, and inference.
 scripts/
 ├── train.py      # Training entry point
 ├── eval.py       # Evaluation (perplexity)
-└── inference.py  # Text generation
+├── inference.py  # Text generation
+└── estimate_flops.py  # Analytical FLOPs estimator
 ```
 
 ---
@@ -209,6 +210,58 @@ Output: What is machine learning?
 Machine learning is a subset of artificial intelligence that enables 
 computers to learn from data without being explicitly programmed...
 ```
+
+---
+
+## `estimate_flops.py` - FLOPs Estimator
+
+**Purpose**: Estimate training FLOPs from a YAML config.
+
+This script estimates forward/backward FLOPs for the from-scratch
+`MemoryTransformer` path using the configured architecture and training setup.
+
+### Usage
+
+```bash
+# Use config defaults (training.batch_size, training.max_length)
+python scripts/estimate_flops.py --config configs/base_small.yaml
+
+# Override per-device batch and sequence length
+python scripts/estimate_flops.py --config configs/base_small.yaml \
+    --batch_size 16 --seq_len 2048
+
+# Override world-size math and grad-accum for what-if planning
+python scripts/estimate_flops.py --config configs/base_small.yaml \
+    --num_gpus 8 --gradient_accumulation_steps 2 --max_steps 1200
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--config` | Yes | Path to YAML config file |
+| `--batch_size` | No | Override per-device micro-batch size |
+| `--seq_len` | No | Override sequence length |
+| `--num_gpus` | No | Override world size used for global FLOPs |
+| `--gradient_accumulation_steps` | No | Override grad accumulation for optimizer-step totals |
+| `--max_steps` | No | Override steps used for run-total FLOPs |
+| `--flash_available` | No | Force flash-attn assumption: `auto`/`true`/`false` |
+
+### Notes
+
+- Includes both matmul and elementwise components:
+  self-attn, memory-attn, MLP, norms, residuals, RoPE, router forward/loss,
+  memory preprocessing, LM head, and CE softmax.
+- Includes recompute FLOPs for both:
+  `training.gradient_checkpointing` (whole-layer recompute) and
+  `memory.memory_gradient_checkpointing` (memory-attn internal recompute).
+- Uses `memory.routing_strategy_train` semantics (training path). Valid values
+  here are `sequence`, `sequence-rolling`/`sequence_rolling`, and `token`.
+- Includes factorized memory-bank materialization FLOPs when
+  `memory.use_low_rank_memory: true` and `memory.low_rank_mode: factorized`.
+- Matmul terms are exact for configured tensor shapes; non-matmul terms are
+  analytic approximations. Optimizer-update FLOPs and communication overhead
+  are not included.
 
 ---
 
