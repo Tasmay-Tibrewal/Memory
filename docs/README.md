@@ -161,7 +161,7 @@ Each folder has its own README with detailed documentation:
 | [`memory_transformer/README.md`](../memory_transformer/README.md) | ~259 | All 11 core modules documented |
 | [`training/README.md`](../training/README.md) | ~228 | Trainer, data loading, losses |
 | [`inference/README.md`](../inference/README.md) | ~257 | Generation, merge, routing strategies |
-| [`scripts/README.md`](../scripts/README.md) | ~225 | CLI scripts with all arguments |
+| [`scripts/README.md`](../scripts/README.md) | ~400 | CLI scripts with training/eval/inference and benchmark suite usage |
 | [`configs/README.md`](../configs/README.md) | ~299 | Complete config reference |
 
 ---

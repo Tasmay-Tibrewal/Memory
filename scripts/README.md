@@ -1,4 +1,4 @@
-# Scripts
+﻿# Scripts
 
 Entry point scripts for training, evaluation, and inference.
 
@@ -6,10 +6,18 @@ Entry point scripts for training, evaluation, and inference.
 
 ```
 scripts/
-├── train.py      # Training entry point
-├── eval.py       # Evaluation (perplexity)
-├── inference.py  # Text generation
-└── estimate_flops.py  # Analytical FLOPs estimator
+├── train.py               # Training entry point
+├── eval.py                # Perplexity evaluation
+├── eval_mmlu.py           # MMLU accuracy
+├── eval_mcq_benchmark.py  # Generic MCQ benchmark evaluator
+├── eval_hellaswag.py      # HellaSwag accuracy
+├── eval_arc.py            # ARC-Challenge / ARC-Easy accuracy
+├── eval_winogrande.py     # Winogrande accuracy
+├── eval_boolq.py          # BoolQ accuracy
+├── eval_openbookqa.py     # OpenBookQA accuracy
+├── eval_pretrain_suite.py # Run all benchmark scripts + aggregate
+├── inference.py           # Text generation
+└── estimate_flops.py      # Analytical FLOPs estimator
 ```
 
 ---
@@ -152,6 +160,31 @@ Avg Loss:    2.5123
   "checkpoint": "outputs/final_model",
   "num_samples": 5000
 }
+```
+
+---
+
+## Benchmark Accuracy Scripts
+
+These scripts evaluate multiple-choice accuracy (not perplexity), useful for
+base-model post-pretraining benchmarking.
+
+```bash
+# MMLU
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Other common MCQ benchmarks
+python scripts/eval_hellaswag.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_winogrande.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_boolq.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Generic one-benchmark CLI
+python scripts/eval_mcq_benchmark.py --benchmark hellaswag --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Master suite runner (runs all + aggregates)
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
 ```
 
 ---
@@ -363,3 +396,4 @@ accelerate config default
 # Or specify everything manually
 accelerate launch --num_processes 2 --mixed_precision bf16 ...
 ```
+

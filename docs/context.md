@@ -38,11 +38,11 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 | `memory_transformer/` | 11 | ~3,550 |
 | `training/` | 4 | ~975 |
 | `inference/` | 4 | ~840 |
-| `scripts/` | 3 | ~450 |
+| `scripts/` | 12 | ~2,700 |
 | `configs/` | 6 | ~860 |
 | `docs/` | 5 | ~1,420 |
 | `docs/meta_artifacts/` | 4+ folders | ~2,700+ |
-| **Total** | **37+** | **~11,200+** |
+| **Total** | **46+** | **~13,500+** |
 
 ### Core Architecture (`memory_transformer/`)
 
@@ -82,9 +82,12 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `train.py` | 45 | Training entry point |
-| `eval.py` | 261 | Evaluation (perplexity) |
-| `inference.py` | 142 | Generation script |
+| `train.py` | 53 | Training entry point |
+| `eval.py` | 329 | Evaluation (perplexity) |
+| `eval_mmlu.py` | 497 | MMLU multiple-choice accuracy |
+| `eval_mcq_benchmark.py` | 363 | Generic MCQ benchmark evaluator (HellaSwag/ARC/BoolQ/etc.) |
+| `eval_pretrain_suite.py` | 191 | Master benchmark runner + summary aggregation |
+| `inference.py` | 196 | Generation script |
 
 ### Configurations (`configs/`)
 
@@ -360,6 +363,9 @@ inference/
 scripts/
 â”œâ”€â”€ train.py               â† config, trainer
 â”œâ”€â”€ eval.py                â† config, model, adapter, data
+â”œâ”€â”€ eval_mmlu.py           â† config, model, adapter, tokenizer, HF datasets
+â”œâ”€â”€ eval_mcq_benchmark.py  â† config, model, adapter, tokenizer, HF datasets
+â”œâ”€â”€ eval_pretrain_suite.py â† benchmark scripts orchestration + JSON aggregation
 â””â”€â”€ inference.py           â† config, model, adapter, generate
 ```
 
@@ -385,6 +391,10 @@ python scripts/train.py --config ... --resume outputs/checkpoint-1000
 ### Evaluation
 ```bash
 python scripts/eval.py --config configs/... --checkpoint outputs/final_model
+
+# Benchmark accuracy
+python scripts/eval_mmlu.py --config configs/... --checkpoint outputs/final_model
+python scripts/eval_pretrain_suite.py --config configs/... --checkpoint outputs/final_model
 ```
 
 ### Inference
@@ -409,7 +419,7 @@ Run these 4 configs to compare approaches:
 1. **Run training experiments** with provided configs
 2. **Compare** vanilla vs memory vs LoRA perplexity
 3. **Tune hyperparameters** based on results
-4. **Add benchmarks** (specific eval tasks)
+4. **Run benchmark suite and log results** (`scripts/eval_pretrain_suite.py`, plus per-benchmark scripts)
 5. **Document results** in walkthrough.md
 6. **Future**: Token-routing benchmark/policy tuning, dynamic context bank
 

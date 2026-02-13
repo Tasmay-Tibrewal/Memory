@@ -59,7 +59,7 @@ You MUST read these files before implementation. They contain critical design de
 | `memory_transformer/README.md` | Core module documentation - memory bank, attention, blocks |
 | `training/README.md` | Training infrastructure - data, losses, trainer |
 | `inference/README.md` | Generation and inference utilities |
-| `scripts/README.md` | CLI scripts for training/eval/inference |
+| `scripts/README.md` | CLI scripts for training/eval/inference plus benchmark suite tooling |
 | `configs/README.md` | Complete configuration reference with all 50+ flags |
 
 ### Session Context (in `docs/meta_artifacts/`)
@@ -99,7 +99,10 @@ Memory/
 â”‚
 â”œâ”€â”€ scripts/              # CLI entry points
 â”‚   â”œâ”€â”€ train.py         # Training script
-â”‚   â”œâ”€â”€ eval.py          # Evaluation script
+â”‚   â”œâ”€â”€ eval.py          # Perplexity evaluation
+â”‚   â”œâ”€â”€ eval_mmlu.py     # MMLU accuracy
+â”‚   â”œâ”€â”€ eval_mcq_benchmark.py # Generic MCQ benchmark evaluator
+â”‚   â”œâ”€â”€ eval_pretrain_suite.py # Run benchmark suite + aggregate
 â”‚   â””â”€â”€ inference.py     # Inference script
 â”‚
 â”œâ”€â”€ configs/              # YAML configurations
@@ -217,6 +220,10 @@ accelerate launch scripts/train.py --config configs/adapter_qwen2.5_1.5b.yaml
 ### Evaluation
 ```bash
 python scripts/eval.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Benchmark accuracy
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
 ```
 
 ### Inference

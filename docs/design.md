@@ -207,7 +207,7 @@ Low-rank memory reduces parameters but limits what each token can express.
 
 2. **More efficient chapter selection**: Current implementation gathers all chapter tokens; could be optimized.
 
-3. **Evaluation scripts**: Currently only train/inference, need proper eval benchmarks.
+3. **Evaluation coverage expansion**: Core benchmark scripts now exist (MMLU + MCQ suite); next step is adding broader generative/reasoning benchmarks and standardized reporting.
 
 ### Medium Priority
 

@@ -372,4 +372,8 @@ accelerate launch scripts/train.py --config configs/base_small.yaml
 
 # Evaluate
 python scripts/eval.py --config configs/adapter_qwen2.5_1.5b.yaml --checkpoint outputs/final_model
+
+# Benchmark accuracy (post-training)
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
 ```

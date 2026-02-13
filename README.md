@@ -147,6 +147,19 @@ accelerate launch --num_processes 4 --use_fsdp scripts/train.py --config configs
 
 ```bash
 python scripts/eval.py --config configs/adapter_qwen2.5_1.5b.yaml --checkpoint outputs/final_model
+
+# MMLU multiple-choice accuracy
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Other common MCQ benchmarks
+python scripts/eval_hellaswag.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_winogrande.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_boolq.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Run the full suite and aggregate scores
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
 ```
 
 ### 5. Inference
@@ -197,6 +210,9 @@ Memory/
 â”‚   â”œâ”€â”€ README.md            # Scripts documentation
 â”‚   â”œâ”€â”€ train.py             # Training entry point
 â”‚   â”œâ”€â”€ eval.py              # Evaluation (perplexity)
+â”‚   â”œâ”€â”€ eval_mmlu.py         # MMLU multiple-choice accuracy
+â”‚   â”œâ”€â”€ eval_mcq_benchmark.py # Generic MCQ benchmark evaluator
+â”‚   â”œâ”€â”€ eval_pretrain_suite.py # Run benchmark suite + aggregate
 â”‚   â””â”€â”€ inference.py         # Generation script
 â”‚
 â”œâ”€â”€ configs/                  # Example configurations
