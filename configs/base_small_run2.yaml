@@ -12,7 +12,7 @@ model:
   hidden_dim: 768
   num_heads: 12
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 12
+  num_layers: 16
   intermediate_dim: 2304
   vocab_size: 49152
   max_seq_len: 1024
@@ -32,8 +32,8 @@ model:
   hidden_activation: swiglu
   initializer_range: 0.02
   # output scaling for residuals by 1/sqrt(3d) -> ideally it is 1/sqrt(2d) for self-attn, mlp; but here we have a memory layer also, thus 1/sqrt(3d)
-  self_attn_wo_init_std: 0.002     # Optional std override for self-attn W_o; null => initializer_range
-  mlp_down_proj_init_std: 0.002    # Optional std override for MLP down_proj; null => initializer_range
+  self_attn_wo_init_std: 0.00378     # Optional std override for self-attn W_o; null => initializer_range
+  mlp_down_proj_init_std: 0.00378    # Optional std override for MLP down_proj; null => initializer_range
 
   tie_embeddings: true
   use_rms_norm: true
@@ -51,15 +51,17 @@ memory:
   # Memory bank settings
   num_memory_tokens: 32896
   memory_dim: null # Uses hidden_dim
-  memory_num_heads: 8 # null => fallback to model.num_heads for memory cross-attn
+  memory_num_heads: 12 # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: 4 # null => fallback to model.num_kv_heads (or model.num_heads if null)
   # 1 kv head for key, value -> faster inference, lesser overhead.
   # also memory savings, during training, inference is there.
 
   # Memory placement: all layers get memory
   memory_layer_placement: custom
-  memory_layer_indices: [2, 5, 8, 11] # Custom placement at layers
-  memory_sharing: shared # Single shared bank
+  memory_layer_indices: [2, 6, 10, 14] # Custom placement at layers
+  # memory_sharing: shared # Single shared bank
+  memory_sharing: shared          # shared/per_layer/every_k_layers
+  # memory_sharing_k: 2
   memory_block_variant: A # SA -> Mem -> MLP
   memory_dropout: null # null => fallback to model.dropout for memory cross-attention
 
@@ -182,8 +184,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-pretrain-run2
+  wandb_run_name: run-full-pretrain-run3
 
   # Output
-  output_dir: ./outputs/base_small_run2
+  output_dir: ./outputs/base_small_run3
   resume_from_checkpoint: null
