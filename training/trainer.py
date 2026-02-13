@@ -566,6 +566,29 @@ class Trainer:
         if non_empty == 0:
             return 0.0
         return total / non_empty
+
+    @staticmethod
+    def _get_group_learning_rate_logs(
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[Any],
+    ) -> Dict[str, float]:
+        """Return per-parameter-group learning rates for logging."""
+        if scheduler is not None:
+            lrs = scheduler.get_last_lr()
+        else:
+            lrs = [float(pg.get("lr", 0.0)) for pg in optimizer.param_groups]
+
+        logs: Dict[str, float] = {}
+        seen: Dict[str, int] = {}
+        for idx, (param_group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
+            raw_name = str(param_group.get("name", f"group_{idx}"))
+            safe_name = raw_name.replace("/", "_")
+            dup_idx = seen.get(safe_name, 0)
+            seen[safe_name] = dup_idx + 1
+            suffix = f"_{dup_idx}" if dup_idx > 0 else ""
+            logs[f"train/learning_rate/{safe_name}{suffix}"] = float(lr)
+
+        return logs
     
     def _resume_from_checkpoint(self, checkpoint_path: str):
         """Resume training from checkpoint."""
@@ -857,6 +880,12 @@ class Trainer:
                             "train/epoch": self.epoch,
                             "train/step_time_s": avg_step_time,
                         }
+                        log_payload.update(
+                            self._get_group_learning_rate_logs(
+                                optimizer=self.optimizer,
+                                scheduler=self.scheduler,
+                            )
+                        )
                         if last_grad_norm is not None:
                             log_payload["train/grad_norm"] = last_grad_norm
                         for key in sorted(running_router_sums.keys()):
