@@ -12,7 +12,7 @@ model:
   hidden_dim: 768
   num_heads: 12
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 18
+  num_layers: 24
   intermediate_dim: 2304
   vocab_size: 49152
   max_seq_len: 1024
@@ -49,7 +49,7 @@ memory:
   vanilla_mode: true
 
   # Memory bank settings
-  num_memory_tokens: 32896
+  num_memory_tokens: 262208
   memory_dim: null # Uses hidden_dim
   memory_num_heads: 12 # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: 4 # null => fallback to model.num_kv_heads (or model.num_heads if null)
@@ -58,7 +58,7 @@ memory:
 
   # Memory placement: all layers get memory
   memory_layer_placement: custom
-  memory_layer_indices: [2, 6, 10, 14] # Custom placement at layers
+  memory_layer_indices: [2, 10] # Custom placement at layers
   # memory_sharing: shared # Single shared bank
   memory_sharing: shared          # shared/per_layer/every_k_layers
   # memory_sharing_k: 2
@@ -69,8 +69,8 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 257 # 256 (to be routed) + 1 (shared)
-  top_k_chapters: 8
+  num_chapters: 4097 # 256 (to be routed) + 1 (shared)
+  top_k_chapters: 64
   num_shared_chapters: 1 # First N chapters are always included for every sample
   routed_scaling_factor: 2.5 # Scales routed chapter weights relative to shared chapters
   normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
@@ -107,8 +107,8 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 4.5e-4
-  memory_bank_lr: 1.5e-4 # Optional override for memory bank params only
+  memory_lr: 6e-4
+  memory_bank_lr: 6e-4 # Optional override for memory bank params only
   lora_lr: 3e-4
   base_model_lr: 3e-4 # Same for from-scratch
 
@@ -184,8 +184,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-vanilla-pretrain-run3
+  wandb_run_name: run-vanilla-pretrain-run5
 
   # Output
-  output_dir: ./outputs/vanilla_control_run3
+  output_dir: ./outputs/vanilla_control_run5
   resume_from_checkpoint: null
