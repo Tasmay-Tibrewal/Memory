@@ -101,6 +101,11 @@ class Trainer:
             "mixed_precision": config.training.mixed_precision,
             "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
             "log_with": "wandb" if config.training.log_to_wandb else None,
+            # Keep scheduler progression aligned to optimizer/global steps.
+            # We step the scheduler explicitly in the training loop when
+            # sync_gradients=True, so disable Accelerate's extra scheduler
+            # stepping behavior under distributed training.
+            "step_scheduler_with_optimizer": False,
         }
         if fsdp_plugin is not None:
             accelerator_kwargs["fsdp_plugin"] = fsdp_plugin
@@ -902,7 +907,8 @@ class Trainer:
                             log_payload["train/max_memory_allocated_gb"] = (
                                 torch.cuda.max_memory_allocated(device) / 1024**3
                             )
-                        self.accelerator.log(log_payload)
+                        # Use explicit optimizer-step index for tracker x-axis consistency.
+                        self.accelerator.log(log_payload, step=self.global_step)
 
                     running_loss = 0.0
                     running_ce_loss = 0.0
@@ -921,10 +927,13 @@ class Trainer:
                     if self.accelerator.is_main_process:
                         print(f"\nStep {self.global_step}: eval_loss = {eval_loss:.4f}")
                         if train_cfg.log_to_wandb:
-                            self.accelerator.log({
-                                "eval/loss": eval_loss,
-                                "eval/step": self.global_step,
-                            })
+                            self.accelerator.log(
+                                {
+                                    "eval/loss": eval_loss,
+                                    "eval/step": self.global_step,
+                                },
+                                step=self.global_step,
+                            )
 
                     # Determine whether this is a new best eval (synchronized across ranks).
                     # Note: Early stopping compares against the *previous* best_loss, so we update best_loss after
