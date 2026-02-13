@@ -231,6 +231,7 @@ def score_options(
     option_labels: List[str],
     device: torch.device,
     max_length: int,
+    use_cache: bool = False,
 ) -> List[float]:
     continuations = [f" {label}" for label in option_labels]
     input_ids, labels = _build_scoring_tensors(
@@ -244,7 +245,11 @@ def score_options(
     labels = labels.to(device)
     attention_mask = (input_ids != tokenizer.pad_token_id).long()
 
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=bool(use_cache),
+    )
     logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
 
     shift_logits = logits[:, :-1, :].contiguous()
@@ -299,6 +304,7 @@ def evaluate_subject(
     max_length: int,
     max_samples: Optional[int],
     accelerator: Optional["Accelerator"],
+    use_cache: bool,
 ) -> Dict[str, float]:
     eval_examples = load_subject_split(dataset_name, subject, split)
     if max_samples is not None:
@@ -335,6 +341,7 @@ def evaluate_subject(
             option_labels=labels,
             device=(accelerator.device if accelerator is not None else next(model.parameters()).device),
             max_length=max_length,
+            use_cache=use_cache,
         )
         pred_idx = int(max(range(len(scores)), key=lambda j: scores[j]))
         local_correct += int(pred_idx == ex.answer_index)
@@ -379,6 +386,11 @@ def main() -> None:
     parser.add_argument("--distributed", action="store_true", help="Use Accelerate distributed eval")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output", type=str, default=None, help="Optional JSON output path")
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        help="Pass use_cache=True to model forward during option scoring (default: False)",
+    )
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -443,6 +455,7 @@ def main() -> None:
             max_length=max_length,
             max_samples=args.max_samples_per_subject,
             accelerator=accelerator,
+            use_cache=bool(args.use_cache),
         )
         results.append(r)
         if accelerator is None or accelerator.is_main_process:

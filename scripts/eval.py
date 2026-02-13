@@ -93,7 +93,7 @@ def load_tokenizer(config):
     return tokenizer
 
 
-def compute_perplexity_single(model, dataloader, device):
+def compute_perplexity_single(model, dataloader, device, use_cache: bool = False):
     """Compute perplexity on a dataset (single GPU)."""
     model.eval()
     total_loss = 0.0
@@ -111,6 +111,7 @@ def compute_perplexity_single(model, dataloader, device):
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
+                use_cache=use_cache,
             )
             
             loss = outputs["loss"]
@@ -127,7 +128,7 @@ def compute_perplexity_single(model, dataloader, device):
     return perplexity, avg_loss
 
 
-def compute_perplexity_distributed(model, dataloader, accelerator):
+def compute_perplexity_distributed(model, dataloader, accelerator, use_cache: bool = False):
     """Compute perplexity on a dataset (distributed)."""
     model.eval()
     total_loss_sum = torch.tensor(0.0, device=accelerator.device)
@@ -146,6 +147,7 @@ def compute_perplexity_distributed(model, dataloader, accelerator):
             outputs = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask"),
+                use_cache=use_cache,
             )
 
             logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
@@ -191,6 +193,11 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", help="Device (ignored in distributed)")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")
     parser.add_argument("--distributed", action="store_true", help="Use distributed evaluation")
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        help="Pass use_cache=True to model forward (default: False)",
+    )
     args = parser.parse_args()
     
     # Load config
@@ -243,7 +250,12 @@ def main():
         model, dataloader = accelerator.prepare(model, dataloader)
         
         # Evaluate
-        perplexity, avg_loss = compute_perplexity_distributed(model, dataloader, accelerator)
+        perplexity, avg_loss = compute_perplexity_distributed(
+            model,
+            dataloader,
+            accelerator,
+            use_cache=bool(args.use_cache),
+        )
         
         if accelerator.is_main_process:
             _print_results(config, args, perplexity, avg_loss, len(dataloader.dataset))
@@ -287,7 +299,12 @@ def main():
         
         # Evaluate
         print("Computing perplexity...")
-        perplexity, avg_loss = compute_perplexity_single(model, dataloader, args.device)
+        perplexity, avg_loss = compute_perplexity_single(
+            model,
+            dataloader,
+            args.device,
+            use_cache=bool(args.use_cache),
+        )
         
         _print_results(config, args, perplexity, avg_loss, len(dataloader.dataset))
         if args.output:

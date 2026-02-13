@@ -194,6 +194,7 @@ def evaluate(
     max_samples: Optional[int],
     max_length: int,
     accelerator: Optional["Accelerator"],
+    use_cache: bool,
 ) -> Dict[str, float]:
     spec = SPECS[benchmark]
     eval_split = split or spec.eval_split
@@ -241,6 +242,7 @@ def evaluate(
             option_labels=labels,
             device=device,
             max_length=max_length,
+            use_cache=use_cache,
         )
         pred = max(range(len(scores)), key=lambda j: scores[j])
         local_correct += int(pred == ex.answer_index)
@@ -285,6 +287,11 @@ def build_parser(default_benchmark: Optional[str] = None) -> argparse.ArgumentPa
     parser.add_argument("--fewshot_split", type=str, default=None, help="Few-shot split override")
     parser.add_argument("--max_samples", type=int, default=None, help="Max eval samples")
     parser.add_argument("--max_length", type=int, default=None, help="Max sequence length for scoring")
+    parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        help="Pass use_cache=True to model forward during option scoring (default: False)",
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Device for non-distributed mode")
     parser.add_argument("--distributed", action="store_true", help="Use Accelerate distributed evaluation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
@@ -334,6 +341,7 @@ def main(argv: Optional[List[str]] = None, default_benchmark: Optional[str] = No
         max_samples=args.max_samples,
         max_length=max_length,
         accelerator=accelerator,
+        use_cache=bool(args.use_cache),
     )
 
     is_main = True if accelerator is None else accelerator.is_main_process

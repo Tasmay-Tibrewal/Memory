@@ -606,9 +606,21 @@ class MemoryTransformer(nn.Module):
                             }
                             memory = None
 
-                        # Use router-native strategies during training/prefill; rolling/hybrid remain separate inference paths.
-                        elif self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}:
-                            router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                        # Use router-native strategies during training and non-cached
+                        # eval/prefill. rolling/hybrid require decode-time cache, so
+                        # when use_cache=False we fall back to sequence routing.
+                        elif (
+                            self.training
+                            or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}
+                            or ((not use_cache) and strategy in {"rolling", "hybrid"})
+                        ):
+                            if self.training:
+                                effective_strategy = mem_cfg.routing_strategy_train
+                            elif (not use_cache) and strategy in {"rolling", "hybrid"}:
+                                effective_strategy = "sequence"
+                            else:
+                                effective_strategy = strategy
+                            router.routing_strategy = effective_strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
                                 return_losses=self.training,

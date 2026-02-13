@@ -58,6 +58,11 @@ def main() -> None:
     parser.add_argument("--mmlu_shots", type=int, default=5, help="Few-shot count for MMLU")
     parser.add_argument("--mcq_shots", type=int, default=0, help="Few-shot count for non-MMLU MCQ tasks")
     parser.add_argument(
+        "--use_cache",
+        action="store_true",
+        help="Pass use_cache=True to model forward in child eval scripts (default: False)",
+    )
+    parser.add_argument(
         "--max_samples",
         type=int,
         default=None,
@@ -112,6 +117,8 @@ def main() -> None:
                 cmd += ["--distributed"]
             else:
                 cmd += ["--device", args.device]
+            if args.use_cache:
+                cmd += ["--use_cache"]
         else:
             cmd = launcher + [
                 "scripts/eval_mcq_benchmark.py",
@@ -132,6 +139,8 @@ def main() -> None:
                 cmd += ["--distributed"]
             else:
                 cmd += ["--device", args.device]
+            if args.use_cache:
+                cmd += ["--use_cache"]
 
         try:
             _run(cmd)
