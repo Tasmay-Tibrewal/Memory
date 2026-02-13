@@ -512,11 +512,18 @@ def load_examples(
     benchmark: str,
     split: str,
     max_samples: Optional[int],
+    random_seed: Optional[int] = None,
 ) -> List[MCExample]:
     spec = SPECS[benchmark]
     ds = load_dataset(spec.dataset_name, spec.subset, split=split)
     if max_samples is not None:
-        ds = ds.select(range(min(len(ds), max_samples)))
+        k = min(len(ds), int(max_samples))
+        if random_seed is None:
+            ds = ds.select(range(k))
+        else:
+            rng = random.Random(int(random_seed))
+            selected = rng.sample(range(len(ds)), k=k)
+            ds = ds.select(selected)
     out: List[MCExample] = []
     for row in ds:
         out.append(parse_row(benchmark, row))
@@ -552,7 +559,12 @@ def evaluate(
                 seed=seed + (_stable_text_seed(benchmark) % 10_000),
             )
         elif fewshot_mode == "dataset":
-            fewshot_examples = load_examples(benchmark, fs_split, max_samples=shots)
+            fewshot_examples = load_examples(
+                benchmark,
+                fs_split,
+                max_samples=shots,
+                random_seed=seed + (_stable_text_seed(f"{benchmark}:{fs_split}") % 10_000),
+            )
         else:
             raise ValueError(f"Unknown fewshot_mode: {fewshot_mode}")
 

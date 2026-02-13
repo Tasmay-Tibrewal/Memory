@@ -484,8 +484,18 @@ def load_subject_split(
     dataset_name: str,
     subject: str,
     split: str,
+    max_samples: Optional[int] = None,
+    random_seed: Optional[int] = None,
 ) -> List[MCExample]:
     ds = load_dataset(dataset_name, subject, split=split)
+    if max_samples is not None:
+        k = min(len(ds), int(max_samples))
+        if random_seed is None:
+            ds = ds.select(range(k))
+        else:
+            rng = random.Random(int(random_seed))
+            selected = rng.sample(range(len(ds)), k=k)
+            ds = ds.select(selected)
     out: List[MCExample] = []
     for row in ds:
         out.append(parse_example(row, fallback_subject=subject))
@@ -508,9 +518,13 @@ def evaluate_subject(
     seed: int,
     use_cache: bool,
 ) -> Dict[str, float]:
-    eval_examples = load_subject_split(dataset_name, subject, split)
-    if max_samples is not None:
-        eval_examples = eval_examples[:max_samples]
+    eval_examples = load_subject_split(
+        dataset_name,
+        subject,
+        split,
+        max_samples=max_samples,
+        random_seed=None,  # Keep eval sample selection stable (head of split) unless changed explicitly.
+    )
 
     fewshot: List[MCExample] = []
     if shots > 0:
@@ -520,8 +534,14 @@ def evaluate_subject(
                 seed=seed + (_stable_text_seed(subject) % 10_000),
             )
         elif fewshot_mode == "dataset":
-            dev_examples = load_subject_split(dataset_name, subject, dev_split)
-            fewshot = dev_examples[: min(shots, len(dev_examples))]
+            dev_examples = load_subject_split(
+                dataset_name,
+                subject,
+                dev_split,
+                max_samples=shots,
+                random_seed=seed + (_stable_text_seed(f"{subject}:{dev_split}") % 10_000),
+            )
+            fewshot = dev_examples
         else:
             raise ValueError(f"Unknown fewshot_mode: {fewshot_mode}")
 
