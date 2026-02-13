@@ -173,6 +173,10 @@ base-model post-pretraining benchmarking.
 # MMLU
 python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
 
+# MMLU with default-style few-shot (5) and full-option-text scoring
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --shots 5 --fewshot_mode manual --scoring_mode choice_text
+
 # Other common MCQ benchmarks
 python scripts/eval_hellaswag.py --config configs/base_small.yaml --checkpoint outputs/final_model
 python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml --checkpoint outputs/final_model
@@ -183,9 +187,23 @@ python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint 
 # Generic one-benchmark CLI
 python scripts/eval_mcq_benchmark.py --benchmark hellaswag --config configs/base_small.yaml --checkpoint outputs/final_model
 
+# Explicit zero-shot label-only scoring (legacy style)
+python scripts/eval_mcq_benchmark.py --benchmark hellaswag --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --shots 0 --scoring_mode label
+
 # Master suite runner (runs all + aggregates)
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Suite defaults now support manual few-shot + choice_text scoring
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --mmlu_shots 5 --mcq_shots 5 --mmlu_fewshot_mode manual --mcq_fewshot_mode manual \
+  --scoring_mode choice_text
 ```
+
+Notes:
+- `eval_mmlu.py` and `eval_mcq_benchmark.py` support `--fewshot_mode {manual,dataset}`.
+- `manual` uses handcrafted benchmark/task examples and shuffles option order per seed for label diversity.
+- `--scoring_mode choice_text` scores full option text; `--scoring_mode label` scores `A/B/C/...` label tokens.
 
 ---
 

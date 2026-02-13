@@ -151,6 +151,10 @@ python scripts/eval.py --config configs/adapter_qwen2.5_1.5b.yaml --checkpoint o
 # MMLU multiple-choice accuracy
 python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
 
+# Explicitly control few-shot and scoring style
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --shots 5 --fewshot_mode manual --scoring_mode choice_text
+
 # Other common MCQ benchmarks
 python scripts/eval_hellaswag.py --config configs/base_small.yaml --checkpoint outputs/final_model
 python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml --checkpoint outputs/final_model
@@ -160,6 +164,12 @@ python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint 
 
 # Run the full suite and aggregate scores
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Suite with manual few-shot prompts (default 5) and full-choice-text scoring
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --mmlu_shots 5 --mcq_shots 5 \
+  --mmlu_fewshot_mode manual --mcq_fewshot_mode manual \
+  --scoring_mode choice_text
 ```
 
 ### 5. Inference

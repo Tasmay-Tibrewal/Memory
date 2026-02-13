@@ -56,7 +56,28 @@ def main() -> None:
     parser.add_argument("--distributed", action="store_true", help="Run each benchmark with accelerate launch")
     parser.add_argument("--num_processes", type=int, default=1, help="Processes for --distributed")
     parser.add_argument("--mmlu_shots", type=int, default=5, help="Few-shot count for MMLU")
-    parser.add_argument("--mcq_shots", type=int, default=0, help="Few-shot count for non-MMLU MCQ tasks")
+    parser.add_argument("--mcq_shots", type=int, default=5, help="Few-shot count for non-MMLU MCQ tasks")
+    parser.add_argument(
+        "--mmlu_fewshot_mode",
+        type=str,
+        default="manual",
+        choices=["manual", "dataset"],
+        help="Few-shot source mode for MMLU.",
+    )
+    parser.add_argument(
+        "--mcq_fewshot_mode",
+        type=str,
+        default="manual",
+        choices=["manual", "dataset"],
+        help="Few-shot source mode for non-MMLU MCQ benchmarks.",
+    )
+    parser.add_argument(
+        "--scoring_mode",
+        type=str,
+        default="choice_text",
+        choices=["label", "choice_text"],
+        help="Option scoring target used by benchmark scripts.",
+    )
     parser.add_argument(
         "--use_cache",
         action="store_true",
@@ -104,6 +125,10 @@ def main() -> None:
                 args.config,
                 "--shots",
                 str(int(args.mmlu_shots)),
+                "--fewshot_mode",
+                args.mmlu_fewshot_mode,
+                "--scoring_mode",
+                args.scoring_mode,
                 "--output",
                 str(output_path),
             ]
@@ -128,6 +153,10 @@ def main() -> None:
                 args.config,
                 "--shots",
                 str(int(args.mcq_shots)),
+                "--fewshot_mode",
+                args.mcq_fewshot_mode,
+                "--scoring_mode",
+                args.scoring_mode,
                 "--output",
                 str(output_path),
             ]

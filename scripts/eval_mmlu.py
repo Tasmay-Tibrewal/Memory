@@ -3,7 +3,8 @@
 Evaluate checkpoints on MMLU-style multiple-choice datasets.
 
 This script computes accuracy (not perplexity) by scoring answer options with
- causal-LM log likelihood.
+causal-LM log likelihood, using either option-label or full-option-text
+continuations.
 
 Default dataset:
     cais/mmlu
@@ -50,6 +51,159 @@ class MCExample:
     choices: List[str]
     answer_index: int
     subject: str
+
+
+def _shuffle_example_choices(
+    example: MCExample,
+    rng: random.Random,
+    target_answer_index: Optional[int] = None,
+) -> MCExample:
+    """
+    Return a copy with shuffled options and remapped answer index.
+
+    If target_answer_index is provided, place the correct option at that index
+    (mod num_choices) and shuffle distractors around it.
+    """
+    n = len(example.choices)
+    if n <= 1:
+        return MCExample(
+            question=example.question,
+            choices=list(example.choices),
+            answer_index=example.answer_index,
+            subject=example.subject,
+        )
+
+    correct = example.choices[example.answer_index]
+    distractors = [c for i, c in enumerate(example.choices) if i != example.answer_index]
+    rng.shuffle(distractors)
+    if target_answer_index is None:
+        target_answer_index = rng.randrange(n)
+    target = int(target_answer_index) % n
+
+    new_choices: List[str] = [""] * n
+    new_choices[target] = correct
+    d_ptr = 0
+    for i in range(n):
+        if i == target:
+            continue
+        new_choices[i] = distractors[d_ptr]
+        d_ptr += 1
+    new_answer = target
+    return MCExample(
+        question=example.question,
+        choices=new_choices,
+        answer_index=new_answer,
+        subject=example.subject,
+    )
+
+
+def _manual_mmlu_fewshot_pool() -> List[MCExample]:
+    """
+    Handcrafted diverse MMLU-style few-shot exemplars.
+    Keep topics mixed (not a single subject) and answers non-degenerate.
+    """
+    return [
+        MCExample(
+            question="What is the derivative of x^2 with respect to x?",
+            choices=["2x", "x", "x^2", "1"],
+            answer_index=0,
+            subject="calculus",
+        ),
+        MCExample(
+            question="In cellular respiration, ATP is primarily produced in which organelle?",
+            choices=["Nucleus", "Ribosome", "Mitochondrion", "Golgi apparatus"],
+            answer_index=2,
+            subject="biology",
+        ),
+        MCExample(
+            question="Which amendment to the U.S. Constitution protects freedom of speech?",
+            choices=["First Amendment", "Fourth Amendment", "Fifth Amendment", "Tenth Amendment"],
+            answer_index=0,
+            subject="us_government",
+        ),
+        MCExample(
+            question="If inflation rises while nominal wages stay constant, what happens to real wages?",
+            choices=["They increase", "They stay unchanged", "They decrease", "They become undefined"],
+            answer_index=2,
+            subject="economics",
+        ),
+        MCExample(
+            question="Which data structure typically provides average O(1) lookup time?",
+            choices=["Linked list", "Hash table", "Binary search tree", "Queue"],
+            answer_index=1,
+            subject="computer_science",
+        ),
+        MCExample(
+            question="Who wrote the play Hamlet?",
+            choices=["Charles Dickens", "Jane Austen", "William Shakespeare", "Mark Twain"],
+            answer_index=2,
+            subject="literature",
+        ),
+        MCExample(
+            question="Which law states that pressure and volume of a gas are inversely related at constant temperature?",
+            choices=["Boyle's law", "Ohm's law", "Hooke's law", "Kepler's first law"],
+            answer_index=0,
+            subject="physics",
+        ),
+        MCExample(
+            question="Which event happened first?",
+            choices=[
+                "Fall of the Roman Empire in the West",
+                "French Revolution",
+                "American Civil War",
+                "Moon landing",
+            ],
+            answer_index=0,
+            subject="history",
+        ),
+        MCExample(
+            question="What is the legal standard of proof required in most criminal trials in the U.S.?",
+            choices=["Preponderance of evidence", "Clear and convincing evidence", "Beyond a reasonable doubt", "Probable cause"],
+            answer_index=2,
+            subject="law",
+        ),
+        MCExample(
+            question="Which statistical measure is most sensitive to extreme outliers?",
+            choices=["Median", "Mode", "Interquartile range", "Mean"],
+            answer_index=3,
+            subject="statistics",
+        ),
+    ]
+
+
+def _select_manual_mmlu_fewshot(shots: int, seed: int) -> List[MCExample]:
+    """Select and shuffle handcrafted few-shot examples."""
+    if shots <= 0:
+        return []
+    pool = _manual_mmlu_fewshot_pool()
+    rng = random.Random(seed)
+    order = list(range(len(pool)))
+    rng.shuffle(order)
+
+    selected: List[MCExample] = []
+    start_offset = rng.randrange(max(len(pool[0].choices), 1))
+    while len(selected) < shots:
+        for idx in order:
+            n = len(pool[idx].choices)
+            target = (start_offset + len(selected)) % max(n, 1)
+            selected.append(
+                _shuffle_example_choices(
+                    pool[idx],
+                    rng,
+                    target_answer_index=target,
+                )
+            )
+            if len(selected) >= shots:
+                break
+    return selected
+
+
+def _stable_text_seed(text: str) -> int:
+    """Deterministic text-to-int helper (avoids Python hash randomization)."""
+    acc = 0
+    for i, ch in enumerate(text):
+        acc += (i + 1) * ord(ch)
+    return acc
 
 
 def load_model(config, checkpoint_path: Optional[str] = None):
@@ -156,25 +310,58 @@ def parse_example(raw: Dict, fallback_subject: str) -> MCExample:
     )
 
 
-def format_mc_example(example: MCExample, include_answer: bool) -> str:
+def format_mc_example(
+    example: MCExample,
+    include_answer: bool,
+    answer_style: str = "label",
+) -> str:
     lines = [f"Question: {example.question}"]
     for i, choice in enumerate(example.choices):
         label = chr(ord("A") + i)
         lines.append(f"{label}. {choice}")
     if include_answer:
-        label = chr(ord("A") + example.answer_index)
-        lines.append(f"Answer: {label}")
+        if answer_style == "choice_text":
+            lines.append(f"Answer: {example.choices[example.answer_index]}")
+        else:
+            label = chr(ord("A") + example.answer_index)
+            lines.append(f"Answer: {label}")
     else:
         lines.append("Answer:")
     return "\n".join(lines)
 
 
-def build_subject_prefix(subject: str, fewshot: List[MCExample]) -> str:
+def build_subject_prefix(
+    subject: str,
+    fewshot: List[MCExample],
+    *,
+    answer_style: str,
+    fewshot_mode: str,
+) -> str:
     subject_name = subject.replace("_", " ")
-    header = f"The following are multiple choice questions (with answers) about {subject_name}.\n\n"
+    if answer_style == "choice_text":
+        answer_instruction = "For each question, answer using the full option text."
+    else:
+        answer_instruction = "For each question, answer using only the option letter."
+
+    if fewshot_mode == "manual":
+        header = (
+            "The following are multiple choice questions (with answers) across diverse topics.\n"
+            f"{answer_instruction}\n\n"
+        )
+    else:
+        header = (
+            f"The following are multiple choice questions (with answers) about {subject_name}.\n"
+            f"{answer_instruction}\n\n"
+        )
     if not fewshot:
+        if fewshot_mode == "manual":
+            return header + f"Now answer a question about {subject_name}.\n\n"
         return header
-    body = "\n\n".join(format_mc_example(ex, include_answer=True) for ex in fewshot)
+    body = "\n\n".join(
+        format_mc_example(ex, include_answer=True, answer_style=answer_style) for ex in fewshot
+    )
+    if fewshot_mode == "manual":
+        return header + body + f"\n\nNow answer a question about {subject_name}.\n\n"
     return header + body + "\n\n"
 
 
@@ -228,12 +415,24 @@ def score_options(
     model,
     tokenizer,
     prompt: str,
-    option_labels: List[str],
+    option_labels: Optional[List[str]],
+    option_texts: Optional[List[str]],
+    scoring_mode: str,
     device: torch.device,
     max_length: int,
     use_cache: bool = False,
 ) -> List[float]:
-    continuations = [f" {label}" for label in option_labels]
+    if scoring_mode == "choice_text":
+        if not option_texts:
+            raise ValueError("option_texts must be provided when scoring_mode='choice_text'")
+        continuations = [f" {str(txt).strip()}" for txt in option_texts]
+    elif scoring_mode == "label":
+        if not option_labels:
+            raise ValueError("option_labels must be provided when scoring_mode='label'")
+        continuations = [f" {label}" for label in option_labels]
+    else:
+        raise ValueError(f"Unknown scoring_mode: {scoring_mode}")
+
     input_ids, labels = _build_scoring_tensors(
         tokenizer=tokenizer,
         prompt=prompt,
@@ -304,6 +503,9 @@ def evaluate_subject(
     max_length: int,
     max_samples: Optional[int],
     accelerator: Optional["Accelerator"],
+    fewshot_mode: str,
+    scoring_mode: str,
+    seed: int,
     use_cache: bool,
 ) -> Dict[str, float]:
     eval_examples = load_subject_split(dataset_name, subject, split)
@@ -312,10 +514,23 @@ def evaluate_subject(
 
     fewshot: List[MCExample] = []
     if shots > 0:
-        dev_examples = load_subject_split(dataset_name, subject, dev_split)
-        fewshot = dev_examples[: min(shots, len(dev_examples))]
+        if fewshot_mode == "manual":
+            fewshot = _select_manual_mmlu_fewshot(
+                shots=min(shots, 64),
+                seed=seed + (_stable_text_seed(subject) % 10_000),
+            )
+        elif fewshot_mode == "dataset":
+            dev_examples = load_subject_split(dataset_name, subject, dev_split)
+            fewshot = dev_examples[: min(shots, len(dev_examples))]
+        else:
+            raise ValueError(f"Unknown fewshot_mode: {fewshot_mode}")
 
-    prefix = build_subject_prefix(subject, fewshot)
+    prefix = build_subject_prefix(
+        subject,
+        fewshot,
+        answer_style=scoring_mode,
+        fewshot_mode=fewshot_mode,
+    )
     world_size = accelerator.num_processes if accelerator is not None else 1
     rank = accelerator.process_index if accelerator is not None else 0
 
@@ -332,13 +547,15 @@ def evaluate_subject(
         disable=(accelerator is not None and not accelerator.is_main_process),
     )
     for _, ex in iterator:
-        prompt = prefix + format_mc_example(ex, include_answer=False)
+        prompt = prefix + format_mc_example(ex, include_answer=False, answer_style=scoring_mode)
         labels = [chr(ord("A") + i) for i in range(len(ex.choices))]
         scores = score_options(
             model=model,
             tokenizer=tokenizer,
             prompt=prompt,
             option_labels=labels,
+            option_texts=ex.choices,
+            scoring_mode=scoring_mode,
             device=(accelerator.device if accelerator is not None else next(model.parameters()).device),
             max_length=max_length,
             use_cache=use_cache,
@@ -374,6 +591,20 @@ def main() -> None:
     parser.add_argument("--split", type=str, default="test", help="Eval split")
     parser.add_argument("--dev_split", type=str, default="dev", help="Few-shot source split")
     parser.add_argument("--shots", type=int, default=5, help="Few-shot examples per subject")
+    parser.add_argument(
+        "--fewshot_mode",
+        type=str,
+        default="manual",
+        choices=["manual", "dataset"],
+        help="Few-shot source: handcrafted diverse examples (`manual`) or dataset dev split (`dataset`).",
+    )
+    parser.add_argument(
+        "--scoring_mode",
+        type=str,
+        default="choice_text",
+        choices=["label", "choice_text"],
+        help="Option scoring target: option label token vs full option text.",
+    )
     parser.add_argument("--max_samples_per_subject", type=int, default=None, help="Cap eval samples per subject")
     parser.add_argument("--max_subjects", type=int, default=None, help="Evaluate only first N subjects")
     parser.add_argument(
@@ -435,6 +666,8 @@ def main() -> None:
         print(f"Subjects: {len(subjects)}")
         print(f"Split: {args.split}")
         print(f"Shots: {args.shots}")
+        print(f"Few-shot mode: {args.fewshot_mode}")
+        print(f"Scoring mode: {args.scoring_mode}")
         print(f"Max length: {max_length}")
 
     results: List[Dict[str, float]] = []
@@ -455,6 +688,9 @@ def main() -> None:
             max_length=max_length,
             max_samples=args.max_samples_per_subject,
             accelerator=accelerator,
+            fewshot_mode=args.fewshot_mode,
+            scoring_mode=args.scoring_mode,
+            seed=int(args.seed),
             use_cache=bool(args.use_cache),
         )
         results.append(r)
@@ -490,6 +726,8 @@ def main() -> None:
             "split": args.split,
             "dev_split": args.dev_split,
             "shots": int(args.shots),
+            "fewshot_mode": args.fewshot_mode,
+            "scoring_mode": args.scoring_mode,
             "max_length": max_length,
             "weighted_accuracy": weighted_acc,
             "macro_accuracy": macro_acc,
