@@ -27,6 +27,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -338,6 +339,45 @@ def _rank_output_path(output_path: Path, rank: int) -> Path:
     return output_path.with_name(f"{output_path.name}.rank{rank}.tmp")
 
 
+def _prefer_tokenizer_default_special_ids(tokenizer, cfg, *, enabled: bool, is_main: bool) -> None:
+    """
+    Override tokenizer BOS/EOS/PAD ids with tokenizer-native defaults.
+
+    This is important when old training/checkpoint configs pinned special IDs
+    to incompatible values (e.g., 0/0/0 for chat tokenizers), which can break
+    EOS stopping behavior during generation.
+    """
+    if not enabled:
+        return
+
+    tokenizer_name = cfg.model.tokenizer_name or cfg.model.base_model_name
+    if tokenizer_name is None:
+        return
+
+    try:
+        default_tok = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    except Exception:
+        return
+
+    before = (tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id)
+
+    if default_tok.bos_token_id is not None:
+        tokenizer.bos_token_id = int(default_tok.bos_token_id)
+    if default_tok.eos_token_id is not None:
+        tokenizer.eos_token_id = int(default_tok.eos_token_id)
+    if default_tok.pad_token_id is not None:
+        tokenizer.pad_token_id = int(default_tok.pad_token_id)
+    elif tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token_id = int(tokenizer.eos_token_id)
+
+    after = (tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id)
+    if is_main and before != after:
+        print(
+            "Adjusted tokenizer special ids to tokenizer defaults: "
+            f"bos/eos/pad {before} -> {after}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate IFEval predictions JSONL")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
@@ -390,6 +430,15 @@ def main() -> None:
     parser.add_argument("--top_k", type=int, default=0, help="Top-k sampling (0 disables)")
     parser.add_argument("--top_p", type=float, default=1.0, help="Top-p sampling")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for batched decoding")
+    parser.add_argument(
+        "--prefer_tokenizer_default_special_ids",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use tokenizer-native BOS/EOS/PAD ids instead of config-overridden ids "
+            "(default: True). Helps when old checkpoints used mismatched ids."
+        ),
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Device (e.g., cuda, cuda:0, cpu)")
     parser.add_argument("--distributed", action="store_true", help="Use Accelerate multi-process generation")
     parser.add_argument(
@@ -447,6 +496,12 @@ def main() -> None:
             print(f"Distributed generation enabled: world_size={world_size}")
     model = load_model(cfg, args.checkpoint)
     tokenizer = load_tokenizer(cfg)
+    _prefer_tokenizer_default_special_ids(
+        tokenizer,
+        cfg,
+        enabled=bool(args.prefer_tokenizer_default_special_ids),
+        is_main=is_main,
+    )
     model = model.to(device)
     model.eval()
     if is_main and bool(args.apply_chat_template):

@@ -241,6 +241,7 @@ accelerate launch --num_processes 8 scripts/generate_ifeval_jsonl.py \
 - Chat template application is enabled by default when tokenizer provides one (`--no-apply_chat_template` to disable).
 - Chat template is strict by default (`--require_chat_template`); if template application is unavailable/fails, the script exits instead of silently falling back.
 - Batched generation is enabled via `--batch_size` (default: `8`).
+- By default, tokenizer-native BOS/EOS/PAD ids are preferred (`--prefer_tokenizer_default_special_ids`) to avoid bad checkpoint/config overrides during generation.
 - In distributed mode, each rank writes a temporary part and rank 0 merges all parts in original prompt order.
 
 ---
