@@ -50,6 +50,7 @@ def _apply_chat_template_if_enabled(
     apply_chat_template: bool,
     system_prompt: Optional[str],
     require_chat_template: bool,
+    smollm_eot_chat_rewrite: bool,
 ) -> Tuple[str, bool]:
     if not apply_chat_template:
         return prompt, False
@@ -69,6 +70,15 @@ def _apply_chat_template_if_enabled(
             tokenize=False,
             add_generation_prompt=True,
         )
+        if smollm_eot_chat_rewrite:
+            # Convert chat-control tokens to the training-style EOT token surface.
+            # Handle both canonical and typo variants defensively.
+            rendered = (
+                rendered.replace("<|im_start|>", "<|endoftext|>")
+                .replace("<|im_end|>", "<|endoftext|>")
+                .replace("<|imstart|>", "<|endoftext|>")
+                .replace("<|imend|>", "<|endoftext|>")
+            )
         return rendered, True
     except Exception as e:
         if require_chat_template:
@@ -437,6 +447,27 @@ def _auto_fix_suspicious_special_ids(
         )
 
 
+def _load_tokenizer_defaults_ignoring_config_overrides(cfg, *, is_main: bool):
+    """
+    Load tokenizer directly from HF defaults (ignore config special-ID and chat-template overrides).
+    """
+    tokenizer_name = cfg.model.tokenizer_name or cfg.model.base_model_name
+    if tokenizer_name is None:
+        tokenizer_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    tok = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    if tok.pad_token_id is None:
+        if tok.eos_token_id is not None:
+            tok.pad_token_id = int(tok.eos_token_id)
+        else:
+            tok.add_special_tokens({"pad_token": "<pad>"})
+    if is_main:
+        print(
+            "Loaded tokenizer defaults (ignoring config overrides): "
+            f"name={tokenizer_name}, bos/eos/pad={tok.bos_token_id}/{tok.eos_token_id}/{tok.pad_token_id}"
+        )
+    return tok
+
+
 def _load_effective_config(
     config_path: str,
     checkpoint_path: Optional[str],
@@ -549,6 +580,14 @@ def main() -> None:
         help="Print rendered prompt/token preview for first N rows on rank 0 (default: 1, 0 disables).",
     )
     parser.add_argument(
+        "--smollm_eot_chat_rewrite",
+        action="store_true",
+        help=(
+            "Use tokenizer default chat template (ignoring config chat-template/special-ID overrides), "
+            "then rewrite <|im_start|>/<|im_end|> to <|endoftext|> before tokenization."
+        ),
+    )
+    parser.add_argument(
         "--prefer_tokenizer_default_special_ids",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -596,6 +635,8 @@ def main() -> None:
         raise ValueError("--do_sample requires --temperature > 0")
     if args.batch_size <= 0:
         raise ValueError(f"--batch_size must be > 0, got {args.batch_size}")
+    if args.smollm_eot_chat_rewrite and (not args.apply_chat_template):
+        raise ValueError("--smollm_eot_chat_rewrite requires --apply_chat_template")
 
     accelerator = None
     if args.distributed:
@@ -628,20 +669,28 @@ def main() -> None:
         if accelerator is not None:
             print(f"Distributed generation enabled: world_size={world_size}")
     model = load_model(cfg, args.checkpoint)
-    tokenizer = load_tokenizer(cfg)
-    _prefer_tokenizer_default_special_ids(
-        tokenizer,
-        cfg,
-        enabled=bool(args.prefer_tokenizer_default_special_ids),
-        is_main=is_main,
-    )
-    _auto_fix_suspicious_special_ids(
-        tokenizer,
-        cfg,
-        enabled=bool(args.auto_fix_suspicious_special_ids),
-        prefer_tokenizer_default_special_ids=bool(args.prefer_tokenizer_default_special_ids),
-        is_main=is_main,
-    )
+    if args.smollm_eot_chat_rewrite:
+        # Explicitly ignore config tokenizer overrides for special IDs/template.
+        tokenizer = _load_tokenizer_defaults_ignoring_config_overrides(cfg, is_main=is_main)
+        if is_main:
+            print(
+                "smollm_eot_chat_rewrite enabled: config chat_template/bos/eos/pad overrides are ignored."
+            )
+    else:
+        tokenizer = load_tokenizer(cfg)
+        _prefer_tokenizer_default_special_ids(
+            tokenizer,
+            cfg,
+            enabled=bool(args.prefer_tokenizer_default_special_ids),
+            is_main=is_main,
+        )
+        _auto_fix_suspicious_special_ids(
+            tokenizer,
+            cfg,
+            enabled=bool(args.auto_fix_suspicious_special_ids),
+            prefer_tokenizer_default_special_ids=bool(args.prefer_tokenizer_default_special_ids),
+            is_main=is_main,
+        )
     model = model.to(device)
     model.eval()
     if is_main and bool(args.apply_chat_template):
@@ -693,6 +742,7 @@ def main() -> None:
                     apply_chat_template=bool(args.apply_chat_template),
                     system_prompt=args.system_prompt,
                     require_chat_template=bool(args.require_chat_template),
+                    smollm_eot_chat_rewrite=bool(args.smollm_eot_chat_rewrite),
                 )
                 prompt_texts.append(prompt_text)
                 prompt_templated.append(is_templated)
