@@ -22,7 +22,7 @@ import os
 import random
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from datasets import load_dataset
@@ -124,11 +124,11 @@ def _prepare_inputs(
 
 
 @torch.no_grad()
-def generate_completion(
+def generate_completions(
     model,
     tokenizer,
-    prompt_text: str,
-    prompt_is_chat_templated: bool,
+    prompt_texts: Sequence[str],
+    prompt_is_chat_templated: Sequence[bool],
     *,
     device: torch.device,
     max_input_tokens: Optional[int],
@@ -139,16 +139,51 @@ def generate_completion(
     top_p: float,
     use_cache: bool,
     stop_on_eos: bool,
-) -> str:
-    input_ids, attention_mask = _prepare_inputs(
-        tokenizer=tokenizer,
-        text=prompt_text,
-        device=device,
-        max_input_tokens=max_input_tokens,
-        add_special_tokens=not prompt_is_chat_templated,
-    )
+) -> List[str]:
+    if len(prompt_texts) == 0:
+        return []
+    if len(prompt_texts) != len(prompt_is_chat_templated):
+        raise ValueError("prompt_texts and prompt_is_chat_templated must have the same length")
+
+    templated = [bool(x) for x in prompt_is_chat_templated]
+    if any(t != templated[0] for t in templated):
+        raise ValueError(
+            "Mixed templated/non-templated prompts in one batch are not supported. "
+            "Batch them separately."
+        )
+
+    # Left padding keeps each sample's final prompt token aligned at -1.
+    old_padding_side = getattr(tokenizer, "padding_side", "right")
+    tokenizer.padding_side = "left"
+    try:
+        enc = tokenizer(
+            list(prompt_texts),
+            return_tensors="pt",
+            add_special_tokens=not templated[0],
+            padding=True,
+            truncation=(max_input_tokens is not None),
+            max_length=max_input_tokens,
+        )
+    finally:
+        tokenizer.padding_side = old_padding_side
+
+    input_ids = enc["input_ids"].to(device)
+    attention_mask = enc.get("attention_mask")
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, device=device)
+    else:
+        attention_mask = attention_mask.to(device)
+
     prompt_len = int(input_ids.shape[1])
     past_key_values = None
+    batch_size = int(input_ids.shape[0])
+    unfinished = torch.ones(batch_size, dtype=torch.bool, device=device)
+    eos_id = tokenizer.eos_token_id
+    finished_fill_id = (
+        int(eos_id)
+        if eos_id is not None
+        else int(tokenizer.pad_token_id) if tokenizer.pad_token_id is not None else 0
+    )
 
     for _ in range(int(max_new_tokens)):
         if use_cache and past_key_values is not None:
@@ -182,6 +217,11 @@ def generate_completion(
             top_p=top_p,
         )
 
+        # Keep completed rows stable while other rows continue generating.
+        if not bool(torch.all(unfinished)):
+            fill = torch.full_like(next_token, int(finished_fill_id))
+            next_token = torch.where(unfinished.unsqueeze(1), next_token, fill)
+
         input_ids = torch.cat([input_ids, next_token], dim=-1)
         attention_mask = torch.cat(
             [
@@ -195,12 +235,51 @@ def generate_completion(
             dim=-1,
         )
 
-        if stop_on_eos and tokenizer.eos_token_id is not None:
-            if int(next_token.item()) == int(tokenizer.eos_token_id):
+        if stop_on_eos and eos_id is not None:
+            just_finished = (next_token.squeeze(1) == int(eos_id)) & unfinished
+            unfinished = unfinished & (~just_finished)
+            if not bool(torch.any(unfinished)):
                 break
 
-    generated_ids = input_ids[0, prompt_len:]
-    return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    generated_ids = input_ids[:, prompt_len:]
+    responses: List[str] = []
+    for row in generated_ids:
+        responses.append(tokenizer.decode(row, skip_special_tokens=True).strip())
+    return responses
+
+
+@torch.no_grad()
+def generate_completion(
+    model,
+    tokenizer,
+    prompt_text: str,
+    prompt_is_chat_templated: bool,
+    *,
+    device: torch.device,
+    max_input_tokens: Optional[int],
+    max_new_tokens: int,
+    do_sample: bool,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    use_cache: bool,
+    stop_on_eos: bool,
+) -> str:
+    return generate_completions(
+        model=model,
+        tokenizer=tokenizer,
+        prompt_texts=[prompt_text],
+        prompt_is_chat_templated=[prompt_is_chat_templated],
+        device=device,
+        max_input_tokens=max_input_tokens,
+        max_new_tokens=max_new_tokens,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        use_cache=use_cache,
+        stop_on_eos=stop_on_eos,
+    )[0]
 
 
 def _infer_model_id(checkpoint: Optional[str], config_path: str) -> str:
@@ -258,6 +337,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("--top_k", type=int, default=0, help="Top-k sampling (0 disables)")
     parser.add_argument("--top_p", type=float, default=1.0, help="Top-p sampling")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for batched decoding")
     parser.add_argument("--device", type=str, default="cuda", help="Device (e.g., cuda, cuda:0, cpu)")
     parser.add_argument("--distributed", action="store_true", help="Use Accelerate multi-process generation")
     parser.add_argument(
@@ -286,6 +366,8 @@ def main() -> None:
         raise ValueError(f"--top_p must be in (0, 1], got {args.top_p}")
     if args.do_sample and args.temperature <= 0:
         raise ValueError("--do_sample requires --temperature > 0")
+    if args.batch_size <= 0:
+        raise ValueError(f"--batch_size must be > 0, got {args.batch_size}")
 
     cfg = load_config(args.config)
     max_input_tokens = (
@@ -343,24 +425,32 @@ def main() -> None:
 
     with open(local_output_path, "w", encoding="utf-8") as f:
         iterator = tqdm(
-            local_indices,
+            range(0, len(local_indices), int(args.batch_size)),
             desc=f"IFEval-rank{rank}",
             disable=(accelerator is not None and not accelerator.is_main_process),
         )
-        for idx in iterator:
-            row = ds[int(idx)]
-            prompt = str(row[args.prompt_field])
-            prompt_text, prompt_is_chat_templated = _apply_chat_template_if_enabled(
-                tokenizer=tokenizer,
-                prompt=prompt,
-                apply_chat_template=bool(args.apply_chat_template),
-                system_prompt=args.system_prompt,
-            )
-            response = generate_completion(
+        for start in iterator:
+            batch_indices = local_indices[start : start + int(args.batch_size)]
+            rows = [ds[int(idx)] for idx in batch_indices]
+            prompts = [str(row[args.prompt_field]) for row in rows]
+
+            prompt_texts: List[str] = []
+            prompt_templated: List[bool] = []
+            for prompt in prompts:
+                prompt_text, is_templated = _apply_chat_template_if_enabled(
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    apply_chat_template=bool(args.apply_chat_template),
+                    system_prompt=args.system_prompt,
+                )
+                prompt_texts.append(prompt_text)
+                prompt_templated.append(is_templated)
+
+            responses = generate_completions(
                 model=model,
                 tokenizer=tokenizer,
-                prompt_text=prompt_text,
-                prompt_is_chat_templated=prompt_is_chat_templated,
+                prompt_texts=prompt_texts,
+                prompt_is_chat_templated=prompt_templated,
                 device=device,
                 max_input_tokens=max_input_tokens,
                 max_new_tokens=int(args.max_new_tokens),
@@ -372,19 +462,20 @@ def main() -> None:
                 stop_on_eos=bool(args.stop_on_eos),
             )
 
-            payload: Dict = {
-                "key": row.get(args.key_field),
-                "prompt": prompt,
-                "response": response,
-                "model_id": model_id,
-            }
-            if "instruction_id_list" in row:
-                payload["instruction_id_list"] = row["instruction_id_list"]
-            if "kwargs" in row:
-                payload["kwargs"] = row["kwargs"]
-            if accelerator is not None:
-                payload["__idx"] = int(idx)
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            for idx, row, prompt, response in zip(batch_indices, rows, prompts, responses):
+                payload: Dict = {
+                    "key": row.get(args.key_field),
+                    "prompt": prompt,
+                    "response": response,
+                    "model_id": model_id,
+                }
+                if "instruction_id_list" in row:
+                    payload["instruction_id_list"] = row["instruction_id_list"]
+                if "kwargs" in row:
+                    payload["kwargs"] = row["kwargs"]
+                if accelerator is not None:
+                    payload["__idx"] = int(idx)
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     if accelerator is not None:
         accelerator.wait_for_everyone()
