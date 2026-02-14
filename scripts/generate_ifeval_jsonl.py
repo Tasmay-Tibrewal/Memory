@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -33,6 +34,13 @@ sys.path.insert(0, str(project_root))
 
 from eval_mmlu import load_model, load_tokenizer
 from memory_transformer.config import load_config
+
+try:
+    from accelerate import Accelerator
+
+    ACCELERATE_AVAILABLE = True
+except Exception:
+    ACCELERATE_AVAILABLE = False
 
 
 def _apply_chat_template_if_enabled(
@@ -197,6 +205,10 @@ def _infer_model_id(checkpoint: Optional[str], config_path: str) -> str:
     return Path(config_path).stem
 
 
+def _rank_output_path(output_path: Path, rank: int) -> Path:
+    return output_path.with_name(f"{output_path.name}.rank{rank}.tmp")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate IFEval predictions JSONL")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
@@ -243,6 +255,12 @@ def main() -> None:
     parser.add_argument("--top_k", type=int, default=0, help="Top-k sampling (0 disables)")
     parser.add_argument("--top_p", type=float, default=1.0, help="Top-p sampling")
     parser.add_argument("--device", type=str, default="cuda", help="Device (e.g., cuda, cuda:0, cpu)")
+    parser.add_argument("--distributed", action="store_true", help="Use Accelerate multi-process generation")
+    parser.add_argument(
+        "--keep_rank_outputs",
+        action="store_true",
+        help="Keep temporary per-rank JSONL parts after merge (distributed mode only)",
+    )
     parser.add_argument("--model_id", type=str, default=None, help="Optional model id to include in JSONL rows")
     parser.add_argument(
         "--output",
@@ -269,15 +287,33 @@ def main() -> None:
     max_input_tokens = (
         int(args.max_input_tokens) if args.max_input_tokens is not None else int(cfg.training.max_length)
     )
-    device = torch.device(args.device)
 
-    print(f"Loading model from {args.checkpoint or args.config} ...")
+    accelerator = None
+    if args.distributed:
+        if not ACCELERATE_AVAILABLE:
+            raise RuntimeError("accelerate is required for --distributed")
+        accelerator = Accelerator()
+        world_size = int(accelerator.num_processes)
+        rank = int(accelerator.process_index)
+        is_main = bool(accelerator.is_main_process)
+        device = accelerator.device
+    else:
+        world_size = 1
+        rank = 0
+        is_main = True
+        device = torch.device(args.device)
+
+    if is_main:
+        print(f"Loading model from {args.checkpoint or args.config} ...")
+        if accelerator is not None:
+            print(f"Distributed generation enabled: world_size={world_size}")
     model = load_model(cfg, args.checkpoint)
     tokenizer = load_tokenizer(cfg)
     model = model.to(device)
     model.eval()
 
-    print(f"Loading dataset {args.dataset} [{args.split}] ...")
+    if is_main:
+        print(f"Loading dataset {args.dataset} [{args.split}] ...")
     ds = load_dataset(args.dataset, split=args.split)
     if args.max_samples is not None:
         rng = random.Random(int(args.seed))
@@ -288,11 +324,22 @@ def main() -> None:
     model_id = args.model_id or _infer_model_id(args.checkpoint, args.config)
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    total_rows = len(ds)
 
-    print(f"Generating {len(ds)} responses -> {out_path}")
-    with open(out_path, "w", encoding="utf-8") as f:
-        iterator = tqdm(ds, desc="IFEval")
-        for row in iterator:
+    local_output_path = _rank_output_path(out_path, rank) if accelerator is not None else out_path
+    local_indices = [i for i in range(total_rows) if i % world_size == rank]
+
+    if is_main:
+        print(f"Generating {total_rows} responses -> {out_path}")
+
+    with open(local_output_path, "w", encoding="utf-8") as f:
+        iterator = tqdm(
+            local_indices,
+            desc=f"IFEval-rank{rank}",
+            disable=(accelerator is not None and not accelerator.is_main_process),
+        )
+        for idx in iterator:
+            row = ds[int(idx)]
             prompt = str(row[args.prompt_field])
             prompt_text = _apply_chat_template_if_enabled(
                 tokenizer=tokenizer,
@@ -325,9 +372,43 @@ def main() -> None:
                 payload["instruction_id_list"] = row["instruction_id_list"]
             if "kwargs" in row:
                 payload["kwargs"] = row["kwargs"]
+            if accelerator is not None:
+                payload["__idx"] = int(idx)
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    print(f"Done. Wrote {len(ds)} rows to {out_path}")
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+        if is_main:
+            merged = []
+            for r in range(world_size):
+                rp = _rank_output_path(out_path, r)
+                if not rp.exists():
+                    raise FileNotFoundError(f"Missing distributed output part: {rp}")
+                with open(rp, "r", encoding="utf-8") as part_f:
+                    for line in part_f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        merged.append(json.loads(line))
+            if len(merged) != total_rows:
+                raise RuntimeError(
+                    f"Merged row count mismatch: got {len(merged)}, expected {total_rows}"
+                )
+            merged.sort(key=lambda x: int(x["__idx"]))
+            with open(out_path, "w", encoding="utf-8") as out_f:
+                for item in merged:
+                    item.pop("__idx", None)
+                    out_f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            if not args.keep_rank_outputs:
+                for r in range(world_size):
+                    rp = _rank_output_path(out_path, r)
+                    try:
+                        os.remove(rp)
+                    except OSError:
+                        pass
+            print(f"Done. Wrote {total_rows} rows to {out_path}")
+    else:
+        print(f"Done. Wrote {total_rows} rows to {out_path}")
 
 
 if __name__ == "__main__":

@@ -171,6 +171,13 @@ python scripts/generate_ifeval_jsonl.py --config configs/ift_base_model.yaml \
   --checkpoint outputs/final_model \
   --output outputs/ifeval/predictions.jsonl
 
+# Multi-GPU IFEval generation (automatic sharding + ordered merge)
+accelerate launch --num_processes 8 scripts/generate_ifeval_jsonl.py \
+  --distributed \
+  --config configs/ift_base_model.yaml \
+  --checkpoint outputs/final_model \
+  --output outputs/ifeval/predictions.jsonl
+
 # Suite with manual few-shot prompts (default 5) and full-choice-text scoring
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model \
   --mmlu_shots 5 --mcq_shots 5 \
