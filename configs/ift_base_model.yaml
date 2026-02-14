@@ -193,4 +193,5 @@ training:
 
   # Output
   output_dir: ./outputs/base_small_ift_run1
-  resume_from_checkpoint: ./outputs/base_small_run5/final_model
+  resume_from_checkpoint: null
+  init_from_checkpoint: ./outputs/base_small_run5/final_model

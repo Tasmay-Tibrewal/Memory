@@ -193,4 +193,5 @@ training:
 
   # Output
   output_dir: ./outputs/vanilla_control_ift_run1
-  resume_from_checkpoint: ./outputs/vanilla_control_run5/final_model
+  resume_from_checkpoint: null
+  init_from_checkpoint: ./outputs/vanilla_control_run5/final_model

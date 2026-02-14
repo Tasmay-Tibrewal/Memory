@@ -193,7 +193,8 @@ training:
 
   # Output
   output_dir: ./outputs
-  resume_from_checkpoint: null
+  resume_from_checkpoint: null    # Continue full state: model + optimizer + scheduler + step/epoch
+  init_from_checkpoint: null      # Weights-only init: fresh run state (global_step resets to 0)
 
 # -----------------------------------------------------------------------------
 # Optional quick recommendations (copy into a real run config):

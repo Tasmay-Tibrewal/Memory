@@ -188,8 +188,12 @@ class Trainer:
         self.best_loss = float('inf')
         self.patience_counter = 0
         self.should_stop = False
-        
-        # Resume from checkpoint if specified
+
+        # Weights-only initialization (fresh run semantics).
+        if config.training.init_from_checkpoint:
+            self._init_model_from_checkpoint(config.training.init_from_checkpoint)
+
+        # Resume full training state if specified.
         if config.training.resume_from_checkpoint:
             self._resume_from_checkpoint(config.training.resume_from_checkpoint)
         
@@ -217,6 +221,12 @@ class Trainer:
     def _validate_training_config(self) -> None:
         """Validate training config values early for clearer errors."""
         cfg = self.train_config
+        if cfg.resume_from_checkpoint is not None and cfg.init_from_checkpoint is not None:
+            raise ValueError(
+                "training.resume_from_checkpoint and training.init_from_checkpoint are mutually exclusive. "
+                "Use resume_from_checkpoint to continue full state, or init_from_checkpoint for "
+                "weights-only fresh training."
+            )
         if cfg.batch_size <= 0:
             raise ValueError(f"batch_size must be > 0, got {cfg.batch_size}")
         if cfg.gradient_accumulation_steps <= 0:
@@ -654,6 +664,49 @@ class Trainer:
                     f"Resumed ({resume_kind}) trainer state: step={self.global_step}, "
                     f"epoch={self.epoch}, best_loss={self.best_loss:.4f}"
                 )
+
+    def _init_model_from_checkpoint(self, checkpoint_path: str) -> None:
+        """
+        Load only model weights from a checkpoint and keep a fresh training state.
+
+        This is useful for stage transitions (e.g., pretraining -> instruction tuning)
+        where optimizer/scheduler/global step should restart from zero.
+        """
+        checkpoint_dir = Path(checkpoint_path)
+
+        model_path_pt = checkpoint_dir / "model.pt"
+        safe_path = checkpoint_dir / "model.safetensors"
+        bin_path = checkpoint_dir / "pytorch_model.bin"
+
+        state_dict = None
+        if model_path_pt.exists():
+            state_dict = torch.load(model_path_pt, map_location="cpu", weights_only=True)
+        elif safe_path.exists():
+            from safetensors.torch import load_file
+
+            state_dict = load_file(str(safe_path), device="cpu")
+        elif bin_path.exists():
+            state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+        else:
+            raise FileNotFoundError(
+                f"No supported model weights found in {checkpoint_dir} "
+                f"(expected {model_path_pt.name}, {safe_path.name}, or {bin_path.name})."
+            )
+
+        self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+
+        # Explicitly keep a fresh trainer state.
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float("inf")
+        self.patience_counter = 0
+        self.should_stop = False
+
+        if self.accelerator.is_main_process:
+            print(
+                f"Initialized model weights from {checkpoint_dir} with fresh optimizer/scheduler "
+                "state (global_step=0)."
+            )
     
     def evaluate(self) -> Dict[str, float]:
         """Run evaluation on eval dataset."""
