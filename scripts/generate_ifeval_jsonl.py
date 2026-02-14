@@ -76,10 +76,19 @@ def _select_next_token(
     top_k: int,
     top_p: float,
 ) -> torch.Tensor:
+    # Keep a cleaned copy for fallback argmax decisions.
+    fallback_logits = torch.nan_to_num(
+        next_token_logits,
+        nan=-1e9,
+        posinf=1e9,
+        neginf=-1e9,
+    )
+
     if (not do_sample) or temperature <= 0:
-        return torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        return torch.argmax(fallback_logits, dim=-1, keepdim=True)
 
     logits = next_token_logits / temperature
+    logits = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
 
     if top_k > 0:
         k = min(int(top_k), int(logits.shape[-1]))
@@ -96,7 +105,25 @@ def _select_next_token(
         remove = sorted_remove.scatter(1, sorted_indices, sorted_remove)
         logits[remove] = float("-inf")
 
+    # If filtering produced rows with no finite value, fall back to unfiltered logits.
+    no_finite = ~torch.isfinite(logits).any(dim=-1, keepdim=True)
+    if bool(torch.any(no_finite)):
+        logits = torch.where(no_finite, fallback_logits, logits)
+
     probs = torch.softmax(logits, dim=-1)
+    probs = torch.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Guarantee valid multinomial rows. If a row is still invalid, convert it
+    # to a one-hot distribution at greedy argmax.
+    row_sums = probs.sum(dim=-1, keepdim=True)
+    invalid = row_sums <= 0
+    if bool(torch.any(invalid)):
+        greedy_idx = torch.argmax(fallback_logits, dim=-1, keepdim=True)
+        one_hot = torch.zeros_like(probs).scatter_(1, greedy_idx, 1.0)
+        probs = torch.where(invalid, one_hot, probs)
+        row_sums = probs.sum(dim=-1, keepdim=True)
+
+    probs = probs / row_sums.clamp_min(1e-12)
     return torch.multinomial(probs, num_samples=1)
 
 
@@ -209,8 +236,20 @@ def generate_completions(
             else:
                 past_key_values = getattr(outputs, "past_key_values", None)
 
+        step_logits = logits[:, -1, :]
+        if not bool(torch.all(unfinished)):
+            # Stabilize completed rows: keep them on a fixed token and avoid
+            # propagating potentially degenerate logits through sampling.
+            safe_id = int(finished_fill_id)
+            vocab = int(step_logits.shape[-1])
+            if safe_id < 0 or safe_id >= vocab:
+                safe_id = 0
+            step_logits = step_logits.clone()
+            step_logits[~unfinished] = float("-inf")
+            step_logits[~unfinished, safe_id] = 0.0
+
         next_token = _select_next_token(
-            logits[:, -1, :],
+            step_logits,
             do_sample=do_sample,
             temperature=temperature,
             top_k=top_k,
