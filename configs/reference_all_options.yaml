@@ -23,6 +23,7 @@ model:
 
   # Tokenizer and special IDs
   tokenizer_name: null            # null => base_model_name (adapter) or TinyLlama tokenizer (scratch)
+  chat_template: null             # Optional explicit tokenizer.chat_template override (Jinja string)
   bos_token_id: null
   eos_token_id: null
   pad_token_id: null

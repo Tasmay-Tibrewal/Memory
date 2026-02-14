@@ -36,6 +36,7 @@ from memory_transformer.utils import (
     count_parameters,
     format_params,
     configure_tokenizer_special_ids,
+    configure_tokenizer_chat_template,
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
     get_wsd_schedule_with_warmup,
@@ -298,6 +299,7 @@ class Trainer:
             trust_remote_code=True,
         )
         configure_tokenizer_special_ids(tokenizer, self.config.model)
+        configure_tokenizer_chat_template(tokenizer, self.config.model)
 
         # Persist resolved tokenizer name for checkpoint reproducibility.
         if self.config.model.tokenizer_name is None:

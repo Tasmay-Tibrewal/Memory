@@ -33,6 +33,7 @@ from memory_transformer.config import load_config
 from memory_transformer.model import MemoryTransformer
 from memory_transformer.adapter import MemoryAdapter
 from memory_transformer.utils import configure_tokenizer_special_ids
+from memory_transformer.utils import configure_tokenizer_chat_template
 from training.data import create_dataloader
 from transformers import AutoTokenizer
 
@@ -89,6 +90,7 @@ def load_tokenizer(config):
         trust_remote_code=True,
     )
     configure_tokenizer_special_ids(tokenizer, config.model)
+    configure_tokenizer_chat_template(tokenizer, config.model)
 
     return tokenizer
 

@@ -48,24 +48,31 @@ def _apply_chat_template_if_enabled(
     prompt: str,
     apply_chat_template: bool,
     system_prompt: Optional[str],
+    require_chat_template: bool,
 ) -> Tuple[str, bool]:
     if not apply_chat_template:
         return prompt, False
 
-    chat_template = getattr(tokenizer, "chat_template", None)
-    if not chat_template:
+    if not hasattr(tokenizer, "apply_chat_template"):
+        if require_chat_template:
+            raise RuntimeError("Tokenizer has no apply_chat_template() but chat template was required")
         return prompt, False
 
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
-    rendered = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    return rendered, True
+    try:
+        rendered = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return rendered, True
+    except Exception as e:
+        if require_chat_template:
+            raise RuntimeError(f"Failed to apply chat template: {e}") from e
+        return prompt, False
 
 
 def _select_next_token(
@@ -359,6 +366,12 @@ def main() -> None:
         default=True,
         help="Wrap each prompt in tokenizer chat template when available (default: True)",
     )
+    parser.add_argument(
+        "--require_chat_template",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail if chat template application is requested but unavailable/fails (default: True)",
+    )
     parser.add_argument("--system_prompt", type=str, default=None, help="Optional system prompt for chat-template mode")
     parser.add_argument(
         "--use_cache",
@@ -440,7 +453,10 @@ def main() -> None:
         if getattr(tokenizer, "chat_template", None):
             print("Chat template detected; prompts will be rendered via apply_chat_template.")
         else:
-            print("Chat template requested, but tokenizer has no chat_template; using raw prompts.")
+            msg = "Chat template requested, but tokenizer has no chat_template."
+            if bool(args.require_chat_template):
+                raise RuntimeError(msg)
+            print(msg + " Falling back to raw prompts.")
 
     if is_main:
         print(f"Loading dataset {args.dataset} [{args.split}] ...")
@@ -481,6 +497,7 @@ def main() -> None:
                     prompt=prompt,
                     apply_chat_template=bool(args.apply_chat_template),
                     system_prompt=args.system_prompt,
+                    require_chat_template=bool(args.require_chat_template),
                 )
                 prompt_texts.append(prompt_text)
                 prompt_templated.append(is_templated)

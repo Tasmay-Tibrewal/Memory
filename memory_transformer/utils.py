@@ -260,6 +260,17 @@ def configure_tokenizer_special_ids(tokenizer: Any, model_config: Any) -> None:
             tokenizer.pad_token_id = eos_id
 
 
+def configure_tokenizer_chat_template(tokenizer: Any, model_config: Any) -> None:
+    """
+    Apply optional tokenizer chat template from config.
+
+    If `model.chat_template` is set, this overrides tokenizer.chat_template.
+    """
+    chat_template = getattr(model_config, "chat_template", None)
+    if chat_template:
+        tokenizer.chat_template = str(chat_template)
+
+
 def print_model_info(model: nn.Module, config: Optional[Any] = None):
     """Print model information."""
     total_params = count_parameters(model, trainable_only=False)

@@ -140,6 +140,9 @@ class ModelConfig:
     # - Adapter mode defaults to base_model_name
     # - From-scratch defaults to a Llama-style 32k tokenizer (see Trainer._load_tokenizer)
     tokenizer_name: Optional[str] = None
+    # Optional explicit chat template override. If set, this template is forced
+    # onto the tokenizer and used by apply_chat_template().
+    chat_template: Optional[str] = None
     bos_token_id: Optional[int] = None
     eos_token_id: Optional[int] = None
     pad_token_id: Optional[int] = None

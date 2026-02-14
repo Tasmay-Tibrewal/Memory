@@ -36,6 +36,7 @@ from memory_transformer.adapter import MemoryAdapter
 from memory_transformer.config import load_config
 from memory_transformer.model import MemoryTransformer
 from memory_transformer.utils import configure_tokenizer_special_ids
+from memory_transformer.utils import configure_tokenizer_chat_template
 
 try:
     from accelerate import Accelerator
@@ -244,6 +245,7 @@ def load_tokenizer(config):
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
     configure_tokenizer_special_ids(tokenizer, config.model)
+    configure_tokenizer_chat_template(tokenizer, config.model)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is not None:
             tokenizer.pad_token_id = tokenizer.eos_token_id

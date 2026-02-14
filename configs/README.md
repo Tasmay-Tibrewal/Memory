@@ -47,6 +47,7 @@ model:
   # - adapter mode defaults to base_model_name
   # - from-scratch defaults to a Llama-style 32k tokenizer
   tokenizer_name: null         # e.g., "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+  chat_template: null         # Optional explicit tokenizer.chat_template override (Jinja string)
   bos_token_id: null           # Optional override
   eos_token_id: null           # Optional override
   pad_token_id: null           # Optional override

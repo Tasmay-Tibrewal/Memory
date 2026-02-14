@@ -20,6 +20,7 @@ from memory_transformer.config import load_config
 from memory_transformer.model import MemoryTransformer
 from memory_transformer.adapter import MemoryAdapter
 from memory_transformer.utils import configure_tokenizer_special_ids
+from memory_transformer.utils import configure_tokenizer_chat_template
 from transformers import AutoTokenizer
 
 
@@ -112,6 +113,7 @@ def main():
         trust_remote_code=True,
     )
     configure_tokenizer_special_ids(tokenizer, config.model)
+    configure_tokenizer_chat_template(tokenizer, config.model)
     
     # Tokenize prompt
     inputs = tokenizer(args.prompt, return_tensors="pt").to(args.device)

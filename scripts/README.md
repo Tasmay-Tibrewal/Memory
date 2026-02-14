@@ -239,6 +239,7 @@ accelerate launch --num_processes 8 scripts/generate_ifeval_jsonl.py \
 - Default dataset: `google/IFEval`, split `train`.
 - Output rows contain: `key`, `prompt`, `response`, `model_id` (plus instruction metadata when present).
 - Chat template application is enabled by default when tokenizer provides one (`--no-apply_chat_template` to disable).
+- Chat template is strict by default (`--require_chat_template`); if template application is unavailable/fails, the script exits instead of silently falling back.
 - Batched generation is enabled via `--batch_size` (default: `8`).
 - In distributed mode, each rank writes a temporary part and rank 0 merges all parts in original prompt order.
 
