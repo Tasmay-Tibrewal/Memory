@@ -149,7 +149,7 @@ training:
   num_gpus: 4
 
   # Training hyperparameters
-  batch_size: 16
+  batch_size: 32
   gradient_accumulation_steps: 1 # smaller, since smaller train corpus
   # num_epochs: null
   # max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
