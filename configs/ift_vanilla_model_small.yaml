@@ -46,7 +46,7 @@ model:
 
 memory:
   # === MAIN TOGGLE: Set to true for vanilla (no memory) control ===
-  vanilla_mode: false
+  vanilla_mode: true
 
   # Memory bank settings
   num_memory_tokens: 262208
@@ -107,8 +107,8 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 3e-5
-  memory_bank_lr: 3e-5 # Optional override for memory bank params only
+  memory_lr: 1.5e-5
+  memory_bank_lr: 5e-6 # Optional override for memory bank params only
   lora_lr: 3e-5
   base_model_lr: 3e-5 # Same for from-scratch
 
@@ -189,9 +189,9 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-ift-run1-equal-lr
+  wandb_run_name: run-vanilla-small-ift-run1
 
   # Output
-  output_dir: ./outputs/base_small_ift_run1_equal_lr
+  output_dir: ./outputs/vanilla_control_ift_small_run1
   resume_from_checkpoint: null
-  init_from_checkpoint: ./outputs/base_small_run5/final_model
+  init_from_checkpoint: ./outputs/vanilla_control_run6-small/final_model
