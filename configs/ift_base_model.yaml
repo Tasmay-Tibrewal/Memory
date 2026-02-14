@@ -110,8 +110,8 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 3e-5
-  memory_bank_lr: 3e-5 # Optional override for memory bank params only
+  memory_lr: 1.5e-5
+  memory_bank_lr: 0 # Optional override for memory bank params only
   lora_lr: 3e-5
   base_model_lr: 3e-5 # Same for from-scratch
 
@@ -192,9 +192,9 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-ift-run1-equal-lr
+  wandb_run_name: run-full-ift-run1-frozen-bank
 
   # Output
-  output_dir: ./outputs/base_small_ift_run1_equal_lr
+  output_dir: ./outputs/base_small_ift_run1_frozen_bank
   resume_from_checkpoint: null
   init_from_checkpoint: ./outputs/base_small_run5/final_model
