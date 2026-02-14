@@ -161,6 +161,7 @@ python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml 
 python scripts/eval_winogrande.py --config configs/base_small.yaml --checkpoint outputs/final_model
 python scripts/eval_boolq.py --config configs/base_small.yaml --checkpoint outputs/final_model
 python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_triviaqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
 
 # Run the full suite and aggregate scores
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model

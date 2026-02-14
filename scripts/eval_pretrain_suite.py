@@ -9,6 +9,7 @@ Default suite:
 - winogrande
 - boolq
 - openbookqa
+- triviaqa
 """
 
 import argparse
@@ -26,6 +27,7 @@ DEFAULT_BENCHMARKS = [
     "winogrande",
     "boolq",
     "openbookqa",
+    "triviaqa",
 ]
 
 
@@ -57,6 +59,15 @@ def main() -> None:
     parser.add_argument("--num_processes", type=int, default=1, help="Processes for --distributed")
     parser.add_argument("--mmlu_shots", type=int, default=5, help="Few-shot count for MMLU")
     parser.add_argument("--mcq_shots", type=int, default=5, help="Few-shot count for non-MMLU MCQ tasks")
+    parser.add_argument("--triviaqa_shots", type=int, default=5, help="Few-shot count for TriviaQA")
+    parser.add_argument(
+        "--triviaqa_dataset_config",
+        type=str,
+        default="rc.nocontext",
+        help="TriviaQA dataset config (default: rc.nocontext)",
+    )
+    parser.add_argument("--triviaqa_split", type=str, default="validation", help="TriviaQA eval split")
+    parser.add_argument("--triviaqa_fewshot_split", type=str, default="train", help="TriviaQA few-shot source split")
     parser.add_argument(
         "--mmlu_fewshot_mode",
         type=str,
@@ -144,6 +155,32 @@ def main() -> None:
                 cmd += ["--device", args.device]
             if args.use_cache:
                 cmd += ["--use_cache"]
+        elif bench == "triviaqa":
+            cmd = launcher + [
+                "scripts/eval_triviaqa.py",
+                "--config",
+                args.config,
+                "--dataset_config",
+                args.triviaqa_dataset_config,
+                "--split",
+                args.triviaqa_split,
+                "--fewshot_split",
+                args.triviaqa_fewshot_split,
+                "--shots",
+                str(int(args.triviaqa_shots)),
+                "--output",
+                str(output_path),
+            ]
+            if args.checkpoint:
+                cmd += ["--checkpoint", args.checkpoint]
+            if args.max_samples is not None:
+                cmd += ["--max_samples", str(int(args.max_samples))]
+            if args.distributed:
+                cmd += ["--distributed"]
+            else:
+                cmd += ["--device", args.device]
+            if args.use_cache:
+                cmd += ["--use_cache"]
         else:
             cmd = launcher + [
                 "scripts/eval_mcq_benchmark.py",
@@ -191,13 +228,17 @@ def main() -> None:
     }
 
     normalized_scores: Dict[str, float] = {}
+    ppl_metrics: Dict[str, float] = {}
     for bench, payload in results.items():
         if bench == "mmlu":
             normalized_scores[bench] = float(payload.get("weighted_accuracy", 0.0))
+        elif bench == "triviaqa":
+            ppl_metrics[bench] = float(payload.get("avg_per_question_ppl", 0.0))
         else:
             normalized_scores[bench] = float(payload.get("accuracy", 0.0))
 
     summary["scores"] = normalized_scores
+    summary["ppl_metrics"] = ppl_metrics
     if normalized_scores:
         summary["mean_score"] = float(sum(normalized_scores.values()) / len(normalized_scores))
     else:
@@ -213,6 +254,8 @@ def main() -> None:
     for bench in benchmarks:
         if bench in normalized_scores:
             print(f"{bench:<16} {normalized_scores[bench]:.4f}")
+        elif bench in ppl_metrics:
+            print(f"{bench:<16} ppl={ppl_metrics[bench]:.4f}")
         else:
             print(f"{bench:<16} FAILED")
     print("-" * 72)
