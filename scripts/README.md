@@ -15,7 +15,7 @@ scripts/
 ├── eval_winogrande.py     # Winogrande accuracy
 ├── eval_boolq.py          # BoolQ accuracy
 ├── eval_openbookqa.py     # OpenBookQA accuracy
-├── eval_triviaqa.py       # TriviaQA alias-averaged perplexity
+├── eval_triviaqa.py       # TriviaQA top-alias perplexity
 ├── eval_pretrain_suite.py # Run all benchmark scripts + aggregate
 ├── inference.py           # Text generation
 └── estimate_flops.py      # Analytical FLOPs estimator
@@ -206,7 +206,7 @@ Notes:
 - `eval_mmlu.py` and `eval_mcq_benchmark.py` support `--fewshot_mode {manual,dataset}`.
 - `manual` uses handcrafted benchmark/task examples and shuffles option order per seed for label diversity.
 - `--scoring_mode choice_text` scores full option text; `--scoring_mode label` scores `A/B/C/...` label tokens.
-- `eval_triviaqa.py` uses question-only prompts (no context), samples few-shot examples from a non-test split by default (`--shots 5`), and reports alias-averaged perplexity.
+- `eval_triviaqa.py` uses question-only prompts (no context), samples few-shot examples from a non-test split by default (`--shots 5`), selects the highest full-sequence-probability alias per question, and reports top-alias perplexity (plus token-weighted corpus perplexity).
 
 ---
 

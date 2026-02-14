@@ -229,16 +229,26 @@ def main() -> None:
 
     normalized_scores: Dict[str, float] = {}
     ppl_metrics: Dict[str, float] = {}
+    aux_metrics: Dict[str, float] = {}
     for bench, payload in results.items():
         if bench == "mmlu":
             normalized_scores[bench] = float(payload.get("weighted_accuracy", 0.0))
         elif bench == "triviaqa":
-            ppl_metrics[bench] = float(payload.get("avg_per_question_ppl", 0.0))
+            ppl_metrics[bench] = float(
+                payload.get(
+                    "avg_top_alias_ppl",
+                    payload.get("avg_per_question_ppl", 0.0),
+                )
+            )
+            aux_metrics["triviaqa_corpus_ppl_top_alias"] = float(
+                payload.get("corpus_ppl_top_alias", 0.0)
+            )
         else:
             normalized_scores[bench] = float(payload.get("accuracy", 0.0))
 
     summary["scores"] = normalized_scores
     summary["ppl_metrics"] = ppl_metrics
+    summary["aux_metrics"] = aux_metrics
     if normalized_scores:
         summary["mean_score"] = float(sum(normalized_scores.values()) / len(normalized_scores))
     else:
@@ -255,7 +265,11 @@ def main() -> None:
         if bench in normalized_scores:
             print(f"{bench:<16} {normalized_scores[bench]:.4f}")
         elif bench in ppl_metrics:
-            print(f"{bench:<16} ppl={ppl_metrics[bench]:.4f}")
+            corpus = aux_metrics.get("triviaqa_corpus_ppl_top_alias")
+            if bench == "triviaqa" and corpus is not None:
+                print(f"{bench:<16} ppl={ppl_metrics[bench]:.4f} (corpus={corpus:.4f})")
+            else:
+                print(f"{bench:<16} ppl={ppl_metrics[bench]:.4f}")
         else:
             print(f"{bench:<16} FAILED")
     print("-" * 72)

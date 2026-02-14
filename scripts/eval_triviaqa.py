@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Evaluate TriviaQA with alias-based averaged perplexity.
+Evaluate TriviaQA with top-alias perplexity.
 
 Design choices (as requested):
 - No context passages are used in prompts (question + answer format only).
 - For each question, score all available answer aliases (including normalized aliases).
-- Per-question metric = average perplexity across all aliases.
-- Global metric = average of per-question perplexities.
+- Select the alias with highest full-sequence probability.
+- Per-question metric = perplexity of that selected alias.
+- Global primary metric = average per-question top-alias perplexity.
+- Also report token-weighted corpus perplexity over selected top aliases.
 - Few-shot is enabled by default with 5 examples sampled randomly from a non-test split.
 """
 
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
 from tqdm import tqdm
 
@@ -27,7 +30,7 @@ from tqdm import tqdm
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from eval_mmlu import load_model, load_tokenizer, score_options
+from eval_mmlu import _build_scoring_tensors, load_model, load_tokenizer
 from memory_transformer.config import load_config
 
 try:
@@ -155,6 +158,61 @@ def _build_prefix(fewshot_examples: List[TriviaExample]) -> str:
     return "\n".join(lines).strip() + "\n\n"
 
 
+@torch.no_grad()
+def _score_aliases_detailed(
+    model,
+    tokenizer,
+    prompt: str,
+    aliases: List[str],
+    device: torch.device,
+    max_length: int,
+    use_cache: bool,
+) -> List[Dict[str, float]]:
+    continuations = [f" {str(txt).strip()}" for txt in aliases]
+    input_ids, labels = _build_scoring_tensors(
+        tokenizer=tokenizer,
+        prompt=prompt,
+        continuations=continuations,
+        max_length=max_length,
+    )
+    input_ids = input_ids.to(device)
+    labels = labels.to(device)
+    attention_mask = (input_ids != tokenizer.pad_token_id).long()
+
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=bool(use_cache),
+    )
+    logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+
+    per_token_nll = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).view_as(shift_labels)
+    token_mask = (shift_labels != -100).float()
+    nll_sum = (per_token_nll * token_mask).sum(dim=1)
+    n_tokens = token_mask.sum(dim=1).clamp_min(1.0)
+    avg_nll = nll_sum / n_tokens
+
+    out: List[Dict[str, float]] = []
+    for i in range(len(aliases)):
+        out.append(
+            {
+                "nll_sum": float(nll_sum[i].item()),
+                "n_tokens": float(n_tokens[i].item()),
+                "avg_nll": float(avg_nll[i].item()),
+                "seq_logprob": float((-nll_sum[i]).item()),
+                "avg_logprob": float((-avg_nll[i]).item()),
+            }
+        )
+    return out
+
+
 def evaluate_triviaqa(
     model,
     tokenizer,
@@ -180,59 +238,78 @@ def evaluate_triviaqa(
     )
 
     device = accelerator.device if accelerator is not None else next(model.parameters()).device
-    local_sum_question_ppl = 0.0
+    local_sum_top_alias_ppl = 0.0
     local_questions = 0
     local_sum_aliases = 0.0
+    local_top_alias_nll_sum = 0.0
+    local_top_alias_tokens = 0.0
 
     for _, ex in iterator:
         prompt = prefix + _format_qa(ex.question, answer=None)
-        scores = score_options(
+        alias_stats = _score_aliases_detailed(
             model=model,
             tokenizer=tokenizer,
             prompt=prompt,
-            option_labels=None,
-            option_texts=ex.aliases,
-            scoring_mode="choice_text",
+            aliases=ex.aliases,
             device=device,
             max_length=max_length,
             use_cache=use_cache,
         )
-        # score_options returns mean log-probability per continuation token.
-        # Convert each alias score to perplexity via ppl = exp(avg_nll) = exp(-avg_logprob).
-        alias_ppls = [math.exp(-float(s)) for s in scores]
-        question_avg_ppl = sum(alias_ppls) / max(len(alias_ppls), 1)
+        # Select the alias with highest full-sequence probability (max sequence log-probability).
+        best_idx = max(range(len(alias_stats)), key=lambda j: alias_stats[j]["seq_logprob"])
+        best = alias_stats[best_idx]
+        top_alias_ppl = math.exp(best["avg_nll"])
 
-        local_sum_question_ppl += question_avg_ppl
+        local_sum_top_alias_ppl += top_alias_ppl
         local_questions += 1
-        local_sum_aliases += float(len(alias_ppls))
+        local_sum_aliases += float(len(alias_stats))
+        local_top_alias_nll_sum += float(best["nll_sum"])
+        local_top_alias_tokens += float(best["n_tokens"])
 
     if accelerator is not None:
         sums = torch.tensor(
-            [local_sum_question_ppl, float(local_questions), local_sum_aliases],
+            [
+                local_sum_top_alias_ppl,
+                float(local_questions),
+                local_sum_aliases,
+                local_top_alias_nll_sum,
+                local_top_alias_tokens,
+            ],
             device=accelerator.device,
             dtype=torch.float64,
         )
         sums = accelerator.reduce(sums, reduction="sum")
-        global_sum_question_ppl = float(sums[0].item())
+        global_sum_top_alias_ppl = float(sums[0].item())
         global_questions = int(round(float(sums[1].item())))
         global_sum_aliases = float(sums[2].item())
+        global_top_alias_nll_sum = float(sums[3].item())
+        global_top_alias_tokens = float(sums[4].item())
     else:
-        global_sum_question_ppl = local_sum_question_ppl
+        global_sum_top_alias_ppl = local_sum_top_alias_ppl
         global_questions = local_questions
         global_sum_aliases = local_sum_aliases
+        global_top_alias_nll_sum = local_top_alias_nll_sum
+        global_top_alias_tokens = local_top_alias_tokens
 
-    avg_per_question_ppl = global_sum_question_ppl / max(global_questions, 1)
+    avg_top_alias_ppl = global_sum_top_alias_ppl / max(global_questions, 1)
+    corpus_ppl_top_alias = math.exp(global_top_alias_nll_sum / max(global_top_alias_tokens, 1.0))
     avg_aliases_per_question = global_sum_aliases / max(global_questions, 1)
 
     return {
-        "avg_per_question_ppl": float(avg_per_question_ppl),
+        # Primary metric: for each question, choose alias with highest sentence probability,
+        # compute that alias perplexity, then average across questions.
+        "avg_top_alias_ppl": float(avg_top_alias_ppl),
+        # Standard token-weighted corpus perplexity over selected top-probability aliases.
+        "corpus_ppl_top_alias": float(corpus_ppl_top_alias),
+        # Backward-compatible key name (now equal to avg_top_alias_ppl).
+        "avg_per_question_ppl": float(avg_top_alias_ppl),
         "num_questions": int(global_questions),
         "avg_aliases_per_question": float(avg_aliases_per_question),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate TriviaQA alias-averaged perplexity")
+    parser = argparse.ArgumentParser(description="Evaluate TriviaQA top-alias perplexity")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint directory")
     parser.add_argument("--dataset", type=str, default="mandarjoshi/trivia_qa", help="HF dataset name")
@@ -330,14 +407,15 @@ def main() -> None:
         return
 
     print("\n" + "=" * 72)
-    print("TriviaQA Alias-Averaged Perplexity")
+    print("TriviaQA Top-Alias Perplexity")
     print("=" * 72)
     print(f"Dataset: {args.dataset} / {args.dataset_config}")
     print(f"Split: {args.split}")
     print(f"Questions: {result['num_questions']}")
     print(f"Shots: {shots} (from split={args.fewshot_split})")
     print(f"Average aliases/question: {result['avg_aliases_per_question']:.2f}")
-    print(f"Average per-question perplexity: {result['avg_per_question_ppl']:.4f}")
+    print(f"Average top-alias perplexity: {result['avg_top_alias_ppl']:.4f}")
+    print(f"Corpus perplexity (top-alias, token-weighted): {result['corpus_ppl_top_alias']:.4f}")
     print("=" * 72)
 
     if args.output:
@@ -349,6 +427,8 @@ def main() -> None:
             "fewshot_split": args.fewshot_split,
             "shots": shots,
             "max_length": max_length,
+            "avg_top_alias_ppl": result["avg_top_alias_ppl"],
+            "corpus_ppl_top_alias": result["corpus_ppl_top_alias"],
             "avg_per_question_ppl": result["avg_per_question_ppl"],
             "num_questions": result["num_questions"],
             "avg_aliases_per_question": result["avg_aliases_per_question"],
