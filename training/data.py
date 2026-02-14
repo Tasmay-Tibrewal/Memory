@@ -138,7 +138,9 @@ class TextDataset(Dataset):
                 return self._process_pretraining(item)
             else:
                 raise ValueError(f"Cannot find chat data in item: {list(item.keys())}")
-        
+
+        normalized_messages = self._normalize_messages(messages)
+
         # Preferred path: tokenizer-provided chat template + assistant token mask.
         # If unavailable/degenerate, fall back to deterministic role-span masking.
         template_mask_ok = False
@@ -148,13 +150,14 @@ class TextDataset(Dataset):
 
         chat_template = getattr(self.tokenizer, "chat_template", None)
         template_text = str(chat_template) if chat_template is not None else ""
+        has_chat_template = hasattr(self.tokenizer, "apply_chat_template") and bool(chat_template)
         template_supports_assistant_mask = bool(chat_template) and (
             "{% generation" in template_text or "{%- generation" in template_text
         )
-        if hasattr(self.tokenizer, "apply_chat_template") and template_supports_assistant_mask:
+        if has_chat_template and template_supports_assistant_mask:
             try:
                 encoded = self.tokenizer.apply_chat_template(
-                    messages,
+                    normalized_messages,
                     tokenize=True,
                     add_generation_prompt=False,
                     padding="max_length",
@@ -177,56 +180,27 @@ class TextDataset(Dataset):
             except Exception:
                 template_mask_ok = False
 
+        # If chat template exists but doesn't expose assistant_masks, still render with
+        # the template and derive assistant spans from marker-delimited rendering.
+        if has_chat_template and not template_mask_ok:
+            try:
+                text, assistant_spans = self._render_chat_with_assistant_spans(normalized_messages)
+                input_ids, attention_mask, labels = self._tokenize_with_assistant_spans(
+                    text=text,
+                    assistant_spans=assistant_spans,
+                )
+                template_mask_ok = int((labels != -100).sum().item()) > 0 or len(assistant_spans) == 0
+            except Exception:
+                template_mask_ok = False
+
         if not template_mask_ok:
             # Build a deterministic role-tagged transcript and char spans for assistant turns.
             # We then map tokenizer offsets -> assistant spans to apply assistant-only loss masking.
-            text, assistant_spans = self._messages_to_text_and_assistant_spans(messages)
-
-            # Tokenize with offsets for role-aware label masking.
-            try:
-                encoded = self.tokenizer(
-                    text,
-                    max_length=self.max_length,
-                    truncation=True,
-                    padding="max_length",
-                    return_tensors="pt",
-                    return_offsets_mapping=True,
-                )
-                offsets = encoded.pop("offset_mapping").squeeze(0)  # (seq_len, 2)
-            except Exception:
-                # Fallback for tokenizers without offset support: preserve old behavior
-                # (train on all non-padding tokens) instead of crashing.
-                encoded = self.tokenizer(
-                    text,
-                    max_length=self.max_length,
-                    truncation=True,
-                    padding="max_length",
-                    return_tensors="pt",
-                )
-                offsets = None
-
-            input_ids = encoded["input_ids"].squeeze(0)
-            attention_mask = encoded["attention_mask"].squeeze(0)
-
-            labels = torch.full_like(input_ids, -100)
-            if offsets is None:
-                labels[attention_mask == 1] = input_ids[attention_mask == 1]
-            else:
-                valid_positions = attention_mask == 1
-                for idx in torch.nonzero(valid_positions, as_tuple=False).flatten().tolist():
-                    start = int(offsets[idx, 0].item())
-                    end = int(offsets[idx, 1].item())
-                    if end <= start:
-                        # Special tokens/padding usually map to (0, 0); keep masked.
-                        continue
-                    if self._overlaps_any_span(start, end, assistant_spans):
-                        labels[idx] = input_ids[idx]
-
-                # Safety fallback only for malformed rows with no assistant content at all.
-                # If assistant content exists but was truncated out, keep labels masked
-                # (strict assistant-only training semantics).
-                if int((labels != -100).sum().item()) == 0 and len(assistant_spans) == 0:
-                    labels[attention_mask == 1] = input_ids[attention_mask == 1]
+            text, assistant_spans = self._messages_to_text_and_assistant_spans(normalized_messages)
+            input_ids, attention_mask, labels = self._tokenize_with_assistant_spans(
+                text=text,
+                assistant_spans=assistant_spans,
+            )
         
         return {
             "input_ids": input_ids,
@@ -249,11 +223,127 @@ class TextDataset(Dataset):
         return role_norm in {"assistant", "model", "gpt", "bot"}
 
     @staticmethod
+    def _normalize_messages(messages: List[Dict]) -> List[Dict[str, str]]:
+        """Normalize heterogeneous message schemas to {role, content}."""
+        normalized = []
+        for msg in messages:
+            role = str(msg.get("role", msg.get("from", "unknown")))
+            content = str(msg.get("content", msg.get("value", "")))
+            normalized.append({"role": role, "content": content})
+        return normalized
+
+    @staticmethod
     def _overlaps_any_span(start: int, end: int, spans: List[Tuple[int, int]]) -> bool:
         for s, e in spans:
             if start < e and end > s:
                 return True
         return False
+
+    def _tokenize_with_assistant_spans(
+        self,
+        text: str,
+        assistant_spans: List[Tuple[int, int]],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Tokenize text and keep labels only on tokens that overlap assistant spans."""
+        try:
+            encoded = self.tokenizer(
+                text,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+                return_offsets_mapping=True,
+            )
+            offsets = encoded.pop("offset_mapping").squeeze(0)  # (seq_len, 2)
+        except Exception:
+            encoded = self.tokenizer(
+                text,
+                max_length=self.max_length,
+                truncation=True,
+                padding="max_length",
+                return_tensors="pt",
+            )
+            offsets = None
+
+        input_ids = encoded["input_ids"].squeeze(0)
+        attention_mask = encoded["attention_mask"].squeeze(0)
+
+        labels = torch.full_like(input_ids, -100)
+        if offsets is None:
+            labels[attention_mask == 1] = input_ids[attention_mask == 1]
+            return input_ids, attention_mask, labels
+
+        valid_positions = attention_mask == 1
+        for idx in torch.nonzero(valid_positions, as_tuple=False).flatten().tolist():
+            start = int(offsets[idx, 0].item())
+            end = int(offsets[idx, 1].item())
+            if end <= start:
+                continue
+            if self._overlaps_any_span(start, end, assistant_spans):
+                labels[idx] = input_ids[idx]
+
+        # Fallback only when there is no assistant content in the row.
+        if int((labels != -100).sum().item()) == 0 and len(assistant_spans) == 0:
+            labels[attention_mask == 1] = input_ids[attention_mask == 1]
+
+        return input_ids, attention_mask, labels
+
+    def _render_chat_with_assistant_spans(
+        self,
+        messages: List[Dict[str, str]],
+    ) -> Tuple[str, List[Tuple[int, int]]]:
+        """
+        Render with tokenizer chat template and recover assistant-content spans.
+
+        We inject temporary markers around assistant contents, render once through
+        the template, then strip markers while tracking assistant char spans.
+        """
+        marked_messages: List[Dict[str, str]] = []
+        marker_pairs: List[Tuple[str, str]] = []
+        for i, msg in enumerate(messages):
+            role = str(msg.get("role", "unknown"))
+            content = str(msg.get("content", ""))
+            if self._is_assistant_role(role):
+                start_marker = f"<<|ASSISTANT_START_{i}|>>"
+                end_marker = f"<<|ASSISTANT_END_{i}|>>"
+                content = f"{start_marker}{content}{end_marker}"
+                marker_pairs.append((start_marker, end_marker))
+            marked_messages.append({"role": role, "content": content})
+
+        rendered = self.tokenizer.apply_chat_template(
+            marked_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        clean_parts: List[str] = []
+        assistant_spans: List[Tuple[int, int]] = []
+        cursor_clean = 0
+        cursor_marked = 0
+        for start_marker, end_marker in marker_pairs:
+            start_pos = rendered.find(start_marker, cursor_marked)
+            if start_pos < 0:
+                raise ValueError("Failed to locate assistant start marker in rendered template")
+            end_pos = rendered.find(end_marker, start_pos + len(start_marker))
+            if end_pos < 0:
+                raise ValueError("Failed to locate assistant end marker in rendered template")
+
+            prefix = rendered[cursor_marked:start_pos]
+            clean_parts.append(prefix)
+            cursor_clean += len(prefix)
+
+            content = rendered[start_pos + len(start_marker):end_pos]
+            clean_parts.append(content)
+            content_start = cursor_clean
+            cursor_clean += len(content)
+            if len(content) > 0:
+                assistant_spans.append((content_start, cursor_clean))
+
+            cursor_marked = end_pos + len(end_marker)
+
+        clean_parts.append(rendered[cursor_marked:])
+        clean_text = "".join(clean_parts)
+        return clean_text, assistant_spans
 
     def _messages_to_text_and_assistant_spans(
         self,

@@ -48,23 +48,24 @@ def _apply_chat_template_if_enabled(
     prompt: str,
     apply_chat_template: bool,
     system_prompt: Optional[str],
-) -> str:
+) -> Tuple[str, bool]:
     if not apply_chat_template:
-        return prompt
+        return prompt, False
 
     chat_template = getattr(tokenizer, "chat_template", None)
     if not chat_template:
-        return prompt
+        return prompt, False
 
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
-    return tokenizer.apply_chat_template(
+    rendered = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
+    return rendered, True
 
 
 def _select_next_token(
@@ -104,11 +105,12 @@ def _prepare_inputs(
     text: str,
     device: torch.device,
     max_input_tokens: Optional[int],
+    add_special_tokens: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     enc = tokenizer(
         text,
         return_tensors="pt",
-        add_special_tokens=True,
+        add_special_tokens=bool(add_special_tokens),
         truncation=(max_input_tokens is not None),
         max_length=max_input_tokens,
     )
@@ -126,6 +128,7 @@ def generate_completion(
     model,
     tokenizer,
     prompt_text: str,
+    prompt_is_chat_templated: bool,
     *,
     device: torch.device,
     max_input_tokens: Optional[int],
@@ -142,6 +145,7 @@ def generate_completion(
         text=prompt_text,
         device=device,
         max_input_tokens=max_input_tokens,
+        add_special_tokens=not prompt_is_chat_templated,
     )
     prompt_len = int(input_ids.shape[1])
     past_key_values = None
@@ -311,6 +315,11 @@ def main() -> None:
     tokenizer = load_tokenizer(cfg)
     model = model.to(device)
     model.eval()
+    if is_main and bool(args.apply_chat_template):
+        if getattr(tokenizer, "chat_template", None):
+            print("Chat template detected; prompts will be rendered via apply_chat_template.")
+        else:
+            print("Chat template requested, but tokenizer has no chat_template; using raw prompts.")
 
     if is_main:
         print(f"Loading dataset {args.dataset} [{args.split}] ...")
@@ -341,7 +350,7 @@ def main() -> None:
         for idx in iterator:
             row = ds[int(idx)]
             prompt = str(row[args.prompt_field])
-            prompt_text = _apply_chat_template_if_enabled(
+            prompt_text, prompt_is_chat_templated = _apply_chat_template_if_enabled(
                 tokenizer=tokenizer,
                 prompt=prompt,
                 apply_chat_template=bool(args.apply_chat_template),
@@ -351,6 +360,7 @@ def main() -> None:
                 model=model,
                 tokenizer=tokenizer,
                 prompt_text=prompt_text,
+                prompt_is_chat_templated=prompt_is_chat_templated,
                 device=device,
                 max_input_tokens=max_input_tokens,
                 max_new_tokens=int(args.max_new_tokens),
