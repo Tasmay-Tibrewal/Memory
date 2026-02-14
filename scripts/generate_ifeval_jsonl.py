@@ -223,10 +223,14 @@ def generate_completions(
     for _ in range(int(max_new_tokens)):
         if use_cache and past_key_values is not None:
             model_input = input_ids[:, -1:]
-            position_offset = input_ids.shape[1] - 1
+            # Use per-row position IDs from true (unmasked) sequence lengths.
+            position_ids = (attention_mask.long().sum(dim=1) - 1).clamp(min=0).unsqueeze(1)
+            position_offset = 0
             model_past = past_key_values
         else:
             model_input = input_ids
+            position_ids = attention_mask.long().cumsum(dim=1) - 1
+            position_ids = position_ids.masked_fill(attention_mask == 0, 0)
             position_offset = 0
             model_past = None
 
@@ -236,6 +240,7 @@ def generate_completions(
             use_cache=bool(use_cache),
             past_key_values=model_past,
             position_offset=position_offset,
+            position_ids=position_ids,
         )
         logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
         if use_cache:
@@ -273,11 +278,7 @@ def generate_completions(
         attention_mask = torch.cat(
             [
                 attention_mask,
-                torch.ones(
-                    (attention_mask.shape[0], 1),
-                    device=attention_mask.device,
-                    dtype=attention_mask.dtype,
-                ),
+                unfinished.to(dtype=attention_mask.dtype).unsqueeze(1),
             ],
             dim=-1,
         )
@@ -378,10 +379,121 @@ def _prefer_tokenizer_default_special_ids(tokenizer, cfg, *, enabled: bool, is_m
         )
 
 
+def _auto_fix_suspicious_special_ids(
+    tokenizer,
+    cfg,
+    *,
+    enabled: bool,
+    prefer_tokenizer_default_special_ids: bool,
+    is_main: bool,
+) -> None:
+    """
+    Defensive fix for clearly suspicious special-ID overrides.
+
+    Typical bad case: config forces bos/eos/pad to the same ID (often 0),
+    while tokenizer-native IDs are distinct (e.g., SmolLM2: 1/2/2).
+    """
+    if not enabled:
+        return
+
+    tokenizer_name = cfg.model.tokenizer_name or cfg.model.base_model_name
+    if tokenizer_name is None:
+        return
+
+    try:
+        canonical = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+    except Exception:
+        return
+
+    current = (tokenizer.bos_token_id, tokenizer.eos_token_id, tokenizer.pad_token_id)
+    canonical_ids = (canonical.bos_token_id, canonical.eos_token_id, canonical.pad_token_id)
+
+    all_equal = (
+        current[0] is not None
+        and current[1] is not None
+        and current[2] is not None
+        and current[0] == current[1] == current[2]
+    )
+    zero_triplet = current == (0, 0, 0)
+    canonical_differs = current != canonical_ids and all(x is not None for x in canonical_ids)
+
+    should_fix = (not prefer_tokenizer_default_special_ids) and canonical_differs and (all_equal or zero_triplet)
+    if not should_fix:
+        if is_main and (not prefer_tokenizer_default_special_ids) and canonical_differs:
+            print(
+                "Warning: tokenizer special IDs differ from tokenizer defaults: "
+                f"current={current}, tokenizer-default={canonical_ids}. "
+                "This may degrade generation quality."
+            )
+        return
+
+    tokenizer.bos_token_id = int(canonical_ids[0])
+    tokenizer.eos_token_id = int(canonical_ids[1])
+    tokenizer.pad_token_id = int(canonical_ids[2])
+    if is_main:
+        print(
+            "Detected suspicious special-ID override and auto-corrected for generation: "
+            f"bos/eos/pad {current} -> {canonical_ids}"
+        )
+
+
+def _load_effective_config(
+    config_path: str,
+    checkpoint_path: Optional[str],
+    *,
+    prefer_checkpoint_config: bool,
+    is_main: bool,
+):
+    """
+    Resolve config source:
+    - explicit config file
+    - checkpoint/config.yaml (if present)
+    """
+    explicit_cfg = load_config(config_path)
+    if not checkpoint_path:
+        return explicit_cfg
+
+    ckpt_cfg_path = Path(checkpoint_path) / "config.yaml"
+    if not ckpt_cfg_path.exists():
+        return explicit_cfg
+
+    ckpt_cfg = load_config(ckpt_cfg_path)
+    if not prefer_checkpoint_config:
+        return explicit_cfg
+
+    if is_main and str(ckpt_cfg_path) != str(Path(config_path)):
+        exp_m = explicit_cfg.model
+        ck_m = ckpt_cfg.model
+        exp_ids = (exp_m.bos_token_id, exp_m.eos_token_id, exp_m.pad_token_id)
+        ck_ids = (ck_m.bos_token_id, ck_m.eos_token_id, ck_m.pad_token_id)
+        if (
+            exp_m.tokenizer_name != ck_m.tokenizer_name
+            or exp_ids != ck_ids
+            or exp_m.chat_template != ck_m.chat_template
+        ):
+            print(
+                "Using checkpoint config.yaml for generation (detected possible config mismatch).\n"
+                f"  explicit config:   {config_path}\n"
+                f"  checkpoint config: {ckpt_cfg_path}\n"
+                f"  tokenizer_name explicit/checkpoint: {exp_m.tokenizer_name} / {ck_m.tokenizer_name}\n"
+                f"  bos/eos/pad explicit/checkpoint:    {exp_ids} / {ck_ids}"
+            )
+    return ckpt_cfg
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate IFEval predictions JSONL")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
     parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint directory")
+    parser.add_argument(
+        "--prefer_checkpoint_config",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "When checkpoint/config.yaml exists, prefer it over --config for model/tokenizer settings "
+            "(default: True)."
+        ),
+    )
     parser.add_argument(
         "--dataset",
         type=str,
@@ -431,12 +543,27 @@ def main() -> None:
     parser.add_argument("--top_p", type=float, default=1.0, help="Top-p sampling")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for batched decoding")
     parser.add_argument(
+        "--debug_prompt_preview_rows",
+        type=int,
+        default=1,
+        help="Print rendered prompt/token preview for first N rows on rank 0 (default: 1, 0 disables).",
+    )
+    parser.add_argument(
         "--prefer_tokenizer_default_special_ids",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
             "Use tokenizer-native BOS/EOS/PAD ids instead of config-overridden ids "
             "(default: True). Helps when old checkpoints used mismatched ids."
+        ),
+    )
+    parser.add_argument(
+        "--auto_fix_suspicious_special_ids",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "If special IDs are suspicious (e.g., bos=eos=pad=0) and differ from tokenizer defaults, "
+            "auto-correct to tokenizer defaults for generation (default: True)."
         ),
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device (e.g., cuda, cuda:0, cpu)")
@@ -470,11 +597,6 @@ def main() -> None:
     if args.batch_size <= 0:
         raise ValueError(f"--batch_size must be > 0, got {args.batch_size}")
 
-    cfg = load_config(args.config)
-    max_input_tokens = (
-        int(args.max_input_tokens) if args.max_input_tokens is not None else int(cfg.training.max_length)
-    )
-
     accelerator = None
     if args.distributed:
         if not ACCELERATE_AVAILABLE:
@@ -490,6 +612,17 @@ def main() -> None:
         is_main = True
         device = torch.device(args.device)
 
+    # Re-resolve config with correct is_main once rank is known.
+    cfg = _load_effective_config(
+        config_path=args.config,
+        checkpoint_path=args.checkpoint,
+        prefer_checkpoint_config=bool(args.prefer_checkpoint_config),
+        is_main=is_main,
+    )
+    max_input_tokens = (
+        int(args.max_input_tokens) if args.max_input_tokens is not None else int(cfg.training.max_length)
+    )
+
     if is_main:
         print(f"Loading model from {args.checkpoint or args.config} ...")
         if accelerator is not None:
@@ -500,6 +633,13 @@ def main() -> None:
         tokenizer,
         cfg,
         enabled=bool(args.prefer_tokenizer_default_special_ids),
+        is_main=is_main,
+    )
+    _auto_fix_suspicious_special_ids(
+        tokenizer,
+        cfg,
+        enabled=bool(args.auto_fix_suspicious_special_ids),
+        prefer_tokenizer_default_special_ids=bool(args.prefer_tokenizer_default_special_ids),
         is_main=is_main,
     )
     model = model.to(device)
@@ -556,6 +696,26 @@ def main() -> None:
                 )
                 prompt_texts.append(prompt_text)
                 prompt_templated.append(is_templated)
+
+            if is_main and start == 0 and int(args.debug_prompt_preview_rows) > 0:
+                n_preview = min(int(args.debug_prompt_preview_rows), len(prompt_texts))
+                for j in range(n_preview):
+                    rendered = prompt_texts[j]
+                    tok_preview = tokenizer(
+                        rendered,
+                        add_special_tokens=not bool(prompt_templated[j]),
+                        truncation=(max_input_tokens is not None),
+                        max_length=max_input_tokens,
+                    )["input_ids"]
+                    print("-" * 80)
+                    print(f"[debug] row={batch_indices[j]} templated={bool(prompt_templated[j])}")
+                    print(f"[debug] raw prompt preview: {prompts[j][:240]!r}")
+                    print(f"[debug] rendered preview:   {rendered[:320]!r}")
+                    print(
+                        "[debug] tokenized length="
+                        f"{len(tok_preview)}, first_ids={tok_preview[:32]}"
+                    )
+                print("-" * 80)
 
             responses = generate_completions(
                 model=model,
