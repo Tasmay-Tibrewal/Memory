@@ -191,7 +191,22 @@ class Trainer:
 
         # Weights-only initialization (fresh run semantics).
         if config.training.init_from_checkpoint:
+            pre_init_lr_snapshot = self._snapshot_optimizer_lrs()
             self._init_model_from_checkpoint(config.training.init_from_checkpoint)
+            post_init_lr_snapshot = self._snapshot_optimizer_lrs()
+            if pre_init_lr_snapshot != post_init_lr_snapshot:
+                raise RuntimeError(
+                    "Optimizer LR groups changed during init_from_checkpoint. "
+                    "This should never happen because init_from_checkpoint loads weights only."
+                )
+            if self.accelerator.is_main_process:
+                formatted = ", ".join(
+                    f"{name}={lr:.6g}" for name, lr in post_init_lr_snapshot
+                )
+                print(
+                    "Verified fresh-run optimizer LR groups after init_from_checkpoint: "
+                    f"{formatted}"
+                )
 
         # Resume full training state if specified.
         if config.training.resume_from_checkpoint:
@@ -665,6 +680,15 @@ class Trainer:
                     f"epoch={self.epoch}, best_loss={self.best_loss:.4f}"
                 )
 
+    def _snapshot_optimizer_lrs(self) -> List[tuple]:
+        """Capture optimizer learning rates by param-group name for sanity checks."""
+        snapshot: List[tuple] = []
+        for idx, group in enumerate(self.optimizer.param_groups):
+            name = str(group.get("name", f"group_{idx}"))
+            lr = float(group.get("lr", 0.0))
+            snapshot.append((name, lr))
+        return snapshot
+
     def _init_model_from_checkpoint(self, checkpoint_path: str) -> None:
         """
         Load only model weights from a checkpoint and keep a fresh training state.
@@ -694,6 +718,33 @@ class Trainer:
             )
 
         self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+
+        # Explicitly do NOT inherit prior run hyperparameters. We never load
+        # checkpoint config/optimizer state in init-from mode.
+        ckpt_cfg_path = checkpoint_dir / "config.yaml"
+        if ckpt_cfg_path.exists():
+            try:
+                ckpt_cfg = load_config(ckpt_cfg_path)
+                current_lrs = self._snapshot_optimizer_lrs()
+                ckpt_memory_lr = float(ckpt_cfg.training.memory_lr)
+                ckpt_memory_bank_lr = (
+                    ckpt_cfg.training.memory_lr
+                    if ckpt_cfg.training.memory_bank_lr is None
+                    else float(ckpt_cfg.training.memory_bank_lr)
+                )
+                ckpt_base_lr = float(ckpt_cfg.training.base_model_lr)
+                ckpt_lora_lr = float(ckpt_cfg.training.lora_lr)
+                if self.accelerator.is_main_process:
+                    print(
+                        "init_from_checkpoint: using CURRENT run optimizer config "
+                        f"(groups={current_lrs}); checkpoint LRs were "
+                        f"(memory={ckpt_memory_lr:.6g}, "
+                        f"memory_bank={ckpt_memory_bank_lr:.6g}, "
+                        f"base={ckpt_base_lr:.6g}, lora={ckpt_lora_lr:.6g})."
+                    )
+            except Exception:
+                # Non-fatal: checkpoint config may be absent/incompatible.
+                pass
 
         # Explicitly keep a fresh trainer state.
         self.global_step = 0
