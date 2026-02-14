@@ -6,6 +6,7 @@ Default suite:
 - mmlu
 - hellaswag
 - arc_challenge
+- arc_easy
 - winogrande
 - boolq
 - openbookqa
@@ -24,6 +25,7 @@ DEFAULT_BENCHMARKS = [
     "mmlu",
     "hellaswag",
     "arc_challenge",
+    "arc_easy",
     "winogrande",
     "boolq",
     "openbookqa",

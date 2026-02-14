@@ -166,6 +166,11 @@ python scripts/eval_triviaqa.py --config configs/base_small.yaml --checkpoint ou
 # Run the full suite and aggregate scores
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
 
+# Generate JSONL answers for external IFEval scoring
+python scripts/generate_ifeval_jsonl.py --config configs/ift_base_model.yaml \
+  --checkpoint outputs/final_model \
+  --output outputs/ifeval/predictions.jsonl
+
 # Suite with manual few-shot prompts (default 5) and full-choice-text scoring
 python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model \
   --mmlu_shots 5 --mcq_shots 5 \
@@ -224,6 +229,7 @@ Memory/
 â”‚   â”œâ”€â”€ eval_mmlu.py         # MMLU multiple-choice accuracy
 â”‚   â”œâ”€â”€ eval_mcq_benchmark.py # Generic MCQ benchmark evaluator
 â”‚   â”œâ”€â”€ eval_pretrain_suite.py # Run benchmark suite + aggregate
+â”‚   â”œâ”€â”€ generate_ifeval_jsonl.py # Generate IFEval prompt/response JSONL
 â”‚   â””â”€â”€ inference.py         # Generation script
 â”‚
 â”œâ”€â”€ configs/                  # Example configurations

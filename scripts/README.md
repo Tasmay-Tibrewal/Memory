@@ -17,6 +17,7 @@ scripts/
 ├── eval_openbookqa.py     # OpenBookQA accuracy
 ├── eval_triviaqa.py       # TriviaQA top-alias perplexity
 ├── eval_pretrain_suite.py # Run all benchmark scripts + aggregate
+├── generate_ifeval_jsonl.py # Generate prompt/response JSONL for external IFEval scoring
 ├── inference.py           # Text generation
 └── estimate_flops.py      # Analytical FLOPs estimator
 ```
@@ -207,6 +208,28 @@ Notes:
 - `manual` uses handcrafted benchmark/task examples and shuffles option order per seed for label diversity.
 - `--scoring_mode choice_text` scores full option text; `--scoring_mode label` scores `A/B/C/...` label tokens.
 - `eval_triviaqa.py` uses question-only prompts (no context), samples few-shot examples from a non-test split by default (`--shots 5`), selects the highest full-sequence-probability alias per question, and reports top-alias perplexity (plus token-weighted corpus perplexity).
+- `eval_pretrain_suite.py` defaults: `mmlu, hellaswag, arc_challenge, arc_easy, winogrande, boolq, openbookqa, triviaqa`.
+
+---
+
+## `generate_ifeval_jsonl.py` - IFEval JSONL Generator
+
+Generates one JSONL line per prompt for external IFEval repos/tools.
+
+### Usage
+
+```bash
+python scripts/generate_ifeval_jsonl.py \
+  --config configs/ift_base_model.yaml \
+  --checkpoint outputs/final_model \
+  --output outputs/ifeval/predictions.jsonl
+```
+
+### Notes
+
+- Default dataset: `google/IFEval`, split `train`.
+- Output rows contain: `key`, `prompt`, `response`, `model_id` (plus instruction metadata when present).
+- Chat template application is enabled by default when tokenizer provides one (`--no-apply_chat_template` to disable).
 
 ---
 
