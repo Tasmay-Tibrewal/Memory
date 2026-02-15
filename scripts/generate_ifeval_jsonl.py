@@ -184,6 +184,7 @@ def generate_completions(
     top_p: float,
     use_cache: bool,
     stop_on_eos: bool,
+    ban_special_tokens: bool,
 ) -> List[str]:
     if len(prompt_texts) == 0:
         return []
@@ -224,6 +225,13 @@ def generate_completions(
     batch_size = int(input_ids.shape[0])
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=device)
     eos_id = tokenizer.eos_token_id
+    special_ids = sorted(
+        {
+            int(i)
+            for i in getattr(tokenizer, "all_special_ids", [])
+            if isinstance(i, int) and 0 <= int(i) < int(tokenizer.vocab_size)
+        }
+    )
     finished_fill_id = (
         int(eos_id)
         if eos_id is not None
@@ -270,6 +278,14 @@ def generate_completions(
             step_logits = step_logits.clone()
             step_logits[~unfinished] = float("-inf")
             step_logits[~unfinished, safe_id] = 0.0
+
+        if ban_special_tokens and len(special_ids) > 0 and bool(torch.any(unfinished)):
+            # Avoid empty outputs in greedy mode caused by repeatedly selecting
+            # special tokens that are then stripped by skip_special_tokens=True.
+            step_logits = step_logits.clone()
+            row_idx = torch.nonzero(unfinished, as_tuple=False).flatten()
+            col_idx = torch.tensor(special_ids, device=step_logits.device, dtype=torch.long)
+            step_logits[row_idx.unsqueeze(1), col_idx.unsqueeze(0)] = float("-inf")
 
         next_token = _select_next_token(
             step_logits,
@@ -322,6 +338,7 @@ def generate_completion(
     top_p: float,
     use_cache: bool,
     stop_on_eos: bool,
+    ban_special_tokens: bool,
 ) -> str:
     return generate_completions(
         model=model,
@@ -337,6 +354,7 @@ def generate_completion(
         top_p=top_p,
         use_cache=use_cache,
         stop_on_eos=stop_on_eos,
+        ban_special_tokens=ban_special_tokens,
     )[0]
 
 
@@ -568,6 +586,15 @@ def main() -> None:
         default=True,
         help="Stop generation when EOS token is emitted (default: True)",
     )
+    parser.add_argument(
+        "--ban_special_tokens",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Mask tokenizer special tokens from next-token selection on unfinished rows. "
+            "Useful when greedy decode collapses to empty outputs."
+        ),
+    )
     parser.add_argument("--do_sample", action="store_true", help="Use sampling (default: greedy decode)")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature")
     parser.add_argument("--top_k", type=int, default=0, help="Top-k sampling (0 disables)")
@@ -781,6 +808,7 @@ def main() -> None:
                 top_p=float(args.top_p),
                 use_cache=bool(args.use_cache),
                 stop_on_eos=bool(args.stop_on_eos),
+                ban_special_tokens=bool(args.ban_special_tokens),
             )
 
             for idx, row, prompt, response in zip(batch_indices, rows, prompts, responses):
