@@ -225,13 +225,25 @@ def generate_completions(
     batch_size = int(input_ids.shape[0])
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=device)
     eos_id = tokenizer.eos_token_id
-    special_ids = sorted(
-        {
-            int(i)
-            for i in getattr(tokenizer, "all_special_ids", [])
-            if isinstance(i, int) and 0 <= int(i) < int(tokenizer.vocab_size)
-        }
-    )
+    # Some tokenizers expose only a subset of special tokens in all_special_ids.
+    # For SmolLM2, tokens like <repo_name> can be marked special in
+    # added_tokens_decoder but absent from all_special_ids.
+    special_id_set = {
+        int(i)
+        for i in getattr(tokenizer, "all_special_ids", [])
+        if isinstance(i, int) and 0 <= int(i) < int(tokenizer.vocab_size)
+    }
+    added_decoder = getattr(tokenizer, "added_tokens_decoder", {})
+    for i, tok in added_decoder.items():
+        try:
+            tid = int(i)
+        except Exception:
+            continue
+        if not (0 <= tid < int(tokenizer.vocab_size)):
+            continue
+        if bool(getattr(tok, "special", False)):
+            special_id_set.add(tid)
+    special_ids = sorted(special_id_set)
     special_ids_tensor = (
         torch.tensor(special_ids, device=device, dtype=torch.long) if len(special_ids) > 0 else None
     )
