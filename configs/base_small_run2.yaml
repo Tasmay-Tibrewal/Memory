@@ -107,10 +107,10 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 6e-4
-  memory_bank_lr: 6e-4 # Optional override for memory bank params only
-  lora_lr: 3e-4
-  base_model_lr: 3e-4 # Same for from-scratch
+  memory_lr: 1.5e-4
+  memory_bank_lr: 1.5e-4 # Optional override for memory bank params only
+  lora_lr: 1.5e-4
+  base_model_lr: 1.5e-4 # Same for from-scratch
 
   # Training mode
   training_mode: pretraining
@@ -151,8 +151,8 @@ training:
   batch_size: 32
   gradient_accumulation_steps: 4 # smaller, since smaller train corpus
   # num_epochs: null
-  max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
-  warmup_steps: 250 # smaller warmup for smaller training corpus
+  max_steps: 14400 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
+  warmup_steps: 150 # smaller warmup for smaller training corpus
 
   # Optimizer
   optimizer: adamw
@@ -169,7 +169,7 @@ training:
   wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
   # decay_start_ratio: 0.85 # Optional global override for decay start (ratio of steps till decay start)
   # resolved decay start overrides stable, stable = total - (warmup + decay steps)
-  decay_start_step: 8160
+  decay_start_step: 14000
 
   # Mixed precision
   mixed_precision: bf16
@@ -184,8 +184,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-pretrain-run5
+  wandb_run_name: run-full-pretrain-run5-continued
 
   # Output
-  output_dir: ./outputs/base_small_run5
-  resume_from_checkpoint: null
+  output_dir: ./outputs/base_small_run5_continued
+  resume_from_checkpoint: ./outputs/base_small_run5/checkpoint-9600

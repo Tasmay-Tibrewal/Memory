@@ -21,11 +21,11 @@ model:
   # Tokenizer (must match vocab_size for from-scratch)
   tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
   # Force the exact SmolLM-Instruct chat template for training/eval/inference.
-  chat_template: >-
-    {% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}
-  bos_token_id: 0
-  eos_token_id: 0
-  pad_token_id: 0
+  # chat_template: >-
+  #   {% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}
+  # bos_token_id: 0
+  # eos_token_id: 0
+  # pad_token_id: 0
 
   # Standard settings
   use_rope: true
@@ -192,9 +192,9 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-ift-run1-frozen-bank
+  wandb_run_name: run-full-ift-run2-frozen-bank
 
   # Output
-  output_dir: ./outputs/base_small_ift_run1_frozen_bank
+  output_dir: ./outputs/base_small_ift_run2_frozen_bank
   resume_from_checkpoint: null
   init_from_checkpoint: ./outputs/base_small_run5/final_model

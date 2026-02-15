@@ -21,11 +21,11 @@ model:
   # Tokenizer (must match vocab_size for from-scratch)
   tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
   # Force the exact SmolLM-Instruct chat template for training/eval/inference.
-  chat_template: >-
-    {% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}
-  bos_token_id: 0
-  eos_token_id: 0
-  pad_token_id: 0
+  # chat_template: >-
+  #   {% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}{{ '<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n' }}{% endif %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}
+  # bos_token_id: 0
+  # eos_token_id: 0
+  # pad_token_id: 0
 
   # Standard settings
   use_rope: true
@@ -192,9 +192,9 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-vanilla-small-ift-run1
+  wandb_run_name: run-vanilla-small-ift-run2
 
   # Output
-  output_dir: ./outputs/vanilla_control_ift_small_run1
+  output_dir: ./outputs/vanilla_control_ift_small_run2
   resume_from_checkpoint: null
   init_from_checkpoint: ./outputs/vanilla_control_run6-small/final_model
