@@ -232,6 +232,9 @@ def generate_completions(
             if isinstance(i, int) and 0 <= int(i) < int(tokenizer.vocab_size)
         }
     )
+    special_ids_tensor = (
+        torch.tensor(special_ids, device=device, dtype=torch.long) if len(special_ids) > 0 else None
+    )
     finished_fill_id = (
         int(eos_id)
         if eos_id is not None
@@ -295,6 +298,22 @@ def generate_completions(
             top_p=top_p,
         )
 
+        # Re-enforce non-special-token selection on unfinished rows.
+        # This guards against any downstream fallback path that could re-admit
+        # special tokens and collapse decode to empty text.
+        if (
+            ban_special_tokens
+            and special_ids_tensor is not None
+            and bool(torch.any(unfinished))
+        ):
+            chosen = next_token.squeeze(1)
+            bad = unfinished & torch.isin(chosen, special_ids_tensor)
+            if bool(torch.any(bad)):
+                alt_logits = step_logits[bad].clone()
+                alt_logits[:, special_ids_tensor] = -1e9
+                alt = torch.argmax(alt_logits, dim=-1, keepdim=True)
+                next_token[bad] = alt
+
         # Keep completed rows stable while other rows continue generating.
         if not bool(torch.all(unfinished)):
             fill = torch.full_like(next_token, int(finished_fill_id))
@@ -318,7 +337,14 @@ def generate_completions(
     generated_ids = input_ids[:, prompt_len:]
     responses: List[str] = []
     for row in generated_ids:
-        responses.append(tokenizer.decode(row, skip_special_tokens=True).strip())
+        text = tokenizer.decode(row, skip_special_tokens=True)
+        # If decode collapses to empty (all-special or all-whitespace), keep a
+        # raw decode for observability instead of silently returning "".
+        if text.strip() == "":
+            text = tokenizer.decode(row, skip_special_tokens=False)
+            responses.append(text)
+        else:
+            responses.append(text.strip())
     return responses
 
 
