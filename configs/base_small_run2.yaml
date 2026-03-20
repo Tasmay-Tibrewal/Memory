@@ -20,9 +20,9 @@ model:
 
   # Tokenizer (must match vocab_size for from-scratch)
   tokenizer_name: HuggingFaceTB/SmolLM2-135M
-  bos_token_id: 0
-  eos_token_id: 0
-  pad_token_id: 0
+  bos_token_id: 1
+  eos_token_id: 2
+  pad_token_id: 2
 
   # Standard settings
   use_rope: true
@@ -32,8 +32,8 @@ model:
   hidden_activation: swiglu
   initializer_range: 0.02
   # output scaling for residuals by 1/sqrt(3d) -> ideally it is 1/sqrt(2d) for self-attn, mlp; but here we have a memory layer also, thus 1/sqrt(3d)
-  self_attn_wo_init_std: 0.00378     # Optional std override for self-attn W_o; null => initializer_range
-  mlp_down_proj_init_std: 0.00378    # Optional std override for MLP down_proj; null => initializer_range
+  self_attn_wo_init_std: 0.00289     # Optional std override for self-attn W_o; null => initializer_range
+  mlp_down_proj_init_std: 0.00289    # Optional std override for MLP down_proj; null => initializer_range
 
   tie_embeddings: true
   use_rms_norm: true
@@ -107,10 +107,10 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 1.5e-4
-  memory_bank_lr: 1.5e-4 # Optional override for memory bank params only
-  lora_lr: 1.5e-4
-  base_model_lr: 1.5e-4 # Same for from-scratch
+  memory_lr: 1.2e-3
+  memory_bank_lr: 1.2e-3 # Optional override for memory bank params only
+  lora_lr: 3e-4
+  base_model_lr: 3e-4 # Same for from-scratch
 
   # Training mode
   training_mode: pretraining
@@ -151,8 +151,8 @@ training:
   batch_size: 32
   gradient_accumulation_steps: 4 # smaller, since smaller train corpus
   # num_epochs: null
-  max_steps: 14400 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
-  warmup_steps: 150 # smaller warmup for smaller training corpus
+  max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
+  warmup_steps: 250 # smaller warmup for smaller training corpus
 
   # Optimizer
   optimizer: adamw
@@ -169,7 +169,7 @@ training:
   wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
   # decay_start_ratio: 0.85 # Optional global override for decay start (ratio of steps till decay start)
   # resolved decay start overrides stable, stable = total - (warmup + decay steps)
-  decay_start_step: 14000
+  decay_start_step: 8160
 
   # Mixed precision
   mixed_precision: bf16
@@ -184,8 +184,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-pretrain-run5-continued
+  wandb_run_name: run-full-pretrain-run15-mem-ultra-high-lr
 
   # Output
-  output_dir: ./outputs/base_small_run5_continued
-  resume_from_checkpoint: ./outputs/base_small_run5/checkpoint-9600
+  output_dir: ./outputs/base_small_run15_mem_ultra_high_lr
+  resume_from_checkpoint: null
