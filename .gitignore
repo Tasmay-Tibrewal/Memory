@@ -4,7 +4,11 @@ __pycache__
 .claude/
 .python-version
 ddp_debug.log
-outputs/
+# outputs/
+*.bin
+*.pkl
+*.pt
+*.safetensors
 wandb/
 .tmp_upstream/
 checkpoints/
