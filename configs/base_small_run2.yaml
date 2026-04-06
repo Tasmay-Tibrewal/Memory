@@ -49,7 +49,7 @@ memory:
   vanilla_mode: false
 
   # Memory bank settings
-  num_memory_tokens: 262208
+  num_memory_tokens: 131136
   memory_dim: null # Uses hidden_dim
   memory_num_heads: 12 # null => fallback to model.num_heads for memory cross-attn
   memory_num_kv_heads: 12 # null => fallback to model.num_kv_heads (or model.num_heads if null)
@@ -69,7 +69,7 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 4097 # 256 (to be routed) + 1 (shared)
+  num_chapters: 2049 # 256 (to be routed) + 1 (shared)
   top_k_chapters: 64
   num_shared_chapters: 1 # First N chapters are always included for every sample
   routed_scaling_factor: 2.5 # Scales routed chapter weights relative to shared chapters
@@ -107,10 +107,10 @@ memory:
 
 training:
   # Learning rates
-  memory_lr: 1.2e-3
-  memory_bank_lr: 1.2e-3 # Optional override for memory bank params only
-  lora_lr: 3e-4
-  base_model_lr: 3e-4 # Same for from-scratch
+  memory_lr: 13.5e-4
+  memory_bank_lr: 13.5e-4 # Optional override for memory bank params only
+  lora_lr: 13.5e-4
+  base_model_lr: 9e-4 # Same for from-scratch
 
   # Training mode
   training_mode: pretraining
@@ -184,8 +184,8 @@ training:
   logging_steps: 10
   log_to_wandb: true
   wandb_project: memory-transformer
-  wandb_run_name: run-full-pretrain-run15-mem-ultra-high-lr
+  wandb_run_name: run-new-full-pretrain-run26-new-lr-131K
 
   # Output
-  output_dir: ./outputs/base_small_run15_mem_ultra_high_lr
+  output_dir: ./outputs/base_small_run26_new_new_lr_131K
   resume_from_checkpoint: null
