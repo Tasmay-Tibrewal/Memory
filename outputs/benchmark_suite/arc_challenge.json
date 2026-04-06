@@ -1,0 +1,13 @@
+{
+  "benchmark": "arc_challenge",
+  "dataset_name": "ai2_arc",
+  "subset": "ARC-Challenge",
+  "eval_split": "validation",
+  "fewshot_split": "train",
+  "shots": 5,
+  "fewshot_mode": "manual",
+  "scoring_mode": "choice_text",
+  "accuracy": 0.2842809364548495,
+  "correct": 85,
+  "total": 299
+}

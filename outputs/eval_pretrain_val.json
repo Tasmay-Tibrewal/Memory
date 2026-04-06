@@ -1,0 +1,8 @@
+{
+  "perplexity": 24.603355005500703,
+  "avg_loss": 3.2028828159765186,
+  "dataset": "Tasmay-Tib/fineweb-edu-10bt-split",
+  "split": "eval",
+  "checkpoint": "checkpoints/base_small_ift_run1_frozen_bank/checkpoint-3200/",
+  "num_samples": 10000
+}

@@ -1,0 +1,16 @@
+{
+  "benchmark": "triviaqa",
+  "dataset_name": "mandarjoshi/trivia_qa",
+  "dataset_config": "rc.nocontext",
+  "eval_split": "validation",
+  "fewshot_split": "train",
+  "shots": 5,
+  "max_length": 2048,
+  "avg_top_alias_ppl": 32986.524350442916,
+  "corpus_ppl_top_alias": 97.74122045295633,
+  "avg_per_question_ppl": 32986.524350442916,
+  "num_questions": 17944,
+  "avg_aliases_per_question": 17.217565760142666,
+  "config": "/home/fractal_admin/tasmay_tibrewal/Memory/checkpoints/base_small_ift_run1_frozen_bank/config.yaml",
+  "checkpoint": "checkpoints/base_small_ift_run1_frozen_bank/checkpoint-3200/"
+}

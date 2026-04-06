@@ -1,0 +1,13 @@
+{
+  "benchmark": "winogrande",
+  "dataset_name": "winogrande",
+  "subset": "winogrande_xl",
+  "eval_split": "validation",
+  "fewshot_split": "train",
+  "shots": 5,
+  "fewshot_mode": "manual",
+  "scoring_mode": "choice_text",
+  "accuracy": 0.5043409629044988,
+  "correct": 639,
+  "total": 1267
+}
