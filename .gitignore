@@ -10,6 +10,8 @@ ddp_debug.log
 *.pt
 *.safetensors
 wandb/
+smoke*/
+smoke*.*
 .tmp_upstream/
 checkpoints/
 # some kernel testing -> not required for the repo

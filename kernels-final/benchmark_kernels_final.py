@@ -294,15 +294,55 @@ def naive_reference_weighted(
     return out.to(q.dtype)
 
 
+def naive_reference_weighted_joint_bias(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    block_indices: torch.Tensor, chapter_weights: torch.Tensor,
+    BS: int, scale: float,
+) -> torch.Tensor:
+    """Reference for single-softmax weighted routing with log-weight bias.
+
+    logits(token in chapter i) = qk * scale + log(w_i)
+    """
+    assert q.shape[0] == 1
+    _, TQ, HQ, D = q.shape
+    _, _, HK, _ = k.shape
+    topk = block_indices.shape[-1]
+    assert HQ % HK == 0
+    G = HQ // HK
+    out = torch.zeros((1, TQ, HQ, D), device=q.device, dtype=torch.float32)
+    eps = 1e-20
+
+    for hk in range(HK):
+        for t in range(TQ):
+            for g in range(G):
+                hq = hk * G + g
+                q_t = q[0, t, hq, :].float() * scale
+                logits = []
+                values = []
+                for i in range(topk):
+                    ch_idx = block_indices[0, t, hk, i].to(torch.int64)
+                    tok_start = ch_idx * BS
+                    tok_end = tok_start + BS
+                    kk_i = k[0, tok_start:tok_end, hk, :].float()
+                    vv_i = v[0, tok_start:tok_end, hk, :].float()
+                    scores_i = q_t @ kk_i.T
+                    scores_i = scores_i + torch.log(chapter_weights[0, t, i].float().clamp_min(eps))
+                    logits.append(scores_i)
+                    values.append(vv_i)
+                logits_cat = torch.cat(logits, dim=0)
+                values_cat = torch.cat(values, dim=0)
+                p = torch.softmax(logits_cat, dim=-1)
+                out[0, t, hq, :] = p @ values_cat
+
+    return out.to(q.dtype)
+
+
 # ===========================================================================
 #  Kernel import helpers
 # ===========================================================================
 
 def _import_kernel(version: str):
-    """Import FSA_topk_sparse_attention_bthd from the specified kernel version.
-
-    Returns (fn, error_string).  fn is None on failure.
-    """
+    """Import unweighted/weighted sparse attention entrypoints for a kernel version."""
     mod_name = f"kernel_{version}"
     root_dir = Path(__file__).resolve().parent
     mod_file = root_dir / f"{mod_name}.py"
@@ -320,13 +360,15 @@ def _import_kernel(version: str):
         fn = getattr(mod, "FSA_topk_sparse_attention_bthd", None)
         if fn is None:
             return None, f"{mod_name} has no FSA_topk_sparse_attention_bthd"
-        return fn, None
+        weighted_fn = getattr(mod, "FSA_topk_sparse_attention_weighted_bthd", None)
+        weighted_semantics = getattr(mod, "FSA_WEIGHTED_SEMANTICS", "exact_moe")
+        return {"unweighted": fn, "weighted": weighted_fn, "weighted_semantics": weighted_semantics}, None
     except Exception as e:
         return None, f"import error for {mod_name}: {e}"
 
 
-def import_kernels(versions: List[str]) -> Dict[str, Tuple[Optional[Callable], Optional[str]]]:
-    """Import requested kernel versions.  Returns {version: (fn_or_None, err_or_None)}."""
+def import_kernels(versions: List[str]) -> Dict[str, Tuple[Optional[Dict[str, Optional[Callable]]], Optional[str]]]:
+    """Import requested kernel versions. Returns {version: (kernel_info_or_None, err_or_None)}."""
     result = {}
     for v in versions:
         fn, err = _import_kernel(v)
@@ -339,11 +381,14 @@ def import_kernels(versions: List[str]) -> Dict[str, Tuple[Optional[Callable], O
 # ===========================================================================
 
 def kernel_forward_unweighted(
-    kernel_fn: Callable,
+    kernel_info: Dict[str, Optional[Callable]],
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     block_indices: torch.Tensor, BS: int, scale: float,
 ) -> torch.Tensor:
     """Single kernel call with all top-k chapters (joint softmax)."""
+    kernel_fn = kernel_info["unweighted"]
+    if kernel_fn is None:
+        raise RuntimeError("Kernel info is missing unweighted entrypoint.")
     return kernel_fn(
         q_bthd=q,
         k_bthd=k,
@@ -355,8 +400,8 @@ def kernel_forward_unweighted(
     )
 
 
-def kernel_forward_weighted(
-    kernel_fn: Callable,
+def kernel_forward_weighted_legacy(
+    kernel_info: Dict[str, Optional[Callable]],
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     block_indices: torch.Tensor, chapter_weights: torch.Tensor,
     BS: int, scale: float,
@@ -372,6 +417,9 @@ def kernel_forward_weighted(
 
     chapter_weights: [B, TQ, topk]
     """
+    kernel_fn = kernel_info["unweighted"]
+    if kernel_fn is None:
+        raise RuntimeError("Kernel info is missing unweighted entrypoint.")
     B, T, HQ, D = q.shape
     topk = block_indices.shape[-1]
 
@@ -404,14 +452,14 @@ def kernel_forward_weighted(
             current_stream.wait_event(e)
 
         # Weighted accumulation on default stream
-        accum = q.new_zeros(B, T, HQ, D)
+        accum = torch.zeros((B, T, HQ, D), device=q.device, dtype=torch.float32)
         for i in range(topk):
-            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)   # [B, TQ, 1, 1]
-            accum = accum + chapter_outputs[i] * w_i
+            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+            accum = accum + chapter_outputs[i].to(torch.float32) * w_i
 
     else:
         # -- Sequential / single-chapter path --
-        accum = q.new_zeros(B, T, HQ, D)
+        accum = torch.zeros((B, T, HQ, D), device=q.device, dtype=torch.float32)
         for i in range(topk):
             single_idx = block_indices[:, :, :, i:i + 1]
             chapter_out = kernel_fn(
@@ -423,10 +471,60 @@ def kernel_forward_weighted(
                 softmax_scale=scale,
                 disable_causal_mask=True,
             )
-            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)
-            accum = accum + chapter_out * w_i
+            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+            accum = accum + chapter_out.to(torch.float32) * w_i
 
-    return accum
+    return accum.to(dtype=q.dtype)
+
+
+def kernel_forward_weighted_fused(
+    kernel_info: Dict[str, Optional[Callable]],
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    block_indices: torch.Tensor, chapter_weights: torch.Tensor,
+    BS: int, scale: float,
+) -> torch.Tensor:
+    """Single-call exact weighted MoE path for kernels that expose it."""
+    weighted_fn = kernel_info.get("weighted")
+    if weighted_fn is None:
+        raise RuntimeError("Kernel does not expose FSA_topk_sparse_attention_weighted_bthd.")
+    return weighted_fn(
+        q_bthd=q,
+        k_bthd=k,
+        v_bthd=v,
+        block_indices_bths=block_indices,
+        chapter_weights_bts=chapter_weights,
+        block_size=BS,
+        softmax_scale=scale,
+        disable_causal_mask=True,
+    )
+
+
+def kernel_forward_weighted(
+    kernel_info: Dict[str, Optional[Callable]],
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    block_indices: torch.Tensor, chapter_weights: torch.Tensor,
+    BS: int, scale: float,
+    *,
+    weighted_impl: str = "auto",
+    return_impl: bool = False,
+):
+    """Dispatch weighted MoE attention to legacy-loop or fused-weighted implementation."""
+    impl = str(weighted_impl).strip().lower()
+    if impl not in {"auto", "legacy_loop", "fused_weighted"}:
+        raise ValueError(f"Unsupported weighted_impl='{weighted_impl}'.")
+
+    weighted_fn = kernel_info.get("weighted")
+    use_fused = (impl == "fused_weighted") or (impl == "auto" and weighted_fn is not None)
+    if use_fused:
+        out = kernel_forward_weighted_fused(kernel_info, q, k, v, block_indices, chapter_weights, BS, scale)
+        impl_name = "fused_weighted"
+    else:
+        out = kernel_forward_weighted_legacy(kernel_info, q, k, v, block_indices, chapter_weights, BS, scale)
+        impl_name = "legacy_loop"
+
+    if return_impl:
+        return out, impl_name
+    return out
 
 
 # ===========================================================================
@@ -528,9 +626,10 @@ def time_fwd_bwd(
 
 def check_correctness(
     cfg: Config,
-    kernels: Dict[str, Callable],
+    kernels: Dict[str, Dict[str, Optional[Callable]]],
     *,
     run_weighted: bool = True,
+    weighted_impl: str = "auto",
     sanity_TQ: int = 128,
     sanity_M: int = 16,
     sanity_BS: Optional[int] = None,
@@ -585,7 +684,7 @@ def check_correctness(
     # Track results
     results: Dict[str, Dict[str, str]] = {}  # {kernel: {mode: PASS/FAIL}}
 
-    for vname, kernel_fn in kernels.items():
+    for vname, kernel_info in kernels.items():
         results[vname] = {}
 
         # ----------------------------------------------------------
@@ -608,7 +707,7 @@ def check_correctness(
             try:
                 with torch.no_grad():
                     o_kern = kernel_forward_unweighted(
-                        kernel_fn, x["q"].detach(), x["k"].detach(), x["v"].detach(),
+                        kernel_info, x["q"].detach(), x["k"].detach(), x["v"].detach(),
                         x["block_indices"], red.BS, red.scale,
                     )
                 torch.testing.assert_close(o_kern, o_ref, atol=atol_fwd, rtol=rtol_fwd)
@@ -635,7 +734,7 @@ def check_correctness(
                 k3 = x["k"].detach().clone().requires_grad_(True)
                 v3 = x["v"].detach().clone().requires_grad_(True)
                 o3 = kernel_forward_unweighted(
-                    kernel_fn, q3, k3, v3, x["block_indices"], red.BS, red.scale,
+                    kernel_info, q3, k3, v3, x["block_indices"], red.BS, red.scale,
                 )
                 (o3 * dO).sum().backward()
                 torch.testing.assert_close(q3.grad, dq_ref, atol=atol_bwd, rtol=rtol_bwd)
@@ -662,6 +761,8 @@ def check_correctness(
 
         print(f"  [{vname}] Weighted (MoE) correctness...", end=" ", flush=True)
         ok_weighted = True
+        weighted_impl_name = None
+        weighted_semantics = kernel_info.get("weighted_semantics", "exact_moe")
         for trial in range(num_checks):
             seed = 5678 + trial
             x = make_inputs(red, seed=seed)
@@ -669,19 +770,29 @@ def check_correctness(
 
             # Forward reference (no grad)
             with torch.no_grad():
-                o_ref_w = naive_reference_weighted(
-                    x["q"].detach(), x["k"].detach(), x["v"].detach(),
-                    x["block_indices"], cw.detach(), red.BS, red.scale,
-                )
+                if weighted_semantics == "joint_bias":
+                    o_ref_w = naive_reference_weighted_joint_bias(
+                        x["q"].detach(), x["k"].detach(), x["v"].detach(),
+                        x["block_indices"], cw.detach(), red.BS, red.scale,
+                    )
+                else:
+                    o_ref_w = naive_reference_weighted(
+                        x["q"].detach(), x["k"].detach(), x["v"].detach(),
+                        x["block_indices"], cw.detach(), red.BS, red.scale,
+                    )
 
             # Forward kernel (weighted)
             try:
                 with torch.no_grad():
                     o_kern_w = kernel_forward_weighted(
-                        kernel_fn,
+                        kernel_info,
                         x["q"].detach(), x["k"].detach(), x["v"].detach(),
                         x["block_indices"], cw.detach(), red.BS, red.scale,
+                        weighted_impl=weighted_impl,
+                        return_impl=True,
                     )
+                    if isinstance(o_kern_w, tuple):
+                        o_kern_w, weighted_impl_name = o_kern_w
                 torch.testing.assert_close(o_kern_w, o_ref_w, atol=atol_fwd, rtol=rtol_fwd)
             except Exception as e:
                 print(f"FAIL (trial {trial+1}, forward)")
@@ -697,7 +808,10 @@ def check_correctness(
             k2 = x["k"].detach().clone().requires_grad_(True)
             v2 = x["v"].detach().clone().requires_grad_(True)
             cw2 = cw.detach().clone().requires_grad_(True)
-            o2_w = naive_reference_weighted(q2, k2, v2, x["block_indices"], cw2, red.BS, red.scale)
+            if weighted_semantics == "joint_bias":
+                o2_w = naive_reference_weighted_joint_bias(q2, k2, v2, x["block_indices"], cw2, red.BS, red.scale)
+            else:
+                o2_w = naive_reference_weighted(q2, k2, v2, x["block_indices"], cw2, red.BS, red.scale)
             (o2_w * dO_w).sum().backward()
             dq_ref_w = q2.grad.detach()
             dk_ref_w = k2.grad.detach()
@@ -711,7 +825,8 @@ def check_correctness(
                 v3 = x["v"].detach().clone().requires_grad_(True)
                 cw3 = cw.detach().clone().requires_grad_(True)
                 o3_w = kernel_forward_weighted(
-                    kernel_fn, q3, k3, v3, x["block_indices"], cw3, red.BS, red.scale,
+                    kernel_info, q3, k3, v3, x["block_indices"], cw3, red.BS, red.scale,
+                    weighted_impl=weighted_impl,
                 )
                 (o3_w * dO_w).sum().backward()
 
@@ -726,7 +841,10 @@ def check_correctness(
                 break
 
         if ok_weighted:
-            print("PASS")
+            if weighted_impl_name is not None:
+                print(f"PASS ({weighted_impl_name})")
+            else:
+                print("PASS")
             results[vname]["weighted"] = "PASS"
         else:
             results[vname]["weighted"] = "FAIL"
@@ -750,9 +868,10 @@ def check_correctness(
 
 def run_timing(
     cfg: Config,
-    kernels: Dict[str, Callable],
+    kernels: Dict[str, Dict[str, Optional[Callable]]],
     *,
     run_weighted: bool = True,
+    weighted_impl: str = "auto",
     iters: int = 5,
     warmup: int = 2,
     fwd_only: bool = False,
@@ -777,13 +896,13 @@ def run_timing(
 
     rows: List[Tuple[str, str, float, Optional[float]]] = []
 
-    for vname, kernel_fn in kernels.items():
+    for vname, kernel_info in kernels.items():
         # ---- Unweighted ----
         print(f"  [{vname}] Timing unweighted...", end=" ", flush=True)
         try:
             def fwd_uw():
                 return kernel_forward_unweighted(
-                    kernel_fn,
+                    kernel_info,
                     x["q"], x["k"], x["v"], x["block_indices"],
                     cfg.BS, cfg.scale,
                 )
@@ -800,7 +919,7 @@ def run_timing(
                     k = x["k"].detach().clone().requires_grad_(True)
                     v = x["v"].detach().clone().requires_grad_(True)
                     return kernel_forward_unweighted(
-                        kernel_fn, q, k, v, x["block_indices"], cfg.BS, cfg.scale,
+                        kernel_info, q, k, v, x["block_indices"], cfg.BS, cfg.scale,
                     )
 
                 def loss_fn(o):
@@ -819,17 +938,25 @@ def run_timing(
         # ---- Weighted (MoE) ----
         print(f"  [{vname}] Timing weighted (MoE)...", end=" ", flush=True)
         try:
+            _, active_weighted_impl = kernel_forward_weighted(
+                kernel_info,
+                x["q"].detach(), x["k"].detach(), x["v"].detach(),
+                x["block_indices"], cw.detach(), cfg.BS, cfg.scale,
+                weighted_impl=weighted_impl,
+                return_impl=True,
+            )
             def fwd_wt():
                 return kernel_forward_weighted(
-                    kernel_fn,
+                    kernel_info,
                     x["q"], x["k"], x["v"], x["block_indices"],
                     cw, cfg.BS, cfg.scale,
+                    weighted_impl=weighted_impl,
                 )
 
             if fwd_only:
                 fwd_ms = time_fwd_only(fwd_wt, iters=iters, warmup=warmup)
                 rows.append((vname, "weighted", fwd_ms, None))
-                print(f"fwd={fwd_ms:.3f}ms")
+                print(f"fwd={fwd_ms:.3f}ms  impl={active_weighted_impl}")
             else:
                 dO = torch.randn(1, cfg.TQ, cfg.H, cfg.D, device=cfg.device, dtype=cfg.dtype)
 
@@ -839,7 +966,8 @@ def run_timing(
                     v = x["v"].detach().clone().requires_grad_(True)
                     cw_g = cw.detach().clone().requires_grad_(True)
                     return kernel_forward_weighted(
-                        kernel_fn, q, k, v, x["block_indices"], cw_g, cfg.BS, cfg.scale,
+                        kernel_info, q, k, v, x["block_indices"], cw_g, cfg.BS, cfg.scale,
+                        weighted_impl=weighted_impl,
                     )
 
                 def loss_fn(o):
@@ -847,7 +975,7 @@ def run_timing(
 
                 fwd_ms, bwd_ms = time_fwd_bwd(fwd_wt_grad, loss_fn, iters=iters, warmup=warmup)
                 rows.append((vname, "weighted", fwd_ms, bwd_ms))
-                print(f"fwd={fwd_ms:.3f}ms  bwd={bwd_ms:.3f}ms")
+                print(f"fwd={fwd_ms:.3f}ms  bwd={bwd_ms:.3f}ms  impl={active_weighted_impl}")
         except Exception as e:
             print(f"ERROR: {e}")
             rows.append((vname, "weighted", float("nan"), float("nan")))
@@ -904,7 +1032,7 @@ PRESETS = {
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark kernels-final v1/v2/v3 (unweighted + MoE-weighted)",
+        description="Benchmark kernels-final v1/v2/v3/v4/v5 (unweighted + weighted variants)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -920,12 +1048,18 @@ Examples:
 
     parser.add_argument("--mode", choices=["all", "correctness", "timing"], default="all",
                         help="Run mode (default: all)")
-    parser.add_argument("--kernels", default="v1,v2,v3",
-                        help="Comma-separated kernel versions to test (default: v1,v2,v3)")
+    parser.add_argument("--kernels", default="v1,v2,v3,v4,v5",
+                        help="Comma-separated kernel versions to test (default: v1,v2,v3,v4,v5)")
     parser.add_argument("--weighted", action="store_true", default=True,
                         help="Include weighted (MoE-style) tests (default: True)")
     parser.add_argument("--no-weighted", dest="weighted", action="store_false",
                         help="Skip weighted (MoE-style) tests")
+    parser.add_argument(
+        "--weighted-impl",
+        choices=["auto", "legacy_loop", "fused_weighted"],
+        default="auto",
+        help="Weighted implementation selection: auto, legacy loop, or fused weighted kernel.",
+    )
     parser.add_argument("--preset", choices=list(PRESETS.keys()), default=None,
                         help="Use a predefined config (overridden by explicit shape args)")
     parser.add_argument("--fwd-only", action="store_true", default=False,
@@ -1017,18 +1151,20 @@ Examples:
     print(f"  Memory: {free_gb:.1f} / {total_gb:.1f} GB free")
     print(f"  Config: TQ={cfg.TQ}, TK={cfg.TK}, M={cfg.M}, BS={cfg.BS}, topk={cfg.topk}")
     print(f"          HQ={cfg.H}, HK={cfg.HK}, G={cfg.G}, D={cfg.D}, dtype={cfg.dtype}")
-    print(f"  Mode: {args.mode}, weighted={args.weighted}")
+    print(f"  Mode: {args.mode}, weighted={args.weighted}, weighted_impl={args.weighted_impl}")
 
     # ---- Import kernels ----
     versions = [v.strip() for v in args.kernels.split(",") if v.strip()]
     imported = import_kernels(versions)
 
-    available_kernels: Dict[str, Callable] = {}
+    available_kernels: Dict[str, Dict[str, Optional[Callable]]] = {}
     for v in versions:
-        fn, err = imported[v]
-        if fn is not None:
-            available_kernels[v] = fn
-            print(f"  Kernel {v}: OK")
+        kernel_info, err = imported[v]
+        if kernel_info is not None:
+            available_kernels[v] = kernel_info
+            weighted_status = "YES" if kernel_info.get("weighted") is not None else "NO"
+            semantics = kernel_info.get("weighted_semantics", "exact_moe")
+            print(f"  Kernel {v}: OK (weighted_fused={weighted_status}, weighted_semantics={semantics})")
         else:
             print(f"  Kernel {v}: UNAVAILABLE ({err})")
 
@@ -1041,6 +1177,7 @@ Examples:
         check_correctness(
             cfg, available_kernels,
             run_weighted=args.weighted,
+            weighted_impl=args.weighted_impl,
             sanity_TQ=args.sanity_tq,
             sanity_M=args.sanity_m,
             num_checks=args.num_checks,
@@ -1050,6 +1187,7 @@ Examples:
         run_timing(
             cfg, available_kernels,
             run_weighted=args.weighted,
+            weighted_impl=args.weighted_impl,
             iters=args.iters,
             warmup=args.warmup,
             fwd_only=args.fwd_only,

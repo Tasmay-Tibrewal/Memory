@@ -31,10 +31,15 @@ try:
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
 
-from .token_routing_kernel import get_token_routing_kernel_fn, normalize_kernel_version
+from .token_routing_kernel import (
+    get_token_routing_kernel_fn,
+    get_token_routing_weighted_kernel_fn,
+    normalize_kernel_version,
+)
 
 
 _TOKEN_ROUTED_FALLBACK_WARNED = False
+_TOKEN_ROUTED_WEIGHTED_FALLBACK_WARNED = False
 
 
 class MemoryCrossAttention(nn.Module):
@@ -590,19 +595,85 @@ class MemoryCrossAttention(nn.Module):
             # -----------------------------------------------------------------
             if chapter_weights is not None:
                 B, T = q.shape[0], q.shape[1]
+                use_weighted_kernel = (
+                    use_kernel
+                    and (get_token_routing_weighted_kernel_fn(kernel_version) is not None)
+                )
 
-                if q.is_cuda and top_k > 1:
-                    # -- Parallel CUDA stream path --
-                    # Launch each per-chapter attention on its own stream so the
-                    # GPU can pipeline / overlap independent kernel launches.
-                    streams = [torch.cuda.Stream(device=q.device) for _ in range(top_k)]
-                    chapter_outputs = [None] * top_k
-                    events = [None] * top_k
+                if use_weighted_kernel:
+                    try:
+                        routed_heads = self._token_routed_sparse_attention_kernel_weighted(
+                            q=q,
+                            k=k,
+                            v=v,
+                            token_chapter_indices=token_chapter_indices,
+                            chapter_weights=chapter_weights,
+                            block_size=tokens_per_chapter,
+                            scale=scale,
+                            assume_sorted_topk=assume_sorted_topk,
+                            kernel_version=kernel_version,
+                        )
+                    except Exception:
+                        routed_heads = None
+                else:
+                    routed_heads = None
 
-                    for i in range(top_k):
-                        single_idx = token_chapter_indices[:, :, i : i + 1]
-                        with torch.cuda.stream(streams[i]):
-                            chapter_outputs[i] = self._token_routed_attention_single(
+                if routed_heads is None:
+                    global _TOKEN_ROUTED_WEIGHTED_FALLBACK_WARNED
+                    if use_kernel and not _TOKEN_ROUTED_WEIGHTED_FALLBACK_WARNED:
+                        print(
+                            "MemoryCrossAttention token-routing warning: "
+                            "falling back to legacy weighted sparse attention path "
+                            "(weighted fused kernel unavailable or unsupported)."
+                        )
+                        _TOKEN_ROUTED_WEIGHTED_FALLBACK_WARNED = True
+
+                    if q.is_cuda and top_k > 1:
+                        # -- Parallel CUDA stream path --
+                        # Launch each per-chapter attention on its own stream so the
+                        # GPU can pipeline / overlap independent kernel launches.
+                        streams = [torch.cuda.Stream(device=q.device) for _ in range(top_k)]
+                        chapter_outputs = [None] * top_k
+                        events = [None] * top_k
+
+                        for i in range(top_k):
+                            single_idx = token_chapter_indices[:, :, i : i + 1]
+                            with torch.cuda.stream(streams[i]):
+                                chapter_outputs[i] = self._token_routed_attention_single(
+                                    q=q, k=k, v=v,
+                                    token_chapter_indices=single_idx,
+                                    block_size=tokens_per_chapter,
+                                    scale=scale,
+                                    assume_sorted_topk=assume_sorted_topk,
+                                    kernel_version=kernel_version,
+                                    use_kernel=use_kernel,
+                                )  # [B, T, HQ, D]
+                                events[i] = torch.cuda.Event()
+                                events[i].record()
+
+                        current_stream = torch.cuda.current_stream(q.device)
+                        for e in events:
+                            current_stream.wait_event(e)
+
+                        routed_accum = torch.zeros(
+                            (B, T, q.shape[2], q.shape[3]),
+                            device=q.device,
+                            dtype=torch.float32,
+                        )
+                        for i in range(top_k):
+                            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+                            routed_accum = routed_accum + chapter_outputs[i].to(torch.float32) * w_i
+
+                    else:
+                        # -- Sequential CPU / single-chapter path --
+                        routed_accum = torch.zeros(
+                            (B, T, q.shape[2], q.shape[3]),
+                            device=q.device,
+                            dtype=torch.float32,
+                        )
+                        for i in range(top_k):
+                            single_idx = token_chapter_indices[:, :, i : i + 1]
+                            chapter_out = self._token_routed_attention_single(
                                 q=q, k=k, v=v,
                                 token_chapter_indices=single_idx,
                                 block_size=tokens_per_chapter,
@@ -610,44 +681,11 @@ class MemoryCrossAttention(nn.Module):
                                 assume_sorted_topk=assume_sorted_topk,
                                 kernel_version=kernel_version,
                                 use_kernel=use_kernel,
-                            )  # [B, T, HQ, D]
-                            # Record an event after the forward kernel completes.
-                            # Event-based sync is safer than wait_stream for
-                            # custom autograd backward passes (e.g. FSA Triton
-                            # kernels) that may not preserve stream affinity.
-                            events[i] = torch.cuda.Event()
-                            events[i].record()
+                            )
+                            w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1).to(torch.float32)
+                            routed_accum = routed_accum + chapter_out.to(torch.float32) * w_i
 
-                    # Synchronise: make the current (default) stream wait for
-                    # each chapter's completion event before reading outputs.
-                    current_stream = torch.cuda.current_stream(q.device)
-                    for e in events:
-                        current_stream.wait_event(e)
-
-                    # Weighted accumulation (runs on default stream after sync).
-                    routed_accum = q.new_zeros(B, T, q.shape[2], q.shape[3])
-                    for i in range(top_k):
-                        w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)
-                        routed_accum = routed_accum + chapter_outputs[i] * w_i
-
-                else:
-                    # -- Sequential CPU / single-chapter path --
-                    routed_accum = q.new_zeros(B, T, q.shape[2], q.shape[3])
-                    for i in range(top_k):
-                        single_idx = token_chapter_indices[:, :, i : i + 1]
-                        chapter_out = self._token_routed_attention_single(
-                            q=q, k=k, v=v,
-                            token_chapter_indices=single_idx,
-                            block_size=tokens_per_chapter,
-                            scale=scale,
-                            assume_sorted_topk=assume_sorted_topk,
-                            kernel_version=kernel_version,
-                            use_kernel=use_kernel,
-                        )
-                        w_i = chapter_weights[:, :, i].unsqueeze(-1).unsqueeze(-1)
-                        routed_accum = routed_accum + chapter_out * w_i
-
-                routed_heads = routed_accum
+                    routed_heads = routed_accum.to(dtype=q.dtype)
 
             # -----------------------------------------------------------------
             # Unweighted path: original single-call joint-softmax attention.
@@ -776,6 +814,44 @@ class MemoryCrossAttention(nn.Module):
             assume_sorted_topk=bool(assume_sorted_topk),
             disable_causal_mask=True,
         )
+
+    def _token_routed_sparse_attention_kernel_weighted(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        token_chapter_indices: torch.Tensor,
+        chapter_weights: torch.Tensor,
+        block_size: int,
+        scale: float,
+        assume_sorted_topk: bool,
+        kernel_version: str,
+    ) -> torch.Tensor:
+        """Run fused weighted kernel-backed sparse token-routing attention."""
+        block_indices = token_chapter_indices.to(dtype=torch.int32, device=q.device)
+        block_indices = block_indices.unsqueeze(2).expand(
+            q.shape[0],
+            q.shape[1],
+            self.num_kv_heads,
+            block_indices.shape[-1],
+        ).contiguous()
+        weights = chapter_weights.to(device=q.device, dtype=q.dtype).contiguous()
+
+        fn = get_token_routing_weighted_kernel_fn(kernel_version)
+        if fn is None:
+            raise RuntimeError(f"Kernel version '{kernel_version}' does not expose weighted fused sparse attention.")
+        return fn(
+            q_bthd=q.contiguous(),
+            k_bthd=k.contiguous(),
+            v_bthd=v.contiguous(),
+            block_indices_bths=block_indices,
+            chapter_weights_bts=weights,
+            block_size=int(block_size),
+            softmax_scale=float(scale),
+            assume_sorted_topk=bool(assume_sorted_topk),
+            disable_causal_mask=True,
+        )
+
 
     def _token_routed_sparse_attention_emulated(
         self,
