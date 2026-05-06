@@ -36,11 +36,12 @@ meta_artifacts/
 ## Session Index
 
 | Session | Date | Status | Summary |
-|---------|------|--------|---------|
+| :------ | :--- | :----- | :------ |
 | [Session 1](session1/) | Feb 5, 2026 | Complete | Initial implementation and early continuations |
-| Sessions 2-8 | Feb 5, 2026 | Complete | Fixes, verification, and documentation refresh (see `session_summary.md`) |
-| [Session 9](session9/) | Feb 7, 2026 | Complete | Memory-attention head override support + documentation/session audit |
-| [Session 10](session10/) | Feb 7, 2026 | Complete | Shared chapter routing + routed scaling + wandb step/router memory metrics |
+| Sessions 2–8 | Feb 5, 2026 | Complete | Fixes, verification, and documentation refresh (see `session_summary.md`) |
+| [Session 9](session9/) | Feb 7, 2026 | Complete | Memory-attention head override support + documentation / session audit |
+| [Session 10](session10/) | Feb 7, 2026 | Complete | Shared chapter routing + routed scaling + wandb step / router / memory metrics |
+| Session 11 | May 6, 2026 | Complete | Documentation overhaul on the `paper` branch — root README rewrite (ICLR 2026 NFAM acceptance, architecture diagram, headline results), v4/v5 kernel docs, mojibake cleanup, run-2 / IFT configs in the index. See `session_summary.md` (no per-folder artefact). |
 
 ---
 
@@ -52,9 +53,9 @@ meta_artifacts/
 3. Append a concise session summary to `session_summary.md`.
 
 ### For Context Recovery
-1. Read `session_summary.md` for a fast overview.
-2. Read `session10/session.md` for latest detailed work.
-3. Use `session1/session.md` for deeper historical context.
+1. Read [`session_summary.md`](session_summary.md) for the fastest overview, including the most recent Session 11 documentation overhaul.
+2. Read [`session10/session.md`](session10/session.md) for the latest implementation-level detailed work (shared chapter routing + wandb metrics).
+3. Use [`session1/session.md`](session1/session.md) for deeper historical context on the initial implementation.
 
 ### For Agent Handoffs
 1. Share `session_summary.md` first.

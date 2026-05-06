@@ -1,6 +1,6 @@
 # Design Decisions and Notes
 
-This document records design choices, compromises, known issues, and areas for future improvement.
+This document records design choices, compromises, known issues, and areas for future improvement. The configuration that backs the published workshop results lives in [`configs/base_small_run2.yaml`](../configs/base_small_run2.yaml); see the [root `README.md`](../README.md) for headline numbers.
 
 ## Design Choices Made
 
@@ -103,7 +103,7 @@ Kernel engineering notes:
 
 ### 2. Token-Level Routing Cost / Fallback Behavior
 
-As discussed in idea.txt (lines 62-80), token-level routing during prefill would require:
+As discussed in [`idea/proposal.md`](../idea/proposal.md) §8.4 and the workshop paper §4.4, token-level routing during prefill would require:
 
 ```
 K tensor size = B × S × num_heads × routed_tokens × D
@@ -122,9 +122,9 @@ K tensor size = B × S × num_heads × routed_tokens × D
 
 ### 3. No Dynamic Memory Updates
 
-The "context bank" for inference-time memory updates (idea.txt lines 84-102) is NOT implemented for the ICLR workshop deadline.
+The "context bank" for inference-time memory updates (described in [`idea/proposal.md`](../idea/proposal.md) §9 and the long-form paper draft §7) is intentionally **out of scope** for the workshop release. The workshop paper covers static end-to-end-trained memory with chapter routing; dynamic updates are explicit future work.
 
-**Reason**: Requires VAE compression, clustering, importance-weighted merging—significant additional complexity.
+**Reason**: Requires VAE compression, clustering, importance-weighted merging — significant additional complexity that does not bear on the headline result that learned memory is a complementary scaling axis.
 
 ### 4. Limited Model Architecture Support
 
@@ -177,12 +177,12 @@ mutation) are suppressed on recompute, but memory injection always runs.
 
 ### 1. Memory Bank Size vs Compute
 
-Large memory banks (100k+ tokens) require chapter routing.
+Large memory banks (the workshop paper uses 262K tokens) require chapter routing.
 
-- With routing: lose some information access
-- Without routing: O(L × N_m) attention cost
+- With routing: lose some information access (only top-k chapters per input).
+- Without routing: O(L × N_m) memory-attention cost dominates the budget.
 
-**Compromise**: Default to moderate bank (2k-4k) with routing for larger.
+**Compromise**: example configs span the spectrum — small from-scratch and adapter configs use 1K–16K tokens with light routing, while [`configs/base_small_run2.yaml`](../configs/base_small_run2.yaml) (the workshop paper config) uses 262K tokens with 4,097 chapters and top-k 64. Routing makes the larger bank feasible at iso-FLOP.
 
 ### 2. Shared vs Per-Layer Memory
 
@@ -211,11 +211,11 @@ Low-rank memory reduces parameters but limits what each token can express.
 
 ### Medium Priority
 
-4. **Quantized memory banks**: Post-training quantization or QAT.
+4. **Quantization-aware training for memory banks**: post-training quantisation utilities exist (`memory_transformer/quantization.py`, `inference/merge.py`); QAT-style training-time updates are not yet implemented.
 
-5. **Flash Attention 3**: When available, integrate for better performance.
+5. **Flash Attention 3**: integrate when broadly available.
 
-6. **Gradient checkpointing for memory**: Currently checkpoints base model only.
+6. **Scaling laws for learned memory**: extend pretraining beyond 9.6B tokens and sweep bank capacity to formalise the trend already observed in the post-paper runs (the gap to iso-FLOP keeps widening).
 
 ### Low Priority (Post-Workshop)
 
@@ -227,24 +227,30 @@ Low-rank memory reduces parameters but limits what each token can express.
 
 ## Config Recommendations
 
-### For From-Scratch Pretraining
+### Workshop Paper Reproduction
+
+Use [`configs/base_small_run2.yaml`](../configs/base_small_run2.yaml) for MoC and [`configs/vanilla_control_run2.yaml`](../configs/vanilla_control_run2.yaml) for the iso-FLOP dense baseline. For instruction tuning from a pretrained MoC checkpoint, use [`configs/ift_base_model.yaml`](../configs/ift_base_model.yaml) with `init_from_checkpoint` pointing at the pretrain output.
+
+### For From-Scratch Pretraining (small budget)
 
 ```yaml
 memory:
   num_memory_tokens: 4096-16384
   memory_sharing: shared
-  use_chapters: true (if >4096 tokens)
-  use_low_rank_memory: false # Full expressiveness
+  use_chapters: true     # if N_m > 4K
+  use_low_rank_memory: false  # full expressiveness when memory params fit
 ```
 
-### For Adapter Fine-tuning
+### For Adapter Fine-Tuning
 
 ```yaml
 memory:
   num_memory_tokens: 1024-2048
-  memory_layer_placement: custom # First/last 5 layers
+  memory_layer_placement: custom        # e.g., first 5 + last 5 layers
   use_low_rank_memory: true
   memory_rank: 256
+  use_low_rank_projections: true
+  projection_rank: 128
 ```
 
 ### For Efficient Comparison
@@ -266,4 +272,6 @@ memory:
 
 ## Version History
 
-- v0.1.0: Initial implementation with core features
+- **v0.1.0** (Feb 5, 2026): Initial implementation with core features (Session 1).
+- **v0.2.0** (Feb 7, 2026): Shared chapter routing, routed scaling factor, expanded wandb metrics (Session 10).
+- **v0.3.0** (May 2026): Workshop release — accepted at the ICLR 2026 NFAM Workshop ([`idea/Mixture_of_Chapters_ICLR_Workshop_Paper.pdf`](../idea/Mixture_of_Chapters_ICLR_Workshop_Paper.pdf)). Sparse routing kernel set extended with v4 (exact MoE-weighted fused) and v5 (joint-bias approximation).

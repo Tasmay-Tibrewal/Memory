@@ -64,12 +64,14 @@ Standard cross-attention where:
 
 ```python
 Q = H @ W_q     # (batch, seq_len, d) → (batch, seq_len, d)
-K = M @ W_k     # (N_m, d) → (N_m, d)
-V = M @ W_v     # (N_m, d) → (N_m, d)
+K = M @ W_k     # (N_m, d) → (N_m, d_kv)
+V = M @ W_v     # (N_m, d) → (N_m, d_kv)
 
-Attention = softmax(Q @ K^T / √d_k) @ V
+Attention = softmax(Q @ K^T / √d_h) @ V
 Output = Attention @ W_o
 ```
+
+The memory cross-attention supports **independent head counts** for query and KV (`memory_num_heads` / `memory_num_kv_heads`). Setting `memory_num_kv_heads < memory_num_heads` enables grouped-query attention on the memory side. The workshop paper config uses 12 query heads and 12 KV heads (no GQA on memory) on top of a backbone that uses 12-query / 4-KV GQA on self-attention.
 
 **Key Design: Zero-initialized W_o**
 
@@ -114,16 +116,18 @@ Memory layers can be placed:
 
 ## Chapter-Based Routing
 
-For large memory banks (100k+ tokens), attending to all tokens is expensive. We use **MoE-inspired routing**:
+For large memory banks (the workshop paper uses 262,208 tokens), attending to all tokens is expensive. We use **MoE-inspired routing**:
 
 ```
 Memory organized into C chapters, each with N_c = N_m/C tokens
 
-Router Input: Mean-pooled hidden states
-Router Output: Top-k chapter selections
+Router Input: Mean-pooled hidden states (or rolling window / per-token, see "Token-Level vs Sequence-Level Routing")
+Router Output: Top-k chapter selections per input
 
 Attention only on selected chapters → O(L × k × N_c) instead of O(L × N_m)
 ```
+
+**Workshop paper instance**: `N_m = 262,208` memory tokens partitioned into `C = 4,097` chapters of `N_c = 64` tokens each, with `top-k = 64` routed chapters and `1` always-on shared chapter — so memory attention touches only `(64 + 1) × 64 = 4,160` tokens (~1.6 % of the bank) per sequence, while the bank itself sits in VRAM at full capacity.
 
 ### Router Architecture
 
@@ -133,6 +137,17 @@ logits = W_router @ pooled + b               # (batch, num_chapters)
 probs = softmax(logits)
 top_k_indices, top_k_weights = topk(probs, k)
 ```
+
+### Shared Chapters and Routed Scaling
+
+The model can reserve the first `num_shared_chapters` chapters as **always-on shared knowledge** (e.g., a 1-chapter prefix the router never chooses against). After top-k selection of routed chapters, the final chapter set is:
+
+```
+chapter_indices = [shared_0, ..., shared_{S-1},  routed_top_1, ..., routed_top_k]
+chapter_weights = [    1, ..., 1,        scale × p_1, ..., scale × p_k]   (then normalised to sum to 1)
+```
+
+where `S = num_shared_chapters`, `scale = routed_scaling_factor`, and `p_i` are the renormalised top-k router probabilities. The workshop paper uses `S = 1` shared chapter and `scale = 2.5×` so routed chapters dominate the mix. Optionally, `normalize_shared_routed_before_mixing: true` normalises the shared and routed branches separately (RMSNorm or LayerNorm on the token vectors) before weighted combination — this prevents one branch from dominating purely by raw magnitude.
 
 ### Router Losses
 
@@ -144,12 +159,14 @@ top_k_indices, top_k_weights = topk(probs, k)
 
    where f_i = fraction routed to chapter i, P_i = avg probability for chapter i
 
-2. **Auxiliary Loss**: Penalizes variance in chapter usage
+2. **Auxiliary Loss**: Penalizes variance in chapter usage (squared probabilities vs uniform target).
 
 3. **Z-Loss**: Regularizes router logits to prevent divergence
    ```
    L_z = mean(log²(Σ exp(logits)))
    ```
+
+4. **Entropy** (monitoring only, not added to training loss): tracks router sharpness / collapse.
 
 ## Memory Adapter Mode
 
@@ -392,13 +409,28 @@ surface; do not call `self.base_model(...)` directly.
 ### Total Trainable Parameters (Adapter Mode)
 
 ```
-Memory adapter on Qwen2.5-1.5B:
-- Memory bank: 2048 × 256 (factorized) = 0.5M
-- Memory projections: 10 layers × 4 × 256 × 1536 = 15.7M
-- Chapter routers: 10 × (1536 × 8) = 0.1M
-- Total memory params: ~16.3M
+Memory adapter on Qwen2.5-1.5B (configs/adapter_qwen2.5_1.5b.yaml):
+- Memory bank (factorized rank 256): (N_m + d) × r = (2048 + 1536) × 256 ≈ 0.92M
+- Memory projections (low-rank, projection_rank 128, 4 projections × 2 matrices each):
+    10 layers × 8 × 1536 × 128                                              ≈ 15.7M
+- Chapter routers: 10 layers × (1536 × 8 + 8)                               ≈ 0.12M
+- Total memory params:                                                       ≈ 16.7M
 
-vs Full model: 1.5B → 1% of parameters trainable
+vs Full model: 1.5B → ~1.1 % of parameters trainable
+```
+
+### Workshop Paper Configuration (From-Scratch)
+
+```
+Mixture of Chapters (configs/base_small_run2.yaml):
+- Backbone: 16 layers × ~9.2M ≈ 147.87M
+  (hidden_dim=768, num_heads=12, num_kv_heads=4, intermediate_dim=2304, vocab=49152)
+- Memory cross-attention (4 memory layers × ~5.5M)               ≈  22.04M
+- Memory bank: 262,208 × 768 (full rank, shared across 4 layers) ≈ 201.38M
+- Total                                                          ≈ 371.29M
+
+Iso-FLOP dense baseline (configs/vanilla_control_run2.yaml):
+- 24 layers of the same backbone block                            ≈ 202.94M
 ```
 
 ---
@@ -416,6 +448,11 @@ For L=2048, N_m=16K, C=16, k=4:
 
 - Without chapters: 2048 × 16384 = 33.5M ops per head
 - With chapters: 2048 × 4 × 1024 = 8.4M ops per head (4× faster)
+
+For the workshop paper config (L=1024, N_m=262208, C=4097, T=64, k=64+1 shared):
+
+- Without chapters: 1024 × 262208 ≈ 268.4M ops per head
+- With chapters: 1024 × 65 × 64 ≈ 4.26M ops per head (~63× faster)
 
 ---
 
@@ -447,10 +484,18 @@ For L=2048, N_m=16K, C=16, k=4:
 
 ## Related Work References
 
-- **Transformer-XL**: Segment-level recurrence (different approach)
-- **Memorizing Transformers**: KV-cache as memory (retrieval-based)
-- **RETRO**: Retrieve from external corpus
-- **RAG**: Retrieve-augment-generate
-- **Our approach**: Learnable internal memory with cross-attention
+Closest comparisons (most relevant for direct benchmarking):
 
-Key difference: Our memory is **learned end-to-end** and **internal to the model**, not retrieved from external sources.
+- **Memory Layers at Scale** (Berges et al., 2025): trainable key-value memory layers as sparse FFN replacements with strong factual gains. Our work differs in using cross-attention to a learnable latent-token bank (rather than key-value FFN substitutes) and in scaling access via *chapter-level* routing rather than product-key addressing.
+- **Product Key Memory (PKM)** (Lample et al., 2019): efficient large key-value memory via product keys. Same scaling motivation; different access pattern.
+- **Memformer** (Wu et al., 2020): cross-attention to a memory bank with gated dynamic updates. Most architecturally similar to our base read; our memory is *static after training* and we add chapter routing on top.
+
+Other memory mechanisms (more distant):
+
+- **Transformer-XL** (Dai et al., 2019): segment-level recurrence over hidden states.
+- **Memorizing Transformers** (Wu et al., 2022): non-parametric kNN over cached KV.
+- **RETRO** (Borgeaud et al., 2021), **RAG** (Lewis et al., 2020): retrieval over external text corpora.
+- **Titans** (Behrouz et al., 2025), **MemoryLLM / M+** (Wang et al., 2024 / 2025): test-time updatable memory.
+- **Routing Transformer** (Roy et al., 2021), **Switch / MoE** (Shazeer et al., 2017; Fedus et al., 2022): sparse routing over computation, the conceptual template we adapt for memory selection.
+
+Key distinction: our memory is **learned end-to-end**, **internal to the model**, **static after training**, and **scaled via attention-based chapter routing**, not retrieved from external sources or updated at test time. See the workshop paper's "Related Work" and Appendix A.1 (Table 3) for the full literature map.
