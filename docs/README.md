@@ -1,235 +1,210 @@
-﻿# Documentation
+# Documentation
 
-This directory contains comprehensive documentation for the memory-augmented transformer project.
+This directory contains the deep, technical, and historical documentation for the Memory-Augmented Transformer / Mixture of Chapters project.
+
+For the user-facing overview, paper link, and quick start, see the [root `README.md`](../README.md).
 
 ---
 
 ## Structure
 
-```
+```text
 docs/
-â”œâ”€â”€ README.md              # This file - documentation overview
-â”œâ”€â”€ architecture.md        # Detailed architecture explanation (~286 lines)
-â”œâ”€â”€ design.md              # Design decisions and rationale (~120 lines)
-â”œâ”€â”€ context.md             # Summary for handoffs (~321 lines)
-â”œâ”€â”€ philosophy.md          # Development philosophy and style guide (~316 lines)
-â”œâ”€â”€ prompt.md              # Agent onboarding prompt (~202 lines)
-â””â”€â”€ meta_artifacts/        # Session artifacts for context management
-    â”œâ”€â”€ README.md          # Meta artifacts overview
-    â”œâ”€â”€ session_summary.md # Consolidated session summaries
-    â””â”€â”€ session1/          # Session 1 historical artifacts
-        â”œâ”€â”€ implementation_plan.md
-        â”œâ”€â”€ task.md
-        â”œâ”€â”€ session.md
-        â””â”€â”€ walkthrough.md
-    `-- session9/
-        `-- session.md
-    `-- session10/
-        `-- session.md
+├── README.md             # This file — documentation map
+├── architecture.md       # Detailed technical architecture (~450 lines)
+├── design.md             # Design decisions and rationale (~270 lines)
+├── context.md            # Snapshot project state for handoffs (~450 lines)
+├── philosophy.md         # Development philosophy and style guide (~400 lines)
+├── prompt.md             # Onboarding prompt for new sessions / agents (~300 lines)
+└── meta_artifacts/       # Session-level history
+    ├── README.md
+    ├── session_summary.md          # Cumulative session summary
+    ├── session1/                   # Initial-implementation deep log + plan
+    │   ├── implementation_plan.md
+    │   ├── task.md
+    │   ├── session.md
+    │   └── walkthrough.md
+    ├── session9/
+    │   └── session.md
+    └── session10/
+        └── session.md
 ```
 
 ---
 
 ## Document Descriptions
 
-### `architecture.md` - Architecture Deep Dive
+### `architecture.md` — Architecture Deep Dive
 
-**Purpose**: Detailed technical explanation of all architectural components.
+Detailed technical explanation of all architectural components, including the workshop-paper reference configuration.
 
-**Contents**:
-- Overall system architecture diagram
+**Contents**
+
+- Overall system diagram and reference to [`idea/MoC Arch Diagram Excalidraw.png`](../idea/MoC%20Arch%20Diagram%20Excalidraw.png)
 - Memory bank implementations (Standard, Factorized, ReducedDim)
-- Memory cross-attention mechanism with equations
-- Transformer block variants (A and B)
+- Memory cross-attention with equations (full, low-rank, reduced-dim modes)
+- Block variants A and B
 - Chapter-based routing (MoE-style) with loss functions
-- Memory adapter injection mechanism
-- Low-rank compression options
-- Implementation mapping (which file has what)
-- Parameter count calculations
-- Computational complexity analysis
+- Memory adapter injection mechanism (persistent hooks, GC-safe)
+- Token-level routing path (shared dense + routed sparse, MoE-weighted)
+- Sparse kernel set (v1–v5 in `kernels-final/`)
+- Implementation mapping (which file holds what)
+- Parameter count + complexity analysis
 - Configuration quick reference
-- Related work comparison
 
-**Audience**: Developers needing to understand inner workings or extend the architecture.
+**Audience:** developers extending the architecture, paper readers cross-checking the implementation.
 
 ---
 
-### `design.md` - Design Decisions
+### `design.md` — Design Decisions
 
-**Purpose**: Document all design choices, compromises, and areas for future improvement.
+All design choices with rationale, the compromises made, the known limitations, and the prioritised list of future improvements.
 
-**Contents**:
-- Training library selection rationale (PyTorch + Accelerate)
-- Block variant default choice (Variant A)
-- Routing strategy behavior (sequence default + implemented token-level kernel path)
-- Zero-initialization reasoning (W_o = 0)
-- Hook-based adapter injection rationale
+**Contents**
+
+- Training library selection (PyTorch + Accelerate)
+- Default block variant (A)
+- Sequence-level vs token-level routing strategies and why both exist
+- Zero-init `W_o` reasoning
+- Persistent-hook adapter injection rationale (and the gradient-checkpointing trap it solves)
 - Known limitations and workarounds
-- Compromises made during implementation
-- Future improvement areas (prioritized)
-- Configuration recommendations
-- Debugging tips
-
-**Audience**: Developers debugging issues, making architectural changes, or understanding trade-offs.
+- Configuration recommendations and debugging tips
 
 ---
 
-### `philosophy.md` - Development Philosophy
+### `context.md` — Handoff Snapshot
 
-**Purpose**: Document the coding, architecture, and documentation philosophy for consistency across sessions.
+The most up-to-date single-file project summary. Designed to bootstrap a new session, agent, or contributor in one read.
 
-**Contents**:
+**Contents**
+
+- Project status, dates, sessions completed
+- File-count and line-count snapshot
+- Implementation overview by package
+- Key design decisions and what is **not** implemented
+- The full configuration surface (every flag)
+- Running commands for training, evaluation, and inference
+
+---
+
+### `philosophy.md` — Development Philosophy
+
+Why the code, configs, and docs look the way they do. Useful for ensuring future contributions stay coherent with the existing structure.
+
+**Contents**
+
 - Core principles (flexibility, explicitness, modularity)
-- Architecture philosophy (component organization, dependencies)
-- Implementation philosophy (approach, error handling, performance)
-- Coding style (Python style, naming, type hints, docstrings)
-- Configuration philosophy (structure, defaults, naming)
-- Documentation philosophy (principles, levels, writing style)
-- Project structure philosophy (organization, naming)
-- Session management philosophy (context preservation, handoffs)
-
-**Audience**: Future developers, agents, or anyone continuing work on the project.
+- Architecture and dependency direction
+- Implementation conventions (errors, performance, research-vs-production)
+- Coding style (Python, naming, type hints, docstrings)
+- Configuration philosophy (structure, defaults, validation)
+- Documentation levels and update triggers
+- Session management
 
 ---
 
-### `context.md` - Handoff Summary
+### `prompt.md` — Agent Onboarding Prompt
 
-**Purpose**: Complete project summary for session handoffs, context compaction, or onboarding.
-
-**Contents**:
-- Project overview and status
-- Quick start for new sessions
-- Complete file structure with line counts
-- Every file's purpose and size
-- All 5 key design decisions
-- What's NOT implemented and why
-- Complete configuration flags reference (50+ flags)
-- File dependencies graph
-- Running commands for all scenarios
-- Next steps for continuation
-
-**Audience**: Anyone picking up the project, including AI agents or new developers.
+The starting prompt used when handing this codebase to a new agent or contributor. Tells them what to read first, what to ask before implementing, and how the runnable commands are organised.
 
 ---
 
-### `meta_artifacts/` - Session Artifacts
+### `meta_artifacts/` — Per-Session History
 
-**Purpose**: Historical records of development sessions for context management.
-
-**Structure**:
-```
+```text
 meta_artifacts/
-â”œâ”€â”€ README.md              # Meta artifacts overview and usage
-â”œâ”€â”€ session_summary.md     # Consolidated summaries of ALL sessions
-â””â”€â”€ session1/              # Session 1 historical artifacts
-    â”œâ”€â”€ implementation_plan.md   # Approved implementation plan
-    â”œâ”€â”€ task.md                  # Task tracking checklist
-    â”œâ”€â”€ session.md               # Detailed session log (historical)
-    â””â”€â”€ walkthrough.md           # Verification results
-`-- session10/             # Latest session artifacts
-    `-- session.md
+├── README.md             # Index and usage notes
+├── session_summary.md    # Consolidated summaries of every session
+├── session1/             # Initial implementation deep log + plan + walkthrough
+├── session9/             # Audit & memory-attn head-override support
+└── session10/            # Shared-chapter routing + wandb metrics expansion
 ```
 
-**Usage**:
-- Read `session_summary.md` for quick context on all sessions
-- Read `session10/session.md` for latest detailed history (use session1 for historical depth)
-- Check `implementation_plan.md` for original requirements
-
-**Audience**: Developers continuing work, auditing decisions, or managing context across sessions.
+Use these for long-form audit/debug context and for understanding *why* specific decisions appear in `design.md`.
 
 ---
 
-## Quick Reference
+## Quick Reference — Where to Look
 
 | Need | Document |
-|------|----------|
-| Understand architecture | `architecture.md` |
-| Understand why decisions were made | `design.md` |
-| Quick context on project state | `context.md` |
-| Session history overview | `meta_artifacts/session_summary.md` |
-| Detailed session history | `meta_artifacts/session10/session.md` |
-| Using the code | Package READMEs |
+| :--- | :------- |
+| Understand the architecture | [`architecture.md`](architecture.md) |
+| Understand why a decision was made | [`design.md`](design.md) |
+| Quick context on current project state | [`context.md`](context.md) |
+| Cumulative session history overview | [`meta_artifacts/session_summary.md`](meta_artifacts/session_summary.md) |
+| Latest detailed session log | [`meta_artifacts/session10/session.md`](meta_artifacts/session10/session.md) |
+| How to use the code | Package READMEs (see below) |
+| Reproduce the workshop paper | [`../README.md`](../README.md) (Reference Configuration) + [`../configs/base_small_run2.yaml`](../configs/base_small_run2.yaml) |
 
 ---
 
 ## Package READMEs
 
-Each folder has its own README with detailed documentation:
+Each subfolder has its own README:
 
-| README | Lines | Contents |
-|--------|-------|----------|
-| [`memory_transformer/README.md`](../memory_transformer/README.md) | ~259 | All 11 core modules documented |
-| [`training/README.md`](../training/README.md) | ~228 | Trainer, data loading, losses |
-| [`inference/README.md`](../inference/README.md) | ~257 | Generation, merge, routing strategies |
-| [`scripts/README.md`](../scripts/README.md) | ~400 | CLI scripts with training/eval/inference and benchmark suite usage |
-| [`configs/README.md`](../configs/README.md) | ~299 | Complete config reference |
+| README | Contents |
+| :----- | :------- |
+| [`memory_transformer/README.md`](../memory_transformer/README.md) | Core modules: bank, attention, blocks, router, model, adapter |
+| [`training/README.md`](../training/README.md) | Trainer, dataset loaders, router-loss aggregation |
+| [`inference/README.md`](../inference/README.md) | Generation, routing strategies, merge / quantisation utilities |
+| [`scripts/README.md`](../scripts/README.md) | Every CLI script — train, eval, benchmarks, inference, FLOPs estimator |
+| [`configs/README.md`](../configs/README.md) | Complete YAML configuration reference |
+| [`kernels-final/README.md`](../kernels-final/README.md) | Stable v1–v5 sparse routing kernels and benchmarking |
+| [`kernels/README.md`](../kernels/README.md) | Exploratory kernel workspace, FSA lineage, NSA notes |
 
 ---
 
 ## Documentation Hierarchy
 
-```
+```text
 Project Documentation
-â”‚
-â”œâ”€â”€ Main README.md (root)
-â”‚   â””â”€â”€ Quick start, installation, features, troubleshooting
-â”‚
-â”œâ”€â”€ Package READMEs (usage documentation)
-â”‚   â”œâ”€â”€ memory_transformer/README.md  â†’ Core module documentation
-â”‚   â”œâ”€â”€ training/README.md            â†’ Training infrastructure
-â”‚   â”œâ”€â”€ inference/README.md           â†’ Generation utilities
-â”‚   â”œâ”€â”€ scripts/README.md             â†’ CLI usage
-â”‚   â””â”€â”€ configs/README.md             â†’ Configuration reference
-â”‚
-â”œâ”€â”€ Deep Dive Docs (this directory)
-â”‚   â”œâ”€â”€ architecture.md  â†’ Technical architecture
-â”‚   â”œâ”€â”€ design.md        â†’ Design rationale
-â”‚   â”œâ”€â”€ philosophy.md    â†’ Development philosophy
-â”‚   â””â”€â”€ context.md       â†’ Project summary
-â”‚
-â””â”€â”€ Historical Records (meta_artifacts/)
-    â”œâ”€â”€ session_summary.md  â†’ Session overviews
-    â””â”€â”€ sessionN/           â†’ Detailed session artifacts
+│
+├── README.md (root)                          User-facing overview, paper, quick start, citation
+│
+├── Package READMEs (usage)
+│   ├── memory_transformer/README.md          Core module API
+│   ├── training/README.md                    Training infrastructure
+│   ├── inference/README.md                   Generation utilities
+│   ├── scripts/README.md                     CLI usage
+│   ├── configs/README.md                     Configuration reference
+│   ├── kernels-final/README.md               Stable kernel set
+│   └── kernels/README.md                     Engineering workspace
+│
+├── Deep dive (this directory)
+│   ├── architecture.md                       Technical architecture
+│   ├── design.md                             Decision rationale
+│   ├── philosophy.md                         Coding / docs conventions
+│   ├── context.md                            Current project snapshot
+│   └── prompt.md                             Agent onboarding
+│
+└── meta_artifacts/                           Session history
+    ├── session_summary.md                    Chronological overviews
+    └── sessionN/                             Detailed per-session artefacts
 ```
 
 ---
 
 ## Relationship Between Docs
 
-| Document | Purpose | Update Frequency |
-|----------|---------|------------------|
-| `context.md` | What the project IS now | Every major change |
-| `session_summary.md` | How the project GOT here | End of each session |
-| `session.md` | Detailed "how" for each session | During session |
+| Document | Purpose | Update frequency |
+| :------- | :------ | :--------------- |
+| `context.md` | What the project **is now** | Every major change |
+| `session_summary.md` | How the project **got here** | End of each session |
+| `sessionN/session.md` | Detailed "how" for a single session | During that session |
 | `architecture.md` | Technical deep dive | When architecture changes |
-| `design.md` | Decision rationale | When decisions made |
+| `design.md` | Decision rationale | When decisions are made |
+| Root `README.md` | User-facing overview | When user-visible features or results change |
 
 ---
 
 ## Contributing to Documentation
 
-When adding new features, update documentation in this order:
+When adding a new feature or fixing a bug, update documentation in this order:
 
-1. **Update session's `session.md`**: Log what you're doing
-2. **Update `context.md`**: Reflect current project state
-3. **Update Package README**: Document new modules/functions
-4. **Update `design.md`**: Document any design decisions
-5. **Update `architecture.md`**: If architectural changes
-6. **Update root README**: If user-facing features changed
-7. **Update `session_summary.md`**: At end of session
-
----
-
-## Total Documentation Stats
-
-| Category | Files | Lines |
-|----------|-------|-------|
-| Deep Dive Docs (`docs/*.md`) | 6 | ~1,420 |
-| Meta Artifacts (`docs/meta_artifacts/**/*.md`) | 7 | ~2,700+ |
-| Package READMEs | 5 | ~1,250+ |
-| Root README | 1 | ~342 |
-| Configs (`configs/*.yaml`) | 5 | ~560 |
-| **Total** | **23** | **~6,000+** |
-
-
-
+1. **Update the in-progress `session.md`** in `meta_artifacts/sessionN/`.
+2. **Update `context.md`** to reflect current project state.
+3. **Update the relevant package README** with the new API or behaviour.
+4. **Update `design.md`** if a non-trivial decision was made.
+5. **Update `architecture.md`** for any architectural change.
+6. **Update the root `README.md`** if user-facing behaviour or results change.
+7. **Append to `session_summary.md`** at the end of the session.

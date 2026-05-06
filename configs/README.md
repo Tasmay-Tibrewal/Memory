@@ -5,12 +5,19 @@ This directory contains example configuration files for training memory-augmente
 ## Available Configs
 
 | Config File | Purpose | Model Type |
-|-------------|---------|------------|
-| `base_small.yaml` | From-scratch pretraining | MemoryTransformer |
-| `adapter_qwen2.5_1.5b.yaml` | Memory adapter on Qwen | MemoryAdapter |
-| `vanilla_control.yaml` | Control experiment (no memory) | MemoryTransformer |
-| `memory_lora_combined.yaml` | Memory + LoRA combined | MemoryAdapter |
-| `reference_all_options.yaml` | Full option surface (documentation template) | Reference |
+| :---------- | :------ | :--------- |
+| `base_small.yaml`             | From-scratch pretraining (16k-bank) | MemoryTransformer |
+| `base_small_run2.yaml`        | **Workshop paper config** — 262K-bank, 4097 chapters, top-k 64 | MemoryTransformer |
+| `vanilla_control.yaml`        | Backbone-only-style baseline | MemoryTransformer (vanilla_mode) |
+| `vanilla_control_run2.yaml`   | iso-FLOP dense baseline matching the paper | MemoryTransformer (vanilla_mode) |
+| `ift_base_model.yaml`         | Instruction tuning from a pretrained MoC checkpoint (`init_from_checkpoint`) | MemoryTransformer |
+| `ift_vanilla_model.yaml`      | Instruction tuning from the iso-FLOP baseline | MemoryTransformer (vanilla_mode) |
+| `ift_vanilla_model_small.yaml`| Instruction tuning from the backbone-only baseline | MemoryTransformer (vanilla_mode) |
+| `adapter_qwen2.5_1.5b.yaml`   | Memory adapter on Qwen2.5-1.5B | MemoryAdapter |
+| `memory_lora_combined.yaml`   | Memory + LoRA combined adapter | MemoryAdapter |
+| `reference_all_options.yaml`  | Full option surface (documentation template) | Reference |
+
+The two `*_run2.yaml` configs are the ones that match the workshop paper's reported runs (Tables 5–6 of the paper). The IFT configs use `init_from_checkpoint` so the optimizer / scheduler / global step are reset cleanly at the pretrain → IFT transition.
 
 ---
 
@@ -131,7 +138,7 @@ memory:
   routing_strategy_train: sequence      # "sequence", "sequence-rolling", or "token"
   routing_strategy_inference: sequence  # Inference: "sequence", "sequence-rolling", "rolling", "token", "hybrid"
   routing_window_size: 128              # Rolling/hybrid window size (tokens)
-  token_routing_kernel_version: v2      # v1/v2/v3; used when routing_strategy_* == "token"
+  token_routing_kernel_version: v2      # v1/v2/v3 unweighted; v4 exact MoE-weighted fused; v5 joint-bias approximation. Used when routing_strategy_* == "token".
   
   # === Router Losses ===
   use_load_balance_loss: true        # Load balancing loss
@@ -168,7 +175,7 @@ memory:
 Token-routing note:
 - When `routing_strategy_train: token` or `routing_strategy_inference: token`, the model uses:
   - dense shared-chapter attention (FlashAttention if available, otherwise PyTorch fallback)
-  - sparse routed-chapter attention via `kernels-final/kernel_{v1|v2|v3}.py` selected by `token_routing_kernel_version` (default `v2`)
+  - sparse routed-chapter attention via `kernels-final/kernel_{v1|v2|v3|v4|v5}.py` selected by `token_routing_kernel_version` (default `v2`). v4 is the exact MoE-weighted fused kernel with full backward (dQ/dK/dV/dW); v5 is a joint-bias single-softmax approximation
 
 ---
 

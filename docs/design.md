@@ -40,7 +40,7 @@ This document records design choices, compromises, known issues, and areas for f
 - Naive token-level dense attention is memory-prohibitive during training/prefill.
 - We therefore split token routing into:
   - dense shared-chapter attention (always weighted 1.0)
-  - sparse routed-chapter attention via stable kernels (`kernels-final` v1/v2/v3, default v2)
+  - sparse routed-chapter attention via stable kernels (`kernels-final` v1/v2/v3 unweighted, v4 exact MoE-weighted fused, v5 joint-bias approximation; default `v2`)
 - **Router weights are applied MoE-style**: each chapter runs through independent softmax attention, then outputs are weighted by router probabilities and summed. This ensures router weights directly control chapter contribution rather than being overridden by Q·K similarity (which would happen with joint-softmax pre-scaling).
 - Per-chapter kernel calls use CUDA stream parallelism with event-based synchronization.
 - Sequence-level remains a robust default for broad compatibility.
@@ -48,7 +48,7 @@ This document records design choices, compromises, known issues, and areas for f
 Kernel engineering notes:
 
 - Experimentation and benchmarks live in `kernels/`
-- Curated stable kernel set lives in `kernels-final/` (v1/v2/v3)
+- Curated stable kernel set lives in `kernels-final/` (v1/v2/v3 unweighted; v4 exact MoE-weighted fused with full backward including dW; v5 single-softmax joint-bias approximation)
 
 **Current**: Integrated in core model/adapter path. Remaining work is tuning and broader benchmark coverage.
 

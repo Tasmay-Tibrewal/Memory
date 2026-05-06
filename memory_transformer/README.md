@@ -11,7 +11,7 @@ memory_transformer/
 ├── memory_attention.py # Cross-attention for memory access
 ├── memory_block.py     # Transformer blocks with memory
 ├── router.py           # Chapter-based routing (MoE-style)
-├── token_routing_kernel.py # Token-level sparse kernel loader (v1/v2/v3)
+├── token_routing_kernel.py # Token-level sparse kernel loader (v1/v2/v3 unweighted, v4 weighted-fused, v5 joint-bias)
 ├── lora.py             # Standard LoRA implementation
 ├── model.py            # Full MemoryTransformer model
 ├── adapter.py          # Memory adapter for pretrained models
@@ -57,7 +57,7 @@ memory_transformer/
 - `training.scheduler`: Supports `cosine`, `linear`, `constant`, and `wsd`.
 - `memory.routing_window_size`: Window size for rolling/hybrid routing during generation.
 - `memory.routing_strategy_{train,inference}`: Supports `sequence`, `sequence-rolling`, and `token` (plus `rolling`/`hybrid` inference modes).
-- `memory.token_routing_kernel_version`: Sparse token-routing kernel version (`v1`, `v2`, `v3`; default `v2`).
+- `memory.token_routing_kernel_version`: Sparse token-routing kernel version (`v1`, `v2`, `v3` for unweighted joint-softmax; `v4` for exact MoE-weighted fused with full backward including dW; `v5` for single-softmax joint-bias approximation; default `v2`).
 
 **Key Functions**:
 
@@ -148,7 +148,7 @@ Output = softmax(QK^T / √d) @ V @ W_o
 
 - Triggered when model/adapter passes `token_routing_state` (used by `routing_strategy_*: token`).
 - Shared chapters: dense cross-attention branch (FlashAttention if available, else PyTorch attention). Always weighted at **1.0** (no router gating).
-- Routed chapters: sparse top-k chapter branch via `kernels-final` (`v1/v2/v3`) with `FSA_topk_sparse_attention_bthd`.
+- Routed chapters: sparse top-k chapter branch via `kernels-final` (`v1/v2/v3` for unweighted joint-softmax via `FSA_topk_sparse_attention_bthd`; `v4` for fused weighted MoE attention via `FSA_topk_sparse_attention_weighted_bthd`; `v5` for joint-bias weighted approximation).
 - **Weighted combination (MoE-style)**: each chapter gets its own independent softmax; outputs weighted by router probabilities and summed. This ensures the router directly controls chapter contribution (joint softmax would let Q·K similarity override weighting).
 - **CUDA parallelism**: per-chapter kernel calls launch on separate CUDA streams; event-based sync (`torch.cuda.Event` + `wait_event`) before weighted accumulation.
 - Combined output: `shared_output + routed_scaling_factor * routed_output`, then projected by `W_o`.

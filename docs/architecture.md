@@ -1,6 +1,8 @@
-﻿# Memory-Augmented Transformer Architecture
+﻿# Memory-Augmented Transformer / Mixture of Chapters Architecture
 
-This document explains the architecture of the Memory-Augmented Transformer in detail.
+This document explains the architecture of the Memory-Augmented Transformer in detail. The configuration that matches the ICLR 2026 NFAM workshop paper ([`idea/Mixture_of_Chapters_ICLR_Workshop_Paper.pdf`](../idea/Mixture_of_Chapters_ICLR_Workshop_Paper.pdf)) lives in [`configs/base_small_run2.yaml`](../configs/base_small_run2.yaml).
+
+For a single-image overview see [`idea/MoC Arch Diagram Excalidraw.png`](../idea/MoC%20Arch%20Diagram%20Excalidraw.png), reproduced in the root [`README.md`](../README.md).
 
 ## Overview
 
@@ -252,7 +254,7 @@ This is critical: **joint softmax** (all chapters in one attention call) would l
 ### Branch Architecture
 
 1. **Shared chapters** (prefix chapters): dense cross-attention, always weighted at **1.0** (no router gating)
-2. **Routed chapters** (per-token top-k): sparse attention via `kernels-final` (`v1/v2/v3`), each chapter gets independent softmax, weighted by router probabilities
+2. **Routed chapters** (per-token top-k): sparse attention via `kernels-final` (`v1/v2/v3` for unweighted, `v4` for exact MoE-weighted fused, `v5` for joint-bias approximation). Each chapter gets independent softmax, weighted by router probabilities (in the unweighted path, weights are applied externally on per-chapter outputs; in the weighted-fused `v4` path, weights enter the kernel directly)
 3. **Output merge**: `shared_output + routed_scaling_factor × routed_output`, then projected by `W_o`
 
 ### CUDA Stream Parallelism
@@ -293,7 +295,8 @@ The Memory-Augmented Transformer provides:
 | LoRA                       | `lora.py`                                  | `LoRALinear`, `apply_lora_to_model`                                                                                 |
 | Quantization               | `quantization.py`                          | `QuantizedMemoryBank`                                                                                               |
 | Configuration              | `config.py`                                | `MemoryConfig`, `ModelConfig`, `TrainingConfig`, `Config`                                                           |
-| Kernel Benchmark           | `kernels-final/benchmark_kernels_final.py` | Correctness + timing for v1/v2/v3 (unweighted joint-softmax and weighted MoE-style)                                 |
+| Sparse Routing Kernels     | `kernels-final/kernel_v{1..5}.py`          | v1 reference / v2 default / v3 alternate / v4 exact MoE-weighted fused / v5 joint-bias approximation                |
+| Kernel Benchmark           | `kernels-final/benchmark_kernels_final.py` | Correctness + timing for v1/v2/v3 (unweighted joint-softmax) and weighted MoE-style (per-chapter independent softmax + dW gradient checks for v4) |
 
 ### Key Implementation Details
 
@@ -428,7 +431,7 @@ For L=2048, N_m=16K, C=16, k=4:
 | `memory_block_variant`               | Block structure             | `A` (default)                           |
 | `use_chapters`                       | Enable routing              | `true` if N_m > 4K                      |
 | `routing_strategy_{train,inference}` | Chapter routing granularity | `sequence`, `sequence-rolling`, `token` |
-| `token_routing_kernel_version`       | Sparse token-routing kernel | `v2` (default), `v1`, `v3`              |
+| `token_routing_kernel_version`       | Sparse token-routing kernel | `v2` (default), `v1`, `v3`, `v4`, `v5`  |
 | `wo_init_zero`                       | Zero init W_o               | `true` (adapter and from-scratch)       |
 
 ### Memory Compression Flags

@@ -9,17 +9,21 @@ The intent is simple:
 
 ## What's In Here
 
-The three versions are:
+The five curated kernel variants are:
 
 - `kernel_v1.py`: unoptimized baseline (local FSA lineage).
-- `kernel_v2.py`: older optimized version (overall most stable in practice).
+- `kernel_v2.py`: older optimized version (overall most stable in practice — **default**).
 - `kernel_v3.py`: old optimized version (stable alternate).
+- `kernel_v4.py`: **exact MoE-weighted fused kernel**. Single launch with forward + dQ/dK/dV/dW backward. Each routed slot keeps its own softmax normalisation domain so routing weights `w_s` directly control chapter contribution: `output = Σ_s w_s · softmax(Q · K_s^T / √d) · V_s`. Backward uses custom Triton kernels for dQ, dK/dV (via inverted-index or chunked partial-buffer schedules), and dW.
+- `kernel_v5.py`: **joint-bias weighted approximation**. Adds `log(w_s)` as a per-slot logit bias and runs a single joint softmax across all selected chapters. Not exact MoE semantics, but stays close to raw v1/v2/v3 throughput while still reflecting router preferences.
 
-Mapping from `kernels/` sources:
+Mapping from `kernels/` sources (for the unweighted variants):
 
-- v1 <= `kernels/fsa_topk_sparse_attention_local.py`
-- v2 <= `kernels/fsa_topk_sparse_attention_local_optimized_older.py`
-- v3 <= `kernels/fsa_topk_sparse_attention_local_optimized_old.py`
+- v1 ⇐ `kernels/fsa_topk_sparse_attention_local.py`
+- v2 ⇐ `kernels/fsa_topk_sparse_attention_local_optimized_older.py`
+- v3 ⇐ `kernels/fsa_topk_sparse_attention_local_optimized_old.py`
+
+`v4` and `v5` are new weighted variants developed for this project; they delegate the unweighted code path back to v1's `FSA_topk_sparse_attention_bthd` and add a new `FSA_topk_sparse_attention_weighted_bthd` entry point for the weighted path.
 
 ## What Was Not Selected (And Why)
 
@@ -71,29 +75,39 @@ When `memory.routing_strategy_train` or `memory.routing_strategy_inference` is s
 
 Kernel selection is controlled by:
 
-- `memory.token_routing_kernel_version: v1|v2|v3` (default `v2`).
+- `memory.token_routing_kernel_version: v1|v2|v3|v4|v5` (default `v2`).
 
 Current wiring uses:
 
-- v1 -> `kernels-final/kernel_v1.py`
-- v2 -> `kernels-final/kernel_v2.py` (default)
-- v3 -> `kernels-final/kernel_v3.py`
+- v1 → `kernels-final/kernel_v1.py`
+- v2 → `kernels-final/kernel_v2.py` (default)
+- v3 → `kernels-final/kernel_v3.py`
+- v4 → `kernels-final/kernel_v4.py` (weighted-fused MoE; falls back to v1 for unweighted calls)
+- v5 → `kernels-final/kernel_v5.py` (joint-bias weighted approximation; falls back to v1 for unweighted calls)
 
 If the sparse kernel path is unavailable for the current runtime (for example unsupported device/dtype/shape), the model falls back to an emulated sparse PyTorch path for functional correctness.
 
-## What "v1/v2/v3" Means Here
+## What "v1/v2/v3/v4/v5" Means Here
 
 These are not "semantic versions" of the whole repository. They are just a naming scheme for the kernel variants that were kept as practical options:
 
-- v1: baseline (useful for sanity and as a reference point)
-- v2: stability-first optimized choice (default)
-- v3: older large optimized alternative
+- **v1**: baseline (useful for sanity and as a reference point) — unweighted only.
+- **v2**: stability-first optimized choice — **default**, unweighted only.
+- **v3**: older large optimized alternative — unweighted only.
+- **v4**: exact MoE-weighted fused kernel with full backward (dQ + dK/dV + dW). Use this when the router weights need to directly control per-chapter contribution and you want gradient flow back to the router from a single fused kernel.
+- **v5**: joint-bias single-softmax approximation. Adds `log(weight)` as a logit bias and runs one joint softmax. Faster than v4 but not exact MoE.
+
+Practical guidance:
+
+- For pure unweighted joint-softmax routing (the workshop paper path), v2 is the default.
+- For end-to-end MoE-style training where the router weights must drive contribution exactly, v4 is the preferred kernel.
+- v5 is a useful middle ground when v4's per-chapter independent-softmax launch overhead matters more than exact MoE semantics.
 
 ## Benchmarking
 
 ### Kernels-Final Benchmark (Primary)
 
-`benchmark_kernels_final.py` in this folder is the primary benchmark for the stable kernel set. It tests all three versions (v1, v2, v3) with two operation modes:
+`benchmark_kernels_final.py` in this folder is the primary benchmark for the stable kernel set. It tests the unweighted variants (v1, v2, v3) and the weighted variants (v4, v5) with two operation modes:
 
 1. **Unweighted** (joint softmax): Single kernel call with all top-k chapters — cross-chapter softmax normalisation.
 2. **Weighted** (MoE-style): Per-chapter independent kernel calls on CUDA streams with event-based synchronisation, followed by router-weighted output accumulation. This matches the production path in `memory_attention.py`.
