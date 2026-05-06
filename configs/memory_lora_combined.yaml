@@ -78,6 +78,7 @@ memory:
 training:
   # Separate learning rates for each component
   memory_lr: 2e-4
+  memory_bank_lr: null # Optional override for memory bank params only
   lora_lr: 1e-4
   base_model_lr: 0 # Frozen
 

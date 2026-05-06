@@ -4,7 +4,7 @@ Dataset loading and preprocessing.
 Supports flexible dataset configuration for any HuggingFace dataset.
 """
 
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 import torch
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
@@ -139,36 +139,94 @@ class TextDataset(Dataset):
             else:
                 raise ValueError(f"Cannot find chat data in item: {list(item.keys())}")
         
-        # Use chat template if available
-        if hasattr(self.tokenizer, 'apply_chat_template'):
-            try:
-                text = self.tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=False,
-                )
-            except Exception:
-                # Fallback to simple concatenation
-                text = self._messages_to_text(messages)
-        else:
-            text = self._messages_to_text(messages)
-        
-        # Tokenize
-        encoded = self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
+        # Preferred path: tokenizer-provided chat template + assistant token mask.
+        # If unavailable/degenerate, fall back to deterministic role-span masking.
+        template_mask_ok = False
+        input_ids = None
+        attention_mask = None
+        labels = None
+
+        chat_template = getattr(self.tokenizer, "chat_template", None)
+        template_text = str(chat_template) if chat_template is not None else ""
+        template_supports_assistant_mask = bool(chat_template) and (
+            "{% generation" in template_text or "{%- generation" in template_text
         )
-        
-        input_ids = encoded["input_ids"].squeeze(0)
-        attention_mask = encoded["attention_mask"].squeeze(0)
-        
-        # For instruction tuning, typically mask user turns
-        # For simplicity, we train on the full sequence
-        labels = input_ids.clone()
-        labels[attention_mask == 0] = -100
+        if hasattr(self.tokenizer, "apply_chat_template") and template_supports_assistant_mask:
+            try:
+                encoded = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=self.max_length,
+                    return_tensors="pt",
+                    return_dict=True,
+                    return_assistant_tokens_mask=True,
+                )
+                input_ids = encoded["input_ids"].squeeze(0)
+                attention_mask = encoded["attention_mask"].squeeze(0)
+                assistant_mask = encoded.get("assistant_masks", None)
+                if assistant_mask is not None:
+                    assistant_mask = assistant_mask.squeeze(0).to(dtype=torch.bool)
+                    labels = torch.full_like(input_ids, -100)
+                    labels[assistant_mask & (attention_mask == 1)] = input_ids[
+                        assistant_mask & (attention_mask == 1)
+                    ]
+                    template_mask_ok = int((labels != -100).sum().item()) > 0
+            except Exception:
+                template_mask_ok = False
+
+        if not template_mask_ok:
+            # Build a deterministic role-tagged transcript and char spans for assistant turns.
+            # We then map tokenizer offsets -> assistant spans to apply assistant-only loss masking.
+            text, assistant_spans = self._messages_to_text_and_assistant_spans(messages)
+
+            # Tokenize with offsets for role-aware label masking.
+            try:
+                encoded = self.tokenizer(
+                    text,
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                    return_offsets_mapping=True,
+                )
+                offsets = encoded.pop("offset_mapping").squeeze(0)  # (seq_len, 2)
+            except Exception:
+                # Fallback for tokenizers without offset support: preserve old behavior
+                # (train on all non-padding tokens) instead of crashing.
+                encoded = self.tokenizer(
+                    text,
+                    max_length=self.max_length,
+                    truncation=True,
+                    padding="max_length",
+                    return_tensors="pt",
+                )
+                offsets = None
+
+            input_ids = encoded["input_ids"].squeeze(0)
+            attention_mask = encoded["attention_mask"].squeeze(0)
+
+            labels = torch.full_like(input_ids, -100)
+            if offsets is None:
+                labels[attention_mask == 1] = input_ids[attention_mask == 1]
+            else:
+                valid_positions = attention_mask == 1
+                for idx in torch.nonzero(valid_positions, as_tuple=False).flatten().tolist():
+                    start = int(offsets[idx, 0].item())
+                    end = int(offsets[idx, 1].item())
+                    if end <= start:
+                        # Special tokens/padding usually map to (0, 0); keep masked.
+                        continue
+                    if self._overlaps_any_span(start, end, assistant_spans):
+                        labels[idx] = input_ids[idx]
+
+                # Safety fallback only for malformed rows with no assistant content at all.
+                # If assistant content exists but was truncated out, keep labels masked
+                # (strict assistant-only training semantics).
+                if int((labels != -100).sum().item()) == 0 and len(assistant_spans) == 0:
+                    labels[attention_mask == 1] = input_ids[attention_mask == 1]
         
         return {
             "input_ids": input_ids,
@@ -184,6 +242,53 @@ class TextDataset(Dataset):
             content = msg.get("content", msg.get("value", ""))
             parts.append(f"<|{role}|>\n{content}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _is_assistant_role(role: str) -> bool:
+        role_norm = str(role).strip().lower()
+        return role_norm in {"assistant", "model", "gpt", "bot"}
+
+    @staticmethod
+    def _overlaps_any_span(start: int, end: int, spans: List[Tuple[int, int]]) -> bool:
+        for s, e in spans:
+            if start < e and end > s:
+                return True
+        return False
+
+    def _messages_to_text_and_assistant_spans(
+        self,
+        messages: List[Dict],
+    ) -> Tuple[str, List[Tuple[int, int]]]:
+        """
+        Serialize messages with explicit role tags and track assistant content spans.
+
+        Returns:
+            text: serialized transcript
+            assistant_spans: list of (char_start, char_end) for assistant contents
+        """
+        text_parts: List[str] = []
+        assistant_spans: List[Tuple[int, int]] = []
+        cursor = 0
+
+        for i, msg in enumerate(messages):
+            role = str(msg.get("role", msg.get("from", "unknown")))
+            content = str(msg.get("content", msg.get("value", "")))
+            prefix = f"<|{role}|>\n"
+            segment = prefix + content
+
+            text_parts.append(segment)
+
+            content_start = cursor + len(prefix)
+            content_end = content_start + len(content)
+            if self._is_assistant_role(role) and content_end > content_start:
+                assistant_spans.append((content_start, content_end))
+
+            cursor += len(segment)
+            if i < len(messages) - 1:
+                text_parts.append("\n")
+                cursor += 1
+
+        return "".join(text_parts), assistant_spans
 
 
 def create_dataloader(

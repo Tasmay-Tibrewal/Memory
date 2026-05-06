@@ -1,4 +1,4 @@
-# Scripts
+﻿# Scripts
 
 Entry point scripts for training, evaluation, and inference.
 
@@ -6,9 +6,20 @@ Entry point scripts for training, evaluation, and inference.
 
 ```
 scripts/
-├── train.py      # Training entry point
-├── eval.py       # Evaluation (perplexity)
-└── inference.py  # Text generation
+├── train.py               # Training entry point
+├── eval.py                # Perplexity evaluation
+├── eval_mmlu.py           # MMLU accuracy
+├── eval_mcq_benchmark.py  # Generic MCQ benchmark evaluator
+├── eval_hellaswag.py      # HellaSwag accuracy
+├── eval_arc.py            # ARC-Challenge / ARC-Easy accuracy
+├── eval_winogrande.py     # Winogrande accuracy
+├── eval_boolq.py          # BoolQ accuracy
+├── eval_openbookqa.py     # OpenBookQA accuracy
+├── eval_triviaqa.py       # TriviaQA top-alias perplexity
+├── eval_pretrain_suite.py # Run all benchmark scripts + aggregate
+├── generate_ifeval_jsonl.py # Generate prompt/response JSONL for external IFEval scoring
+├── inference.py           # Text generation
+└── estimate_flops.py      # Analytical FLOPs estimator
 ```
 
 ---
@@ -155,6 +166,73 @@ Avg Loss:    2.5123
 
 ---
 
+## Benchmark Accuracy Scripts
+
+These scripts evaluate multiple-choice accuracy (not perplexity), useful for
+base-model post-pretraining benchmarking.
+
+```bash
+# MMLU
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# MMLU with default-style few-shot (5) and full-option-text scoring
+python scripts/eval_mmlu.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --shots 5 --fewshot_mode manual --scoring_mode choice_text
+
+# Other common MCQ benchmarks
+python scripts/eval_hellaswag.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_arc.py --variant challenge --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_winogrande.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_boolq.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_openbookqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
+python scripts/eval_triviaqa.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Generic one-benchmark CLI
+python scripts/eval_mcq_benchmark.py --benchmark hellaswag --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Explicit zero-shot label-only scoring (legacy style)
+python scripts/eval_mcq_benchmark.py --benchmark hellaswag --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --shots 0 --scoring_mode label
+
+# Master suite runner (runs all + aggregates)
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model
+
+# Suite defaults now support manual few-shot + choice_text scoring
+python scripts/eval_pretrain_suite.py --config configs/base_small.yaml --checkpoint outputs/final_model \
+  --mmlu_shots 5 --mcq_shots 5 --mmlu_fewshot_mode manual --mcq_fewshot_mode manual \
+  --scoring_mode choice_text
+```
+
+Notes:
+- `eval_mmlu.py` and `eval_mcq_benchmark.py` support `--fewshot_mode {manual,dataset}`.
+- `manual` uses handcrafted benchmark/task examples and shuffles option order per seed for label diversity.
+- `--scoring_mode choice_text` scores full option text; `--scoring_mode label` scores `A/B/C/...` label tokens.
+- `eval_triviaqa.py` uses question-only prompts (no context), samples few-shot examples from a non-test split by default (`--shots 5`), selects the highest full-sequence-probability alias per question, and reports top-alias perplexity (plus token-weighted corpus perplexity).
+- `eval_pretrain_suite.py` defaults: `mmlu, hellaswag, arc_challenge, arc_easy, winogrande, boolq, openbookqa, triviaqa`.
+
+---
+
+## `generate_ifeval_jsonl.py` - IFEval JSONL Generator
+
+Generates one JSONL line per prompt for external IFEval repos/tools.
+
+### Usage
+
+```bash
+python scripts/generate_ifeval_jsonl.py \
+  --config configs/ift_base_model.yaml \
+  --checkpoint outputs/final_model \
+  --output outputs/ifeval/predictions.jsonl
+```
+
+### Notes
+
+- Default dataset: `google/IFEval`, split `train`.
+- Output rows contain: `key`, `prompt`, `response`, `model_id` (plus instruction metadata when present).
+- Chat template application is enabled by default when tokenizer provides one (`--no-apply_chat_template` to disable).
+
+---
+
 ## `inference.py` - Generation Script
 
 **Purpose**: Generate text using trained models.
@@ -209,6 +287,58 @@ Output: What is machine learning?
 Machine learning is a subset of artificial intelligence that enables 
 computers to learn from data without being explicitly programmed...
 ```
+
+---
+
+## `estimate_flops.py` - FLOPs Estimator
+
+**Purpose**: Estimate training FLOPs from a YAML config.
+
+This script estimates forward/backward FLOPs for the from-scratch
+`MemoryTransformer` path using the configured architecture and training setup.
+
+### Usage
+
+```bash
+# Use config defaults (training.batch_size, training.max_length)
+python scripts/estimate_flops.py --config configs/base_small.yaml
+
+# Override per-device batch and sequence length
+python scripts/estimate_flops.py --config configs/base_small.yaml \
+    --batch_size 16 --seq_len 2048
+
+# Override world-size math and grad-accum for what-if planning
+python scripts/estimate_flops.py --config configs/base_small.yaml \
+    --num_gpus 8 --gradient_accumulation_steps 2 --max_steps 1200
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `--config` | Yes | Path to YAML config file |
+| `--batch_size` | No | Override per-device micro-batch size |
+| `--seq_len` | No | Override sequence length |
+| `--num_gpus` | No | Override world size used for global FLOPs |
+| `--gradient_accumulation_steps` | No | Override grad accumulation for optimizer-step totals |
+| `--max_steps` | No | Override steps used for run-total FLOPs |
+| `--flash_available` | No | Force flash-attn assumption: `auto`/`true`/`false` |
+
+### Notes
+
+- Includes both matmul and elementwise components:
+  self-attn, memory-attn, MLP, norms, residuals, RoPE, router forward/loss,
+  memory preprocessing, LM head, and CE softmax.
+- Includes recompute FLOPs for both:
+  `training.gradient_checkpointing` (whole-layer recompute) and
+  `memory.memory_gradient_checkpointing` (memory-attn internal recompute).
+- Uses `memory.routing_strategy_train` semantics (training path). Valid values
+  here are `sequence`, `sequence-rolling`/`sequence_rolling`, and `token`.
+- Includes factorized memory-bank materialization FLOPs when
+  `memory.use_low_rank_memory: true` and `memory.low_rank_mode: factorized`.
+- Matmul terms are exact for configured tensor shapes; non-matmul terms are
+  analytic approximations. Optimizer-update FLOPs and communication overhead
+  are not included.
 
 ---
 
@@ -310,3 +440,4 @@ accelerate config default
 # Or specify everything manually
 accelerate launch --num_processes 2 --mixed_precision bf16 ...
 ```
+

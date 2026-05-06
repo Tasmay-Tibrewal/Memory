@@ -1,0 +1,13 @@
+{
+  "benchmark": "hellaswag",
+  "dataset_name": "Rowan/hellaswag",
+  "subset": null,
+  "eval_split": "validation",
+  "fewshot_split": "train",
+  "shots": 5,
+  "fewshot_mode": "manual",
+  "scoring_mode": "choice_text",
+  "accuracy": 0.25194184425413263,
+  "correct": 2530,
+  "total": 10042
+}

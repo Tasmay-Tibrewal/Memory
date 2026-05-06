@@ -941,6 +941,76 @@ Implement shared chapter routing controls, improve wandb training telemetry, and
   - router metric summary helper
 
 ---
+
+# Session 11 Summary
+
+**Date**: 2026-05-06
+**Status**: Complete
+**Focus**: Documentation overhaul — paper-branch refresh, mojibake cleanup, kernel-version updates, ICLR workshop acceptance, architecture-diagram integration.
+
+## Objective
+
+Bring the documentation in line with the current state of the codebase on the `paper` branch:
+1. Reflect ICLR 2026 NFAM workshop acceptance and add the architecture diagram throughout.
+2. Reflect the v4 (exact MoE-weighted fused) and v5 (joint-bias approximation) sparse routing kernels everywhere v1/v2/v3 was previously listed.
+3. Clean up mojibake / corrupted UTF-8 box-drawing in the user-facing docs.
+4. Update the configs index to include the run-2 / IFT configs that match the paper.
+
+## Work Completed
+
+- **Root `README.md`** completely rewritten:
+  - ICLR 2026 NFAM Workshop badge + paper / slides links + author list
+  - Embedded `idea/MoC Arch Diagram Excalidraw.png` as the primary architecture figure
+  - Headline results table from the workshop paper (pretraining loss + IFT retention deltas)
+  - Reference configuration table (matches Tables 5–6 of the paper / `configs/base_small_run2.yaml`)
+  - Updated repo layout (kernels-final v1–v5, run-2 + IFT configs, idea/* additions)
+  - Updated quick-start commands to point at the paper-config YAMLs and `init_from_checkpoint`-based IFT
+  - Cleaned up all mojibake; replaced corrupted box-drawing with proper Unicode
+  - BibTeX citation block
+
+- **`docs/README.md`** rewritten with clean tree, latest session list, and refreshed Quick Reference.
+
+- **`docs/context.md`** rewritten to fix the file-dependency graph mojibake, refresh file/line counts, add the workshop-paper headline results, list the run-2 / IFT configs, and reference the architecture diagram.
+
+- **`docs/architecture.md`** updated to:
+  - Reference the workshop paper and `idea/MoC Arch Diagram Excalidraw.png` at the top
+  - Mention v1–v5 in the routed sparse branch description
+  - Add v1–v5 sparse routing kernels row to the implementation-mapping table
+  - Update the configuration quick-reference to list `v1`/`v2`/`v3`/`v4`/`v5`
+
+- **`docs/design.md`** updated to mention v4/v5 in the kernel description.
+
+- **`docs/prompt.md`** rewritten cleanly — fixed all mojibake, refreshed required-reading list, added research-artefact references (paper, slides, diagram), updated kernel-version description.
+
+- **`memory_transformer/README.md`** updated for v1–v5 (loader description, config-flag docstring, cross-attention path description).
+
+- **`kernels-final/README.md`** expanded to document v4 (exact MoE-weighted fused with full backward including dW) and v5 (joint-bias approximation), including practical-guidance section and benchmark scope.
+
+- **`configs/README.md`** updated with:
+  - The full Available Configs table (added base_small_run2, vanilla_control_run2, ift_base_model, ift_vanilla_model, ift_vanilla_model_small)
+  - v1–v5 in the kernel-version comments
+
+## Files Modified
+
+- `README.md` (full rewrite)
+- `docs/README.md` (full rewrite)
+- `docs/context.md` (full rewrite)
+- `docs/architecture.md` (targeted edits)
+- `docs/design.md` (targeted edits)
+- `docs/prompt.md` (full rewrite)
+- `memory_transformer/README.md` (targeted edits)
+- `kernels-final/README.md` (expansion for v4/v5)
+- `configs/README.md` (config-table refresh + kernel-version updates)
+- `docs/meta_artifacts/session_summary.md` (this entry)
+
+## Verification
+
+- Re-grepped all touched files for mojibake markers (`â`, `Ã`) — root README, docs/README, docs/context, docs/prompt all clean (only `session_summary.md` retains historical mojibake intentionally, since it is an append-only ledger).
+- Verified that all kernel-version references in user-facing docs now list v1–v5.
+- Verified that the architecture diagram path (`idea/MoC Arch Diagram Excalidraw.png`) is correctly URL-escaped in markdown links.
+- Verified that the configs table matches the actual contents of `configs/`.
+
+---
 # Template for Future Session Summaries
 
 ```markdown

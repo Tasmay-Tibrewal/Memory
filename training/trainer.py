@@ -53,7 +53,7 @@ class Trainer:
     - Multi-GPU with DDP/FSDP via Accelerate
     - Mixed precision (fp16/bf16)
     - Gradient checkpointing
-    - Separate learning rates for memory/LoRA/base
+    - Separate learning rates for memory bank / memory layers / LoRA / base
     - Eval during training
     - Early stopping
     - Best model saving
@@ -101,6 +101,11 @@ class Trainer:
             "mixed_precision": config.training.mixed_precision,
             "gradient_accumulation_steps": config.training.gradient_accumulation_steps,
             "log_with": "wandb" if config.training.log_to_wandb else None,
+            # Keep scheduler progression aligned to optimizer/global steps.
+            # We step the scheduler explicitly in the training loop when
+            # sync_gradients=True, so disable Accelerate's extra scheduler
+            # stepping behavior under distributed training.
+            "step_scheduler_with_optimizer": False,
         }
         if fsdp_plugin is not None:
             accelerator_kwargs["fsdp_plugin"] = fsdp_plugin
@@ -183,8 +188,12 @@ class Trainer:
         self.best_loss = float('inf')
         self.patience_counter = 0
         self.should_stop = False
-        
-        # Resume from checkpoint if specified
+
+        # Weights-only initialization (fresh run semantics).
+        if config.training.init_from_checkpoint:
+            self._init_model_from_checkpoint(config.training.init_from_checkpoint)
+
+        # Resume full training state if specified.
         if config.training.resume_from_checkpoint:
             self._resume_from_checkpoint(config.training.resume_from_checkpoint)
         
@@ -196,7 +205,10 @@ class Trainer:
         if not self.train_config.log_to_wandb or not self.accelerator.is_main_process:
             return
 
-        wandb_init = {"project": self.train_config.wandb_project}
+        # `project_name` is already passed to `accelerator.init_trackers(...)`.
+        # Do not pass `project` again in wandb init kwargs, or wandb.init()
+        # receives duplicate project arguments and raises TypeError.
+        wandb_init = {}
         if self.train_config.wandb_run_name:
             wandb_init["name"] = self.train_config.wandb_run_name
 
@@ -209,6 +221,12 @@ class Trainer:
     def _validate_training_config(self) -> None:
         """Validate training config values early for clearer errors."""
         cfg = self.train_config
+        if cfg.resume_from_checkpoint is not None and cfg.init_from_checkpoint is not None:
+            raise ValueError(
+                "training.resume_from_checkpoint and training.init_from_checkpoint are mutually exclusive. "
+                "Use resume_from_checkpoint to continue full state, or init_from_checkpoint for "
+                "weights-only fresh training."
+            )
         if cfg.batch_size <= 0:
             raise ValueError(f"batch_size must be > 0, got {cfg.batch_size}")
         if cfg.gradient_accumulation_steps <= 0:
@@ -296,21 +314,24 @@ class Trainer:
         if isinstance(self.model, MemoryAdapter):
             param_groups = self.model.get_parameter_groups()
         else:
-            # From-scratch training: split memory-related modules and backbone params.
-            memory_markers = (
-                "memory_banks.",
+            # From-scratch training: split memory-bank params from other memory
+            # params so memory_bank_lr can override memory_lr when set.
+            memory_non_bank_markers = (
                 "routers.",
                 ".memory_attn.",
                 ".memory_layernorm.",
                 ".post_memory_layernorm.",
                 ".post_memory_mlp.",
             )
+            memory_bank_params: List[nn.Parameter] = []
             memory_params: List[nn.Parameter] = []
             backbone_params: List[nn.Parameter] = []
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-                if any(marker in name for marker in memory_markers):
+                if "memory_banks." in name:
+                    memory_bank_params.append(p)
+                elif any(marker in name for marker in memory_non_bank_markers):
                     memory_params.append(p)
                 else:
                     backbone_params.append(p)
@@ -318,6 +339,15 @@ class Trainer:
             param_groups = []
             if memory_params:
                 param_groups.append({"params": memory_params, "lr": train_cfg.memory_lr, "name": "memory"})
+            if memory_bank_params:
+                memory_bank_lr = (
+                    train_cfg.memory_lr
+                    if train_cfg.memory_bank_lr is None
+                    else train_cfg.memory_bank_lr
+                )
+                param_groups.append(
+                    {"params": memory_bank_params, "lr": memory_bank_lr, "name": "memory_bank"}
+                )
             if backbone_params:
                 param_groups.append({"params": backbone_params, "lr": train_cfg.base_model_lr, "name": "base_model"})
         
@@ -498,6 +528,82 @@ class Trainer:
             key: sums[key] / max(counts.get(key, 1), 1)
             for key in sums.keys()
         }
+
+    def _compute_router_aux_loss_for_logging(self, router_losses: Any) -> float:
+        """
+        Compute weighted router auxiliary loss from raw router loss dicts.
+
+        Primary path uses the model's own aggregation implementation to avoid
+        drift from training loss semantics. Falls back to a local computation
+        if unavailable.
+        """
+        if not isinstance(router_losses, list) or not router_losses:
+            return 0.0
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        if hasattr(unwrapped_model, "_aggregate_router_losses"):
+            with torch.no_grad():
+                aux = unwrapped_model._aggregate_router_losses(router_losses)
+            return float(aux.detach().item())
+
+        mem_cfg = self.config.memory
+        load_coef = (
+            float(mem_cfg.load_balance_coefficient)
+            if bool(mem_cfg.use_load_balance_loss)
+            else 0.0
+        )
+        aux_coef = (
+            float(mem_cfg.auxiliary_loss_coefficient)
+            if bool(mem_cfg.use_auxiliary_loss)
+            else 0.0
+        )
+        z_coef = (
+            float(mem_cfg.z_loss_coefficient)
+            if bool(mem_cfg.use_z_loss)
+            else 0.0
+        )
+
+        non_empty = 0
+        total = 0.0
+        for layer_losses in router_losses:
+            if not isinstance(layer_losses, dict) or not layer_losses:
+                continue
+            layer_total = 0.0
+            if load_coef > 0.0 and torch.is_tensor(layer_losses.get("load_balance")):
+                layer_total += load_coef * float(layer_losses["load_balance"].detach().item())
+            if aux_coef > 0.0 and torch.is_tensor(layer_losses.get("auxiliary")):
+                layer_total += aux_coef * float(layer_losses["auxiliary"].detach().item())
+            if z_coef > 0.0 and torch.is_tensor(layer_losses.get("z_loss")):
+                layer_total += z_coef * float(layer_losses["z_loss"].detach().item())
+            total += layer_total
+            non_empty += 1
+
+        if non_empty == 0:
+            return 0.0
+        return total / non_empty
+
+    @staticmethod
+    def _get_group_learning_rate_logs(
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[Any],
+    ) -> Dict[str, float]:
+        """Return per-parameter-group learning rates for logging."""
+        if scheduler is not None:
+            lrs = scheduler.get_last_lr()
+        else:
+            lrs = [float(pg.get("lr", 0.0)) for pg in optimizer.param_groups]
+
+        logs: Dict[str, float] = {}
+        seen: Dict[str, int] = {}
+        for idx, (param_group, lr) in enumerate(zip(optimizer.param_groups, lrs)):
+            raw_name = str(param_group.get("name", f"group_{idx}"))
+            safe_name = raw_name.replace("/", "_")
+            dup_idx = seen.get(safe_name, 0)
+            seen[safe_name] = dup_idx + 1
+            suffix = f"_{dup_idx}" if dup_idx > 0 else ""
+            logs[f"train/learning_rate/{safe_name}{suffix}"] = float(lr)
+
+        return logs
     
     def _resume_from_checkpoint(self, checkpoint_path: str):
         """Resume training from checkpoint."""
@@ -558,6 +664,49 @@ class Trainer:
                     f"Resumed ({resume_kind}) trainer state: step={self.global_step}, "
                     f"epoch={self.epoch}, best_loss={self.best_loss:.4f}"
                 )
+
+    def _init_model_from_checkpoint(self, checkpoint_path: str) -> None:
+        """
+        Load only model weights from a checkpoint and keep a fresh training state.
+
+        This is useful for stage transitions (e.g., pretraining -> instruction tuning)
+        where optimizer/scheduler/global step should restart from zero.
+        """
+        checkpoint_dir = Path(checkpoint_path)
+
+        model_path_pt = checkpoint_dir / "model.pt"
+        safe_path = checkpoint_dir / "model.safetensors"
+        bin_path = checkpoint_dir / "pytorch_model.bin"
+
+        state_dict = None
+        if model_path_pt.exists():
+            state_dict = torch.load(model_path_pt, map_location="cpu", weights_only=True)
+        elif safe_path.exists():
+            from safetensors.torch import load_file
+
+            state_dict = load_file(str(safe_path), device="cpu")
+        elif bin_path.exists():
+            state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+        else:
+            raise FileNotFoundError(
+                f"No supported model weights found in {checkpoint_dir} "
+                f"(expected {model_path_pt.name}, {safe_path.name}, or {bin_path.name})."
+            )
+
+        self.accelerator.unwrap_model(self.model).load_state_dict(state_dict)
+
+        # Explicitly keep a fresh trainer state.
+        self.global_step = 0
+        self.epoch = 0
+        self.best_loss = float("inf")
+        self.patience_counter = 0
+        self.should_stop = False
+
+        if self.accelerator.is_main_process:
+            print(
+                f"Initialized model weights from {checkpoint_dir} with fresh optimizer/scheduler "
+                "state (global_step=0)."
+            )
     
     def evaluate(self) -> Dict[str, float]:
         """Run evaluation on eval dataset."""
@@ -675,6 +824,8 @@ class Trainer:
 
         # Track loss statistics for logging windows (Bug 38 fix: divide by actual count, not a fixed constant)
         running_loss = 0.0
+        running_ce_loss = 0.0
+        running_router_aux_loss = 0.0
         running_loss_steps = 0
         running_step_time = 0.0
         running_step_time_steps = 0
@@ -682,6 +833,8 @@ class Trainer:
         running_router_counts: Dict[str, int] = {}
         last_grad_norm: Optional[float] = None
         last_loss_value: Optional[float] = None
+        last_ce_loss_value: Optional[float] = None
+        last_router_aux_loss_value: Optional[float] = None
         step_timer_start = time.perf_counter()
 
         # Determine epoch stopping condition
@@ -708,6 +861,11 @@ class Trainer:
 
                     loss = outputs["loss"]
                     last_loss_value = float(loss.detach().item())
+                    router_aux_loss_value = self._compute_router_aux_loss_for_logging(
+                        outputs.get("router_losses")
+                    )
+                    last_router_aux_loss_value = float(router_aux_loss_value)
+                    last_ce_loss_value = float(last_loss_value - last_router_aux_loss_value)
                     step_router_metrics = self._summarize_router_losses(
                         outputs.get("router_losses")
                     )
@@ -741,6 +899,10 @@ class Trainer:
                 # Update logging window
                 if last_loss_value is not None:
                     running_loss += last_loss_value
+                    running_ce_loss += last_ce_loss_value if last_ce_loss_value is not None else last_loss_value
+                    running_router_aux_loss += (
+                        last_router_aux_loss_value if last_router_aux_loss_value is not None else 0.0
+                    )
                     running_loss_steps += 1
                 now = time.perf_counter()
                 running_step_time += (now - step_timer_start)
@@ -754,6 +916,8 @@ class Trainer:
                 # Logging: first optimizer step and then every logging_steps.
                 if self.global_step == 1 or (self.global_step % train_cfg.logging_steps == 0):
                     avg_loss = running_loss / max(running_loss_steps, 1)
+                    avg_ce_loss = running_ce_loss / max(running_loss_steps, 1)
+                    avg_router_aux_loss = running_router_aux_loss / max(running_loss_steps, 1)
                     lr = self.scheduler.get_last_lr()[0]
                     avg_step_time = running_step_time / max(running_step_time_steps, 1)
 
@@ -767,11 +931,19 @@ class Trainer:
                         log_payload = {
                             "train/loss": avg_loss,
                             "train/total_loss": avg_loss,
+                            "train/ce_loss": avg_ce_loss,
+                            "train/router_aux_loss": avg_router_aux_loss,
                             "train/learning_rate": lr,
                             "train/step": self.global_step,
                             "train/epoch": self.epoch,
                             "train/step_time_s": avg_step_time,
                         }
+                        log_payload.update(
+                            self._get_group_learning_rate_logs(
+                                optimizer=self.optimizer,
+                                scheduler=self.scheduler,
+                            )
+                        )
                         if last_grad_norm is not None:
                             log_payload["train/grad_norm"] = last_grad_norm
                         for key in sorted(running_router_sums.keys()):
@@ -788,9 +960,12 @@ class Trainer:
                             log_payload["train/max_memory_allocated_gb"] = (
                                 torch.cuda.max_memory_allocated(device) / 1024**3
                             )
-                        self.accelerator.log(log_payload)
+                        # Use explicit optimizer-step index for tracker x-axis consistency.
+                        self.accelerator.log(log_payload, step=self.global_step)
 
                     running_loss = 0.0
+                    running_ce_loss = 0.0
+                    running_router_aux_loss = 0.0
                     running_loss_steps = 0
                     running_step_time = 0.0
                     running_step_time_steps = 0
@@ -805,10 +980,13 @@ class Trainer:
                     if self.accelerator.is_main_process:
                         print(f"\nStep {self.global_step}: eval_loss = {eval_loss:.4f}")
                         if train_cfg.log_to_wandb:
-                            self.accelerator.log({
-                                "eval/loss": eval_loss,
-                                "eval/step": self.global_step,
-                            })
+                            self.accelerator.log(
+                                {
+                                    "eval/loss": eval_loss,
+                                    "eval/step": self.global_step,
+                                },
+                                step=self.global_step,
+                            )
 
                     # Determine whether this is a new best eval (synchronized across ranks).
                     # Note: Early stopping compares against the *previous* best_loss, so we update best_loss after

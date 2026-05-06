@@ -230,6 +230,7 @@ launch with `accelerate` for multi-process training.
 training:
   # Learning rates (separate for components)
   memory_lr: 2e-4
+  memory_bank_lr: null  # Optional override for memory bank params only
   lora_lr: 1e-4
   base_model_lr: 1e-5
 

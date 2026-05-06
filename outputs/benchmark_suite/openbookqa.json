@@ -1,0 +1,13 @@
+{
+  "benchmark": "openbookqa",
+  "dataset_name": "openbookqa",
+  "subset": "main",
+  "eval_split": "validation",
+  "fewshot_split": "train",
+  "shots": 5,
+  "fewshot_mode": "manual",
+  "scoring_mode": "choice_text",
+  "accuracy": 0.354,
+  "correct": 177,
+  "total": 500
+}

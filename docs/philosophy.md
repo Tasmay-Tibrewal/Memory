@@ -222,14 +222,16 @@ training:   # How to train
 ### Documentation Levels
 
 | Level | Document | Audience | Updates |
-|-------|----------|----------|---------|
-| Quick start | README.md | New users | On feature changes |
+| :---- | :------- | :------- | :------ |
+| Quick start | `README.md` (root) | New users | On feature / result changes |
 | Code docs | Package READMEs | Developers | On module changes |
-| Deep dive | architecture.md | Contributors | On design changes |
-| Rationale | design.md | Maintainers | On decisions |
-| Current state | context.md | Agents/Handoffs | Every session |
-| History | session.md | Audit/Debug | During session |
-| Summary | session_summary.md | Quick context | End of session |
+| Deep dive | `docs/architecture.md` | Contributors | On design changes |
+| Rationale | `docs/design.md` | Maintainers | On decisions |
+| Current state | `docs/context.md` | Agents / handoffs | Every session |
+| Conventions | `docs/philosophy.md` | New contributors / agents | When conventions change |
+| Onboarding | `docs/prompt.md` | New agents | When required-reading list changes |
+| History | `meta_artifacts/sessionN/session.md` | Audit / debug | During session |
+| Summary | `meta_artifacts/session_summary.md` | Quick context | End of session |
 
 ### README Structure for Packages
 ```markdown
@@ -278,12 +280,15 @@ Brief description.
 ### When to Update Docs
 
 | Event | Update |
-|-------|--------|
-| New feature | README, architecture.md, session.md |
-| Bug fix | session.md (if significant) |
-| Design decision | design.md, session.md |
-| Session end | context.md, session_summary.md |
-| Structure change | All relevant READMEs |
+| :---- | :----- |
+| New feature | Root `README.md`, package README, `architecture.md`, `session.md` |
+| Bug fix | `session.md` (if significant) |
+| Design decision | `design.md`, `session.md` |
+| New config flag | `configs/README.md`, `configs/reference_all_options.yaml`, `context.md` |
+| Required-reading change | `docs/prompt.md` |
+| Convention change | `docs/philosophy.md` |
+| Session end | `context.md`, `session_summary.md` |
+| Structure change | All relevant READMEs + `docs/README.md` tree |
 
 ---
 
@@ -316,6 +321,8 @@ Root/
     ├── architecture.md    # Technical deep dive
     ├── design.md          # Decisions and rationale
     ├── context.md         # Current state summary
+    ├── philosophy.md      # Coding / configuration / docs conventions (this file)
+    ├── prompt.md          # Onboarding prompt for new sessions / agents
     └── meta_artifacts/    # Session history
 ```
 
@@ -330,13 +337,17 @@ Root/
 ### What Goes Where
 
 | Content | Location |
-|---------|----------|
-| Quick start | Root README.md |
-| API documentation | Package README.md |
-| Technical architecture | docs/architecture.md |
-| Why decisions were made | docs/design.md |
-| Current project state | docs/context.md |
-| Session history | docs/meta_artifacts/ |
+| :------ | :------- |
+| Quick start, paper / results, citation | Root `README.md` |
+| API documentation | Package `README.md` |
+| Technical architecture | `docs/architecture.md` |
+| Why decisions were made | `docs/design.md` |
+| Current project state | `docs/context.md` |
+| Coding / config / doc conventions | `docs/philosophy.md` |
+| Onboarding prompt | `docs/prompt.md` |
+| Session history | `docs/meta_artifacts/` |
+| Kernel engineering notes | `kernels/*.md`, `kernels-final/README.md` |
+| Original idea / paper / slides | `idea/` |
 
 ---
 
@@ -381,11 +392,15 @@ What remains to be done
 ### Update Frequency
 
 | Document | When to Update |
-|----------|----------------|
-| session.md | Throughout session, as work happens |
-| context.md | End of major phases or session |
-| session_summary.md | End of session |
-| design.md | When decisions are made |
+| :------- | :------------- |
+| `meta_artifacts/sessionN/session.md` | Throughout the session, as work happens |
+| `docs/context.md` | End of major phases or session |
+| `docs/meta_artifacts/session_summary.md` | End of session |
+| `docs/design.md` | When decisions are made |
+| `docs/architecture.md` | When architecture changes |
+| `docs/prompt.md` | When the required-reading list changes |
+| Root `README.md` | When user-visible behaviour or results change |
+| Package READMEs | When the corresponding code surface changes |
 
 ---
 
@@ -402,4 +417,4 @@ What remains to be done
 
 ---
 
-*This philosophy was developed during Session 1 of the Memory-Augmented Transformer project (February 5, 2026).*
+*This philosophy was developed during Session 1 of the Memory-Augmented Transformer / Mixture of Chapters project (February 5, 2026) and refreshed during Session 11 (May 2026) alongside the documentation overhaul that accompanied the ICLR 2026 NFAM workshop release.*

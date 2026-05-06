@@ -603,7 +603,7 @@ class MemoryAdapter(nn.Module):
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
 
                         if strategy == "token":
-                            chapter_indices_global, chapter_weights_global, router_losses = router.route_token_level(
+                            chapter_indices_global, chapter_weights_token, router_losses = router.route_token_level(
                                 hidden_states=hidden_states,
                                 return_losses=self.training,
                                 exclude_prefix_chapters=mem_cfg.num_shared_chapters,
@@ -656,16 +656,32 @@ class MemoryAdapter(nn.Module):
                                 "shared_memory": shared_memory,
                                 "routed_memory": routed_memory,
                                 "token_chapter_indices": chapter_indices_local.to(dtype=torch.int32),
-                                # Keep weights aligned to token_chapter_indices (same shape [B,T,topk]).
-                                "token_chapter_weights": chapter_weights_global.to(dtype=torch.float32),
                                 "tokens_per_chapter": int(tokens_per_chapter),
                                 "routed_scale": float(mem_cfg.routed_scaling_factor),
                                 "kernel_version": self.token_routing_kernel_version,
+                                # chapter_weights_token: (B, T, top_k) router-produced
+                                # per-token importance weights for each selected chapter.
+                                # Used for MoE-style weighted combination of per-chapter
+                                # attention outputs. When present, each chapter's
+                                # cross-attention is computed independently and mixed by
+                                # these weights; when None, all chapters are attended
+                                # jointly in a single pass.
+                                "chapter_weights": chapter_weights_token,
                             }
                             memory = None
 
-                        elif self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}:
-                            router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                        elif (
+                            self.training
+                            or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}
+                            or ((not use_cache) and strategy in {"rolling", "hybrid"})
+                        ):
+                            if self.training:
+                                effective_strategy = mem_cfg.routing_strategy_train
+                            elif (not use_cache) and strategy in {"rolling", "hybrid"}:
+                                effective_strategy = "sequence"
+                            else:
+                                effective_strategy = strategy
+                            router.routing_strategy = effective_strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
                                 return_losses=self.training,
@@ -914,21 +930,47 @@ class MemoryAdapter(nn.Module):
             params.extend(adapter.parameters())
         
         return params
+
+    def get_memory_bank_parameters(self) -> List[nn.Parameter]:
+        """Get memory-bank parameters only."""
+        params = []
+        for bank in self.memory_banks.values():
+            params.extend(bank.parameters())
+        return params
     
     def get_parameter_groups(self) -> List[Dict[str, Any]]:
         """Get parameter groups with different learning rates."""
-        mem_cfg = self.memory_config
         train_cfg = self.config.training
         
         groups = []
         
-        # Memory parameters
-        memory_params = self.get_memory_parameters()
+        # Memory parameters excluding memory banks
+        memory_params: List[nn.Parameter] = []
+        for router in self.routers.values():
+            memory_params.extend(p for p in router.parameters() if p.requires_grad)
+        for adapter in self.memory_adapters.values():
+            memory_params.extend(p for p in adapter.parameters() if p.requires_grad)
         if memory_params:
             groups.append({
                 "params": memory_params,
                 "lr": train_cfg.memory_lr,
                 "name": "memory",
+            })
+
+        # Memory bank parameters (optional LR override)
+        memory_bank_params = [
+            p for p in self.get_memory_bank_parameters() if p.requires_grad
+        ]
+        if memory_bank_params:
+            memory_bank_lr = (
+                train_cfg.memory_lr
+                if train_cfg.memory_bank_lr is None
+                else train_cfg.memory_bank_lr
+            )
+            groups.append({
+                "params": memory_bank_params,
+                "lr": memory_bank_lr,
+                "name": "memory_bank",
             })
         
         # LoRA parameters

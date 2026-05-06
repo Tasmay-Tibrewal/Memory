@@ -5,6 +5,8 @@ This module resolves the stable kernel variants from `kernels-final/`:
   - v1 -> kernel_v1.py
   - v2 -> kernel_v2.py (default)
   - v3 -> kernel_v3.py
+  - v4 -> kernel_v4.py (weighted fused MoE support)
+  - v5 -> kernel_v5.py (weighted fused joint-softmax approximation)
 """
 
 from __future__ import annotations
@@ -20,15 +22,18 @@ _KERNEL_FILES: Dict[str, str] = {
     "v1": "kernel_v1.py",
     "v2": "kernel_v2.py",
     "v3": "kernel_v3.py",
+    "v4": "kernel_v4.py",
+    "v5": "kernel_v5.py",
 }
 
 _KERNEL_FN_CACHE: Dict[str, Callable] = {}
+_WEIGHTED_KERNEL_FN_CACHE: Dict[str, Optional[Callable]] = {}
 _KERNEL_IMPORT_ERROR: Dict[str, Exception] = {}
 _CACHE_LOCK = threading.Lock()
 
 
 def normalize_kernel_version(version: Optional[str]) -> str:
-    """Normalize user-provided kernel version to {'v1','v2','v3'}."""
+    """Normalize user-provided kernel version to {'v1','v2','v3','v4','v5'}."""
     if version is None:
         return "v2"
 
@@ -39,25 +44,22 @@ def normalize_kernel_version(version: Optional[str]) -> str:
         return "v2"
     if value in {"3", "v3", "kernel_v3"}:
         return "v3"
+    if value in {"4", "v4", "kernel_v4"}:
+        return "v4"
+    if value in {"5", "v5", "kernel_v5"}:
+        return "v5"
 
     raise ValueError(
         f"Unsupported token_routing_kernel_version='{version}'. "
-        "Expected one of: v1, v2, v3."
+        "Expected one of: v1, v2, v3, v4, v5."
     )
 
 
-def get_token_routing_kernel_fn(version: Optional[str]) -> Callable:
-    """
-    Load and return `FSA_topk_sparse_attention_bthd` for the requested version.
-
-    Returns:
-        Callable with signature matching kernels-final FSA wrapper.
-    """
+def _load_kernel_module(version: str):
+    """Import and return the kernel module for the requested version."""
     ver = normalize_kernel_version(version)
 
     with _CACHE_LOCK:
-        if ver in _KERNEL_FN_CACHE:
-            return _KERNEL_FN_CACHE[ver]
         if ver in _KERNEL_IMPORT_ERROR:
             raise RuntimeError(
                 f"Token-routing kernel '{ver}' failed to import previously."
@@ -83,17 +85,58 @@ def get_token_routing_kernel_fn(version: Optional[str]) -> Callable:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
 
-        fn = getattr(module, "FSA_topk_sparse_attention_bthd", None)
-        if fn is None:
-            raise AttributeError(
-                f"{kernel_file} does not expose FSA_topk_sparse_attention_bthd"
-            )
     except Exception as exc:
         with _CACHE_LOCK:
             _KERNEL_IMPORT_ERROR[ver] = exc
         raise
 
+    return module
+
+
+def get_token_routing_kernel_fn(version: Optional[str]) -> Callable:
+    """
+    Load and return `FSA_topk_sparse_attention_bthd` for the requested version.
+
+    Returns:
+        Callable with signature matching kernels-final FSA wrapper.
+    """
+    ver = normalize_kernel_version(version)
+
+    with _CACHE_LOCK:
+        if ver in _KERNEL_FN_CACHE:
+            return _KERNEL_FN_CACHE[ver]
+
+    module = _load_kernel_module(ver)
+    fn = getattr(module, "FSA_topk_sparse_attention_bthd", None)
+    if fn is None:
+        exc = AttributeError(
+            f"{_KERNEL_FILES[ver]} does not expose FSA_topk_sparse_attention_bthd"
+        )
+        with _CACHE_LOCK:
+            _KERNEL_IMPORT_ERROR[ver] = exc
+        raise exc
+
     with _CACHE_LOCK:
         _KERNEL_FN_CACHE[ver] = fn
     return fn
 
+
+def get_token_routing_weighted_kernel_fn(version: Optional[str]) -> Optional[Callable]:
+    """
+    Load and return `FSA_topk_sparse_attention_weighted_bthd` for the requested version.
+
+    Returns:
+        Callable when the kernel version implements fused weighted MoE attention,
+        otherwise `None`.
+    """
+    ver = normalize_kernel_version(version)
+
+    with _CACHE_LOCK:
+        if ver in _WEIGHTED_KERNEL_FN_CACHE:
+            return _WEIGHTED_KERNEL_FN_CACHE[ver]
+
+    module = _load_kernel_module(ver)
+    fn = getattr(module, "FSA_topk_sparse_attention_weighted_bthd", None)
+    with _CACHE_LOCK:
+        _WEIGHTED_KERNEL_FN_CACHE[ver] = fn
+    return fn

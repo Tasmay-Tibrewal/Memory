@@ -541,7 +541,7 @@ class MemoryTransformer(nn.Module):
                         tokens_per_chapter = mem_cfg.num_memory_tokens // mem_cfg.num_chapters
 
                         if strategy == "token":
-                            chapter_indices_global, chapter_weights_global, router_losses = router.route_token_level(
+                            chapter_indices_global, chapter_weights, router_losses = router.route_token_level(
                                 hidden_states=hidden_states,
                                 return_losses=self.training,
                                 exclude_prefix_chapters=mem_cfg.num_shared_chapters,
@@ -593,17 +593,34 @@ class MemoryTransformer(nn.Module):
                                 "shared_memory": shared_memory,
                                 "routed_memory": routed_memory,
                                 "token_chapter_indices": chapter_indices_local.to(dtype=torch.int32),
-                                # Keep weights aligned to token_chapter_indices (same shape [B,T,topk]).
-                                "token_chapter_weights": chapter_weights_global.to(dtype=torch.float32),
                                 "tokens_per_chapter": int(tokens_per_chapter),
                                 "routed_scale": float(mem_cfg.routed_scaling_factor),
                                 "kernel_version": self.token_routing_kernel_version,
+                                # chapter_weights: (B, T, top_k) router-produced per-token
+                                # importance weights for each selected chapter. Used for
+                                # MoE-style weighted combination of per-chapter attention
+                                # outputs. When present, each chapter's cross-attention is
+                                # computed independently and mixed by these weights; when
+                                # None, all chapters are attended jointly in a single pass.
+                                "chapter_weights": chapter_weights,
                             }
                             memory = None
 
-                        # Use router-native strategies during training/prefill; rolling/hybrid remain separate inference paths.
-                        elif self.training or (not use_cache) or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}:
-                            router.routing_strategy = mem_cfg.routing_strategy_train if self.training else strategy
+                        # Use router-native strategies during training and non-cached
+                        # eval/prefill. rolling/hybrid require decode-time cache, so
+                        # when use_cache=False we fall back to sequence routing.
+                        elif (
+                            self.training
+                            or strategy in {"sequence", "sequence-rolling", "sequence_rolling"}
+                            or ((not use_cache) and strategy in {"rolling", "hybrid"})
+                        ):
+                            if self.training:
+                                effective_strategy = mem_cfg.routing_strategy_train
+                            elif (not use_cache) and strategy in {"rolling", "hybrid"}:
+                                effective_strategy = "sequence"
+                            else:
+                                effective_strategy = strategy
+                            router.routing_strategy = effective_strategy
                             chapter_indices, chapter_weights, router_losses = router(
                                 hidden_states,
                                 return_losses=self.training,

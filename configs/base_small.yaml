@@ -9,17 +9,17 @@
 
 model:
   # Architecture
-  hidden_dim: 1024
-  num_heads: 16
+  hidden_dim: 512
+  num_heads: 8
   num_kv_heads: 4 # GQA KV heads (null => use num_heads)
-  num_layers: 32
-  intermediate_dim: 3172
+  num_layers: 30
+  intermediate_dim: 1536
   vocab_size: 49152
-  max_seq_len: 8192
+  max_seq_len: 2048
   max_position_embeddings: null # Optional alias; if set it overrides max_seq_len
 
   # Tokenizer (must match vocab_size for from-scratch)
-  tokenizer_name: HuggingFaceTB/SmolLM2-135M-Instruct
+  tokenizer_name: HuggingFaceTB/SmolLM2-135M
   bos_token_id: 0
   eos_token_id: 0
   pad_token_id: 0
@@ -49,10 +49,10 @@ memory:
   vanilla_mode: false
 
   # Memory bank settings
-  num_memory_tokens: 65792
+  num_memory_tokens: 16448
   memory_dim: null # Uses hidden_dim
-  memory_num_heads: 16 # null => fallback to model.num_heads for memory cross-attn
-  memory_num_kv_heads: 1 # null => fallback to model.num_kv_heads (or model.num_heads if null)
+  memory_num_heads: 8 # null => fallback to model.num_heads for memory cross-attn
+  memory_num_kv_heads: 4 # null => fallback to model.num_kv_heads (or model.num_heads if null)
   # 1 kv head for key, value -> faster inference, lesser overhead.
   # also memory savings, during training, inference is there.
 
@@ -66,26 +66,27 @@ memory:
 
   # Chapter routing (MoE-style sparse access)
   use_chapters: true
-  num_chapters: 514 # 512 (to be routed) + 2 (shared)
+  num_chapters: 514 # 256 (to be routed) + 1 (shared)
   top_k_chapters: 8
   num_shared_chapters: 2 # First N chapters are always included for every sample
   routed_scaling_factor: 5 # Scales routed chapter weights relative to shared chapters
   normalize_shared_routed_before_mixing: true # Normalize shared/routed vectors separately before weighted mixing
   shared_routed_norm_type: rms # rms/layernorm
   shared_routed_norm_eps: 1e-6
-  # scaled to 5, because 2 shared chapters weighed as 2, and 8 routed chapter as 1
+  # scaled to 5, because 1 shared chapter weighed as 1, and 4 routed chapter as 1
   # so to compensate, we need 2x by default, then since we want to rely more on routed chapters, we scale them by 2.5x further
   # 2 * 2.5 = 5, this 2.5x taken from glm-4.7 config, and is sp. imp. for us, because we need to rely heavily on sparse knowledge.
   # giving more imp. to routed tokens and lesser to shared common ones.
-  routing_strategy_train: token
-  routing_strategy_inference: token
+  routing_strategy_train: sequence
+  routing_strategy_inference: sequence
   token_routing_kernel_version: v2 # Used when routing_strategy_train/inference is token
 
   # Router losses
   use_load_balance_loss: true
   load_balance_coefficient: 0.01
   use_auxiliary_loss: false
-  use_z_loss: false
+  use_z_loss: true
+  z_loss_coefficient: 0.001
 
   # Low-rank options (disabled for full expressiveness)
   use_low_rank_memory: false
@@ -114,10 +115,10 @@ training:
   # Uncomment ONE of these dataset configurations:
 
   # Option 1: General pretraining (recommended for from-scratch)
-  dataset_name: allenai/c4
-  dataset_subset: en
+  dataset_name: Tasmay-Tib/fineweb-edu-10bt-split
+  dataset_subset: null
   dataset_split: train
-  eval_split: validation # c4 has train/validation splits
+  eval_split: eval
   text_field: text
 
   # Option 2: SlimPajama (high quality)
@@ -140,14 +141,14 @@ training:
 
   # Distributed
   distributed_strategy: ddp
-  # num_gpus: 1
+  num_gpus: 8
 
   # Training hyperparameters
-  batch_size: 128
-  gradient_accumulation_steps: 4 # smaller, since smaller train corpus
+  batch_size: 32
+  gradient_accumulation_steps: 2 # smaller, since smaller train corpus
   # num_epochs: null
-  max_steps: 10000 # 10k steps for 10B tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
-  warmup_steps: 500 # smaller warmup for smaller training corpus
+  max_steps: 9600 # 10k (9.6k) steps for 10B (9.6B) tokens (128 * 4 * 2048 => 1M tokens * 10k = 10B tokens)
+  warmup_steps: 250 # smaller warmup for smaller training corpus
 
   # Optimizer
   optimizer: adamw
@@ -162,7 +163,7 @@ training:
   min_lr_ratio: 0.1
   # wsd_stable_ratio is over-riden by decay_start_ratio and warmup_steps
   wsd_stable_ratio: 0.0  # Warmup -> x% stable (or auto stable min to 0, if over-written) -> decay
-  decay_start_ratio: 0.8 # Optional global override for decay start (ratio of steps till decay start)
+  decay_start_ratio: 0.85 # Optional global override for decay start (ratio of steps till decay start)
   # resolved decay start overrides stable, stable = total - (warmup + decay steps)
   # decay_start_step: 2000
 
@@ -171,9 +172,9 @@ training:
 
   # Checkpointing
   gradient_checkpointing: true
-  save_steps: 2000
+  save_steps: 100
   eval_steps: 100
-  save_total_limit: 3 # Set null to keep all checkpoints
+  save_total_limit: 100 # Set null to keep all checkpoints
 
   # Logging
   logging_steps: 10

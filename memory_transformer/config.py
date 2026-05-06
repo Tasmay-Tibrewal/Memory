@@ -177,6 +177,9 @@ class TrainingConfig:
     
     # === Learning rates (separate for different components) ===
     memory_lr: float = 1e-4
+    # Optional override for memory-bank parameters only. If None, memory banks
+    # use memory_lr.
+    memory_bank_lr: Optional[float] = None
     lora_lr: float = 1e-4
     base_model_lr: float = 1e-5
     
@@ -255,7 +258,11 @@ class TrainingConfig:
     
     # === Output ===
     output_dir: str = "./outputs"
+    # Resume full training state (model + optimizer + scheduler + trainer metadata).
     resume_from_checkpoint: Optional[str] = None
+    # Initialize model weights from checkpoint but start a fresh run:
+    # optimizer/scheduler/trainer state are NOT restored (global_step starts at 0).
+    init_from_checkpoint: Optional[str] = None
 
 
 @dataclass 

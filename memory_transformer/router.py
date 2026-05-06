@@ -400,8 +400,8 @@ class TokenLevelRouter(nn.Module):
             router_probs, self.top_k, dim=-1
         )  # Both: (batch, seq, top_k)
         
-        # Normalize
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        # Normalize (clamp_min guards against fp16 underflow to zero)
+        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         
         return top_k_indices, top_k_weights
 
@@ -482,7 +482,7 @@ class RollingRouter(nn.Module):
         top_k_weights, top_k_indices = torch.topk(
             router_probs, self.top_k, dim=-1
         )
-        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+        top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         
         return top_k_indices, top_k_weights, combined
 

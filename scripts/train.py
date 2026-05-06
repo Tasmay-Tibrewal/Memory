@@ -35,7 +35,18 @@ def main():
         default=None,
         help="Path to checkpoint to resume from",
     )
+    parser.add_argument(
+        "--init_from",
+        type=str,
+        default=None,
+        help=(
+            "Path to checkpoint to initialize model weights only (fresh run: "
+            "optimizer/scheduler/global_step are reset)."
+        ),
+    )
     args = parser.parse_args()
+    if args.resume and args.init_from:
+        parser.error("--resume and --init_from are mutually exclusive.")
     
     # Load config
     config = load_config(args.config)
@@ -43,7 +54,9 @@ def main():
     # Override resume if specified
     if args.resume:
         config.training.resume_from_checkpoint = args.resume
-    
+    if args.init_from:
+        config.training.init_from_checkpoint = args.init_from
+
     # Create trainer and train
     trainer = Trainer(config)
     trainer.train()

@@ -2,6 +2,18 @@
 __pycache__
 .ruff_cache
 .claude/
+.python-version
+ddp_debug.log
+# outputs/
+*.bin
+*.pkl
+*.pt
+*.safetensors
+wandb/
+smoke*/
+smoke*.*
+.tmp_upstream/
+checkpoints/
 # some kernel testing -> not required for the repo
 native-sparse-attention/
 Flash-Sparse-Attention/
